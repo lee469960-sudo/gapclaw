@@ -11,8 +11,8 @@ from app.deps import get_session_user
 from app.models import User, Agent, ChatMessage, ChatNote, ChatSummary, AgentTick
 from app.schemas import ok, fail
 from app.security import new_id, now_str
-from app.services.react_engine import stop_chat, hub, is_running, generate_session_summary
-from app.services.agent_runtime import run_agent
+from app.services.agent_runtime import stop_chat, hub, is_running, run_agent
+from app.services.session_summary import generate_session_summary
 from app.services import tick_scheduler
 
 logger = logging.getLogger(__name__)

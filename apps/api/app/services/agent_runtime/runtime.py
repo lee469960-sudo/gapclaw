@@ -714,7 +714,7 @@ async def run_agent(
     from app.models import LLMResource, Sandbox, ChatNote
     from app.services.agent_runtime.context import AgentContext
     from app.services.agent_runtime.utils import _bound_mcp_names
-    from app.services.task_policy import load_skill_mds
+    from app.services.skill_loader import load_skill_mds
 
     llm = db.query(LLMResource).filter(LLMResource.id == agent.llm_id).first()
     sandbox = db.query(Sandbox).filter(Sandbox.id == agent.sandbox_id).first()

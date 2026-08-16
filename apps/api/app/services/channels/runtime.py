@@ -14,7 +14,7 @@ from app.database import SessionLocal
 from app.models import Agent, ChatMessage, ImChannel, ImDedup, ImEventLog, ImSession
 from app.security import new_id, now_str
 from app.services.channels.base import InboundMessage, WebhookResult, create_adapter
-from app.services.react_engine import format_im_completion_reply
+from app.services.channels.reply import format_im_completion_reply
 from app.services.agent_runtime import run_agent
 from app.services.workplace import download_path
 

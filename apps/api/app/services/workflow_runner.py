@@ -5,8 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Agent, AgentGroup, GroupWorkflow
 from app.security import now_str
-from app.services.agent_runtime import run_agent
-from app.services.react_engine import stop_chat
+from app.services.agent_runtime import run_agent, stop_chat
 from app.services.group_message import parse_group_targets
 
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.deps import get_session_user, resolve_ws_user
 from app.models import User, Agent, Sandbox, SshServer
-from app.services.react_engine import hub
+from app.services.agent_runtime import hub
 from app.services import docker_service
 from app.services.ssh_service import _connect
 

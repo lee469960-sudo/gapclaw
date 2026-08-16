@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.services.intent_router import MetricIntentItem, TurnIntent, _extract_json_object
+from app.services.intent_types import MetricIntentItem, TurnIntent, _extract_json_object
 
 logger = logging.getLogger(__name__)
 _VIEW_NAME_RE = re.compile(r"\b(view_result_[a-zA-Z0-9_]+)\b", re.I)
@@ -784,24 +784,16 @@ def resolve_export_resource_whitelist(
     bind_result: BindResult | None = None,
     allow_seed: bool = False,
     gap_seed: bool = False,
-    include_column_plan_views: bool = False,
 ) -> list[str]:
     """Export whitelist from runtime bindings, never from a static view template.
 
-    ``column_plan`` is metric semantics.  Its historical ``view`` values may be
-    used by migrations/tests only when ``include_column_plan_views`` is explicit;
-    normal execution must wait for the MCP catalog and LLM binding.
+    ``column_plan`` is metric semantics; execution waits for the MCP catalog and
+    LLM binding (no static view-template fallback).
     """
-    from app.services.export_column_plan import views_from_column_plan
-
     out: list[str] = []
     for r in binding_resource_whitelist(bind_result):
         if r not in out:
             out.append(r)
-    if include_column_plan_views:
-        for v in views_from_column_plan(column_plan):
-            if v and v not in out:
-                out.append(v)
 
     intents = metric_intents_from_export_columns(column_plan, column_headers)
     bound_goals = {

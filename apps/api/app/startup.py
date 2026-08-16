@@ -112,7 +112,7 @@ def init_db(db: Session) -> None:
         engine_readme = Path(settings.data_dir) / "engine" / "react.py"
         if not engine_readme.exists():
             engine_readme.write_text(
-                '"""ReAct engine stub - runtime executes via app.services.react_engine"""\n',
+                '"""ReAct engine stub - runtime executes via app.services.agent_runtime"""\n',
                 encoding="utf-8",
             )
 
