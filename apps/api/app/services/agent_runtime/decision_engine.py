@@ -20,13 +20,6 @@ class DecisionEngine:
     # ---- Tool detection ----
 
     @staticmethod
-    def detect_action(reply: str, allowed: list[str] | None = None) -> tuple[str | None, str]:
-        """Detect the primary action type and normalized tool line from a reply."""
-        from app.services.tool_parser import detect_action_from_reply
-
-        return detect_action_from_reply(reply, allowed or [])
-
-    @staticmethod
     def extract_tool_steps(reply: str) -> list:
         """Extract structured tool steps from an LLM reply."""
         from app.services.tool_parser import extract_tool_steps
@@ -34,23 +27,9 @@ class DecisionEngine:
         return extract_tool_steps(reply)
 
     @staticmethod
-    def looks_like_tool_call(text: str) -> bool:
-        """True if the text contains tool-call markers (MCP:/SHELL:/WRITE: etc.)."""
-        t = text or ""
-        return bool(
-            re.search(r"(?im)^\s*(MCP|SHELL|WRITE|READ|PATCH|THINK|HTTPMCP)\s*[:：]", t)
-            and not re.search(r"(?im)^\s*FINAL\s*[:：]", t)
-        )
-
-    @staticmethod
     def is_final_reply(reply: str) -> bool:
         """True if the reply is a FINAL (task complete)."""
         return bool(re.search(r"(?im)^\s*FINAL\s*[:：]", reply or ""))
-
-    @staticmethod
-    def is_plan_reply(reply: str) -> bool:
-        """True if the reply contains a PLAN block."""
-        return bool(re.search(r"(?im)^\s*PLAN\s*[:：]", reply or ""))
 
     # ---- Reply cleaning ----
 

@@ -13,7 +13,6 @@ from app.services.agent_runtime.hub import (
 )
 from app.services.agent_runtime.runtime import AgentRuntime, run_agent
 from app.services.agent_runtime.loop_state import AgentLoopState
-from app.services.agent_runtime.message_manager import MessageManager
 from app.services.agent_runtime.system_prompt import SystemPromptBuilder
 from app.services.agent_runtime.tool_executor import ToolExecutor
 from app.services.agent_runtime.tool_router import ToolRouter
@@ -37,7 +36,6 @@ __all__ = [
     "AgentLoopState",
     "ContextManager",
     # Managers
-    "MessageManager",
     "SystemPromptBuilder",
     "ToolExecutor",
     "ToolRouter",

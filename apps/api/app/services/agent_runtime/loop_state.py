@@ -6,6 +6,8 @@ protocol/execution fields survive; no phase/budget/verification trackers.
 
 from dataclasses import dataclass, field
 
+_PROGRESS_MAX_LINES = 80
+
 
 @dataclass
 class AgentLoopState:
@@ -19,3 +21,14 @@ class AgentLoopState:
     progress_lines: list[str] = field(default_factory=list)
     ran_any_tool: bool = False
     max_iters: int = 50
+
+    def add_progress(self, line: str) -> None:
+        """Append a progress line, avoiding dupes and capping length."""
+        line = (line or "").strip()
+        if not line:
+            return
+        if self.progress_lines and self.progress_lines[-1] == line:
+            return
+        self.progress_lines.append(line)
+        if len(self.progress_lines) > _PROGRESS_MAX_LINES:
+            del self.progress_lines[: -_PROGRESS_MAX_LINES]

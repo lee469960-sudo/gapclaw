@@ -6,22 +6,17 @@ or observation blocks) are O(1) — no scanning the full messages array.
 
 Layers (ordered from most stable to most volatile):
   1. IMMUTABLE_BASE   — System prompt, agent identity, long-term memory
-  2. TASK_ANCHOR      — Task spec, column plan, time window
-  3. SKILL_SNAPSHOT   — Skill markdown content
-  4. TOOLS_CATALOG    — Available tools (injected by ToolRouter)
-  5. PROGRESS_BLOCK   — Running progress (upserted, not appended)
-  6. COACH_HINT       — Dynamic coaching / phase hints (replaced each iteration)
-  7. HISTORY          — User/assistant message history (appended)
-  8. TOOL_RESULT      — Tool execution results (appended, periodically trimmed)
+  2. TOOLS_CATALOG    — Available tools (injected by ToolRouter)
+  3. PROGRESS_BLOCK   — Running progress (upserted, not appended)
+  4. COACH_HINT       — Dynamic coaching hints (replaced each iteration)
+  5. HISTORY          — User/assistant message history (appended)
+  6. TOOL_RESULT      — Tool execution results (appended, periodically trimmed)
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-
-# Token estimation: ~3.5 chars per token for Chinese-majority text (conservative).
-_CHARS_PER_TOKEN_ESTIMATE = 3.0
 
 # Default limits
 _DEFAULT_TOOL_RESULT_CLIP = 6000  # Max chars for a single tool result in context
@@ -51,13 +46,13 @@ class ContextManager:
 
     Usage::
 
-        ctx = ContextManager(messages)
-        ctx.set_base(system_prompt, memory_text)
-        ctx.set_task_anchor(task_spec_text)
+        ctx = ContextManager()
+        ctx.set_base(system_prompt=system_prompt)
+        ctx.set_tools_catalog(tools_block)
+        ctx.push_user_message(user_message)
         # ... in loop:
         ctx.push_coach_hint("try using offset=100")
         ctx.push_tool_result("工具结果:\\n...")
-        ctx.push_observation(verification)
         ctx.trim_tool_results()
     """
 
@@ -65,8 +60,6 @@ class ContextManager:
         self._messages: list[dict] = messages or []
         self._layers: dict[str, _Layer] = {
             "base": _Layer("base"),
-            "task_anchor": _Layer("task_anchor"),
-            "skill_snapshot": _Layer("skill_snapshot"),
             "tools_catalog": _Layer("tools_catalog"),
             "progress_block": _Layer("progress_block"),
             "coach_hint": _Layer("coach_hint"),
@@ -164,32 +157,6 @@ class ContextManager:
         content = "\n".join(parts)
         self._replace_layer("base", content)
 
-    # -- Layer 2: Task anchor --
-
-    def set_task_anchor(self, content: str) -> None:
-        """Set the task anchor layer (task spec, column plan, time window).
-
-        Call once after export context initialization. This is immutable for the run.
-        """
-        if not content.strip():
-            return
-        self._append_system(f"【任务规范】\n{content.strip()}", "task_anchor")
-
-    # -- Layer 3: Skill snapshot --
-
-    def set_skill_snapshot(self, skill_mds: list[str] | None = None, skill_snap: str = "") -> None:
-        """Set the skill snapshot layer. Call once before the main loop."""
-        parts = []
-        if skill_mds:
-            for i, md in enumerate(skill_mds, start=1):
-                parts.append(f"## Skill {i}\n{md}")
-        if skill_snap and skill_snap.strip():
-            parts.append(skill_snap.strip())
-        if not parts:
-            return
-        content = "【已加载能力】\n" + "\n---\n".join(parts)
-        self._append_system(content, "skill_snapshot")
-
     # -- Layer 4: Tools catalog --
 
     def set_tools_catalog(self, tools_block: str) -> None:
@@ -200,12 +167,6 @@ class ContextManager:
         if not tools_block.strip():
             return
         self._append_system(f"【可用工具】\n{tools_block.strip()}", "tools_catalog")
-
-    def refresh_tools_catalog(self, tools_block: str) -> None:
-        """Replace the tools catalog mid-run (e.g., after phase change)."""
-        if not tools_block.strip():
-            return
-        self._replace_layer("tools_catalog", f"【可用工具】\n{tools_block.strip()}")
 
     # -- Layer 5: Progress block --
 
@@ -231,40 +192,7 @@ class ContextManager:
             return
         self._replace_layer("coach_hint", hint.strip())
 
-    def clear_coach_hint(self) -> None:
-        """Remove the coach hint layer entirely."""
-        layer = self._layers["coach_hint"]
-        if not layer.present:
-            return
-        del self._messages[layer.start : layer.end]
-        shift = layer.count
-        for name, l in self._layers.items():
-            if l.present and l.start >= layer.end:
-                l.start -= shift
-                l.end -= shift
-        layer.start = layer.end = -1
-        self._version += 1
-
     # -- Layer 7: History --
-
-    def push_history(self, messages: list[dict]) -> None:
-        """Append pre-existing chat history messages (user + assistant pairs).
-
-        Call once during initialization, before the main loop.
-        """
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "assistant":
-                self._append_assistant(content)
-            else:
-                idx = len(self._messages)
-                self._messages.append({"role": role, "content": content})
-                layer = self._layers["history"]
-                if not layer.present:
-                    layer.start = idx
-                layer.end = idx + 1
-                self._version += 1
 
     def push_user_message(self, content: str) -> None:
         """Append the current user message to history."""
@@ -343,50 +271,6 @@ class ContextManager:
             if len(content) > cap:
                 self._messages[i]["content"] = _shrink_content(content, cap)
         self._version += 1
-
-    def trim_for_export(self) -> None:
-        """Trim with export-specific (more aggressive) limits."""
-        self.trim_tool_results(keep_recent=8, cap=800)
-
-    # -- Inspection --
-
-    def token_estimate(self) -> int:
-        """Rough token count of the full messages array.
-
-        Uses ~3.5 chars/token for mixed Chinese/English text.
-        """
-        total = 0
-        for m in self._messages:
-            total += len(str(m.get("content", "")))
-        return max(1, int(total / _CHARS_PER_TOKEN_ESTIMATE))
-
-    def layer_summary(self) -> dict[str, dict]:
-        """Return layer metadata for debugging / budget tracking."""
-        result = {}
-        for name, layer in self._layers.items():
-            if not layer.present:
-                result[name] = {"present": False, "messages": 0, "chars": 0}
-            else:
-                chars = sum(
-                    len(str(self._messages[i].get("content", "")))
-                    for i in range(layer.start, layer.end)
-                )
-                result[name] = {
-                    "present": True,
-                    "messages": layer.count,
-                    "chars": chars,
-                }
-        return result
-
-    def debug_dump(self) -> str:
-        """Human-readable layer summary for tracing."""
-        lines = [f"ContextManager v{self._version} — {len(self._messages)} messages"]
-        for name, info in self.layer_summary().items():
-            if info["present"]:
-                lines.append(
-                    f"  [{name}] {info['messages']} msgs, {info['chars']} chars"
-                )
-        return "\n".join(lines)
 
 
 def _shrink_content(content: str, cap: int) -> str:

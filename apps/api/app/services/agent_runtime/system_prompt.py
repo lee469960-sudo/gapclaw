@@ -115,11 +115,10 @@ class SystemPromptBuilder:
             path_rule = (
                 f"【路径规则】过程产物全部写入 `task/<毫秒时间戳>/`（JSON/CSV 文本）；"
                 + (
-                    f"最终交付的 xlsx：优先用 SHELL（pandas/openpyxl）写入当前目录 `{save_dir}/`；"
+                    f"最终交付的 xlsx：用 SHELL（pandas/openpyxl）写入当前目录 `{save_dir}/`；"
                     if has_shell else
-                    "WRITE 会自动创建父目录；最终 xlsx 由平台根据 task JSON/CSV 落盘；"
+                    "最终交付文件用 WRITE 写入当前目录；"
                 ) +
-                f"若未写出，平台才按 task JSON 回退合并。"
                 f"禁止 WRITE 直接写 *.xlsx/*.pdf 等二进制；禁止把分片堆到当前目录；禁止再套 `workplace/`。"
             )
             write_example = "WRITE: task/<毫秒时间戳>/final_data.json"
@@ -127,18 +126,13 @@ class SystemPromptBuilder:
             path_rule = (
                 "【路径规则】过程产物全部写入 `task/<毫秒时间戳>/`（JSON/CSV 文本）；"
                 + (
-                    "最终交付的 xlsx：优先用 SHELL（pandas/openpyxl）写入当前目录（工作区根）；"
+                    "最终交付的 xlsx：用 SHELL（pandas/openpyxl）写入当前目录（工作区根）；"
                     if has_shell else
-                    "WRITE 会自动创建父目录；最终 xlsx 由平台根据 task JSON/CSV 落盘；"
+                    "最终交付文件用 WRITE 写入当前目录；"
                 ) +
-                "若未写出，平台才按 task JSON 回退合并。"
                 "禁止 WRITE 直接写 *.xlsx/*.pdf 等二进制；禁止把分片堆到根目录；禁止再套 `workplace/`。"
             )
             write_example = "WRITE: task/<毫秒时间戳>/final_data.json"
-        export_strategy = (
-            "【通用策略】先 PLAN（目标/步骤/完成标准/工具预算）；"
-            "再按步骤调用工具；对照完成标准后 FINAL。优先阅读已绑定 Skill。"
-        )
         lines = [
             "【重要】每次只输出一种工具调用，且必须从行首开始，禁止使用 XML/tool_call 格式。",
             (
@@ -147,15 +141,9 @@ class SystemPromptBuilder:
                 else "【格式】WRITE:/FINAL: 必须单独占一行，不要在说明文字同一行内夹杂工具指令。"
             ),
             path_rule,
-            "【报表 FINAL】涉及数据报表/导出时，FINAL 必须精简，结构固定为：\n"
-            "开场一句「…已完成！基于真实 ClickHouse / MCP…」\n"
-            "### 导出概况（时间范围/总用户/总充值$/有下注/有卡/封禁/退款/文件大小；数字须可从 xlsx 复算）\n"
-            "### 字段说明（共 N 列：# | 列名 | 数据来源 | 统计方法）\n"
-            "备注（分→美元等）+ ### 下载文件\n"
-            "禁止只回工程「交付类型/TODO/统计结果」模板；禁止无落盘编造概况数字；"
-            "禁止在 FINAL 中粘贴 markdown 源数据表或样例行；"
-            "末尾数据来源只列 MCP 视图名。\n"
-            + export_strategy,
+            "【终止】每轮只能：调用一个工具，或输出一行 `FINAL: <总结>` 表示任务完成。"
+            "只输出文字、既不调工具也不 FINAL 会导致重复追问；任务无法继续时也要 `FINAL:` 说明当前进度。",
+            "【策略】先 PLAN（目标/步骤/完成标准）再按步骤调用工具；对照完成标准后输出 FINAL。优先阅读已绑定 Skill。",
             "【发文件到消息渠道】用户要把已有报表/xlsx 发到 TG/飞书/钉钉等绑定渠道时："
             "优先使用工作目录已有文件（含 task/_stale_/），禁止为此再 query_ads_view；"
             "真正推送由平台完成，不要编造渠道 API。",
@@ -232,14 +220,6 @@ class SystemPromptBuilder:
     # ---- Static hint / coach builders ----
 
     @staticmethod
-    def build_save_dir_hint(save_dir: str) -> str:
-        """Build the save-directory system hint."""
-        return (
-            f"【保存目录】用户已选中 `{save_dir}` 作为当前目录："
-            f"仅最终交付文件写入 `{save_dir}/`；过程产物写入 `task/<毫秒时间戳>/`。"
-        )
-
-    @staticmethod
     def build_workplace_listing_hint(listing: str) -> str:
         """Build the workplace directory listing system hint."""
         lines = listing.splitlines()
@@ -251,46 +231,8 @@ class SystemPromptBuilder:
         )
 
     @staticmethod
-    def build_tools_header(tools_desc: str) -> str:
-        """Truncate and wrap tools description into the system message."""
-        desc = tools_desc
-        if len(desc) > 12000:
-            desc = desc[:11000] + "\n…(工具说明已截断)"
-        return f"可用工具:\n{desc}"
-
-    @staticmethod
     def build_skill_snapshot(skill_mds: list[tuple[str, str]]) -> str | None:
         """Build a skill snapshot text from skill markdown tuples."""
         if not skill_mds:
             return None
         return "\n".join(f"{n}\n{m}" for n, m in skill_mds)
-
-    # ---- Summary clamping ----
-
-    @staticmethod
-    def clamp_summary_text(text: str, max_chars: int) -> str:
-        """Truncate rolling summary text to max_chars, preferring complete sentences."""
-        t = (text or "").strip()
-        if len(t) <= max_chars:
-            return t
-        cut = t[:max_chars].rstrip()
-        # Try to break at last sentence end
-        for sep in ("\n\n", "\n", "。", ". ", "；", "; "):
-            idx = cut.rfind(sep)
-            if idx > max_chars // 2:
-                cut = cut[: idx + len(sep)].rstrip()
-                break
-        return cut + "\n…(总结已截断)"
-
-    @staticmethod
-    def summary_max_chars(agent: Agent) -> int:
-        """Compute max chars for rolling summary based on agent config."""
-        history_len = int(getattr(agent, "history_length", None) or 30)
-        base = 2000
-        if history_len > 50:
-            base = 3000
-        elif history_len > 20:
-            base = 2000
-        else:
-            base = 1200
-        return min(base, 4000)

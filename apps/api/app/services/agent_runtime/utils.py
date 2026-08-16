@@ -1,7 +1,7 @@
 """Minimal shared helpers for the single-engine agent_runtime.
 
-Only the non-export utilities that survived the consolidation: message-trimming
-constants (MessageManager) and MCP tool metadata helpers (SystemPromptBuilder).
+Only the non-export utilities that survived the consolidation: MCP tool metadata
+helpers used by SystemPromptBuilder.
 """
 
 from __future__ import annotations
@@ -13,24 +13,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
     from app.models import MCP
-
-# --- Message trimming constants (used by MessageManager) ---
-_TRIM_TOOL_MSG_EVERY = 10
-_KEEP_RECENT_TOOL_MSGS = 12
-_KEEP_RECENT_TOOL_MSGS_EXPORT = 8
-_OLD_TOOL_MSG_CAP = 500
-_OLD_TOOL_MSG_CAP_EXPORT = 800
-_PROGRESS_MAX_LINES = 80
-
-_PATH_IN_TEXT_RE = re.compile(
-    r"(?:task/[\w.\-/=]+|(?:[\w.\-]+/)*[\w.\-]+\.(?:xlsx|xls|xlsm|csv|pdf|zip|md|json))",
-    re.I,
-)
-_IMPORTANT_LINE_RE = re.compile(
-    r"(全文已落盘:|可用 READ:|已写入|\.xlsx|\.xls|\.xlsm|\.csv|\.pdf|\.zip|task/)",
-    re.I,
-)
-
 
 # ---- MCP tool metadata cache ----
 

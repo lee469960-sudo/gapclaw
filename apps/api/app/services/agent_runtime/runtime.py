@@ -413,7 +413,6 @@ class AgentRuntime:
         from app.services.agent_runtime.decision_engine import DecisionEngine
         from app.services.agent_runtime.hub import ChatStopped, _running
         from app.services.agent_runtime.loop_state import AgentLoopState
-        from app.services.agent_runtime.message_manager import MessageManager
         from app.services.agent_runtime.system_prompt import SystemPromptBuilder
         from app.services.agent_runtime.tool_executor import ToolExecutor
         from app.services.agent_runtime.tool_router import ToolRouter
@@ -609,12 +608,13 @@ class AgentRuntime:
                 text_only_streak += 1
                 if text_only_streak == 3:
                     cm.push_coach_hint(
-                        "【提示】你已连续多轮只输出文字分析，没有执行实际操作。"
-                        "请选择一个工具推进任务，或若已完成请输出 FINAL: 总结。"
+                        "【提示】你已连续多轮只输出文字，没有调用工具也没有输出 FINAL。"
+                        "请立即：调用一个工具推进任务，或输出一行 `FINAL: <总结>` 结束本轮。"
                     )
                 elif text_only_streak >= 6:
                     cm.push_coach_hint(
-                        "【警告】已连续多轮未执行工具。若无法继续，请输出 FINAL: 说明当前进度。"
+                        "【警告】已连续多轮未执行工具。若任务已完成或无法继续，"
+                        "请现在输出 `FINAL: <当前进度/结果>` 来结束本轮。"
                     )
                 continue
 
@@ -664,9 +664,7 @@ class AgentRuntime:
                         if path not in state.saved_paths:
                             state.saved_paths.append(path)
                         state.files_written += 1
-                        MessageManager.append_progress(
-                            state.progress_lines, f"已写入 {path}",
-                        )
+                        state.add_progress(f"已写入 {path}")
 
                 cm.push_tool_result(result_text, action=action)
                 await self._append_tool_step(
