@@ -1,0 +1,309 @@
+:root {
+  --gap-bg: #f2f2f2;
+  --gap-header: #ffffff;
+  --gap-header-text: #606266;
+  --gap-header-text-hover: #303133;
+  --gap-aside: #ffffff;
+  --gap-aside-border: #e4e7ed;
+  --gap-menu-text: #606266;
+  --gap-menu-active: #409eff;
+  --gap-accent: #5fb878;
+  --gap-primary: #1e9fff;
+  --gap-card-bg: #ffffff;
+  --gap-card-border: #ebeef5;
+  --gap-text: #303133;
+  --gap-text-secondary: #606266;
+  --gap-text-muted: #909399;
+  --gap-hover-bg: #f5f7fa;
+  --gap-input-bg: #ffffff;
+  --gap-shadow: rgba(0, 0, 0, 0.06);
+  --gap-chat-top-bg: #ffffff;
+  --gap-chat-top-text: #303133;
+  --gap-chat-body-bg: #f0f2f5;
+  --gap-chat-bubble-bg: #ffffff;
+  --gap-chat-input-bg: #ffffff;
+  --gap-chat-sidebar-bg: #fafafa;
+  --code-editor-bg: #ffffff;
+  --code-toolbar-bg: #f3f3f3;
+  --code-panel-border: #e4e7ed;
+  --code-gutter-bg: #f8f8f8;
+  --code-gutter-border: #e4e7ed;
+  --code-gutter-text: #237893;
+  --code-active-line-gutter: #ececec;
+  --code-badge-bg: #e8f3ff;
+  --code-badge-text: #409eff;
+  --code-muted-text: #909399;
+}
+
+html.dark {
+  color-scheme: dark;
+  --gap-bg: #141414;
+  --gap-header: #1a1a1a;
+  --gap-header-text: #cfd3dc;
+  --gap-header-text-hover: #ffffff;
+  --gap-aside: #1a1a1a;
+  --gap-aside-border: #2d2d2d;
+  --gap-menu-text: #b0b3b8;
+  --gap-menu-active: #5fb878;
+  --gap-accent: #5fb878;
+  --gap-primary: #409eff;
+  --gap-card-bg: #1d1d1d;
+  --gap-card-border: #303030;
+  --gap-text: #e5eaf3;
+  --gap-text-secondary: #cfd3dc;
+  --gap-text-muted: #a3a6ad;
+  --gap-hover-bg: #262727;
+  --gap-input-bg: #262727;
+  --gap-shadow: rgba(0, 0, 0, 0.35);
+  --gap-chat-top-bg: #1a1a1a;
+  --gap-chat-top-text: #e5eaf3;
+  --gap-chat-body-bg: #141414;
+  --gap-chat-bubble-bg: #262727;
+  --gap-chat-input-bg: #262727;
+  --gap-chat-sidebar-bg: #1a1a1a;
+  --code-editor-bg: #1e1e1e;
+  --code-toolbar-bg: #252526;
+  --code-panel-border: #3c3c3c;
+  --code-gutter-bg: #1e1e1e;
+  --code-gutter-border: #3c3c3c;
+  --code-gutter-text: #858585;
+  --code-active-line-gutter: #2a2a2a;
+  --code-badge-bg: #264f78;
+  --code-badge-text: #9cdcfe;
+  --code-muted-text: #a3a6ad;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  background: var(--gap-bg);
+  color: var(--gap-text);
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* 通用页面容器 */
+.page,
+.login-card,
+.preview-box,
+.panel,
+.chat-page {
+  transition: background-color 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+
+html.dark .page,
+html.dark .panel,
+html.dark .preview-box {
+  background: var(--gap-card-bg) !important;
+  border-color: var(--gap-card-border) !important;
+  color: var(--gap-text) !important;
+}
+
+html.dark .page-title,
+html.dark .card-title,
+html.dark .panel-title,
+html.dark .section-title,
+html.dark .exec-title,
+html.dark .step-title {
+  color: var(--gap-text) !important;
+}
+
+html.dark .card,
+html.dark .card-grid .card {
+  background: var(--gap-card-bg) !important;
+  border-color: var(--gap-card-border) !important;
+}
+
+html.dark .card-meta,
+html.dark .field-hint,
+html.dark .label,
+html.dark .preview-desc {
+  color: var(--gap-text-muted) !important;
+}
+
+html.dark .header-left .page-title,
+html.dark .page-icon {
+  color: var(--gap-text) !important;
+}
+
+html.dark .login-card {
+  background: var(--gap-card-bg) !important;
+  color: var(--gap-text) !important;
+}
+
+html.dark .login-card h1 {
+  color: var(--gap-text) !important;
+}
+
+html.dark .preview-header {
+  background: #2a2a2a !important;
+}
+
+html.dark .preview-box,
+html.dark .preview-footer {
+  background: var(--gap-hover-bg) !important;
+  border-color: var(--gap-card-border) !important;
+}
+
+/* 会话页深色模式 */
+html.dark .chat-page .exec-card,
+html.dark .chat-page .msg-bubble.assistant {
+  background: var(--gap-chat-bubble-bg) !important;
+  border-color: var(--gap-card-border) !important;
+}
+
+html.dark .chat-page .exec-header {
+  background: var(--gap-hover-bg) !important;
+}
+
+html.dark .chat-page .msg-bubble.assistant .content,
+html.dark .chat-page .msg-bubble.assistant .md-render,
+html.dark .chat-page .md-body p,
+html.dark .chat-page .md-body li,
+html.dark .chat-page .md-body h1,
+html.dark .chat-page .md-body h2,
+html.dark .chat-page .md-body h3,
+html.dark .chat-page .md-body td,
+html.dark .chat-page .md-body th {
+  color: var(--gap-text) !important;
+}
+
+html.dark .chat-page .md-body em {
+  color: var(--gap-text-muted) !important;
+}
+
+html.dark .chat-page .md-body code {
+  background: var(--gap-hover-bg) !important;
+  color: var(--gap-text) !important;
+}
+
+html.dark .chat-page .md-body pre {
+  background: var(--md-code-bg, #1e1e1e) !important;
+  color: var(--md-code-fg, #d4d4d4) !important;
+}
+
+html.dark .chat-page .md-code-block > pre {
+  background: var(--md-code-bg) !important;
+  color: var(--md-code-fg) !important;
+}
+
+html.dark .chat-page .md-body th,
+html.dark .chat-page .md-body tr:nth-child(even) td {
+  background: var(--gap-hover-bg) !important;
+}
+
+html.dark .chat-page .md-table-wrap,
+html.dark .chat-page .md-table-fold {
+  border-color: var(--gap-card-border) !important;
+  background: var(--gap-hover-bg);
+}
+
+html.dark .chat-page .md-body a.md-file-chip {
+  background: var(--gap-card-bg) !important;
+  border-color: var(--gap-card-border) !important;
+  color: var(--gap-text) !important;
+}
+
+html.dark .chat-page .md-file-chip-name {
+  color: var(--el-color-primary) !important;
+}
+
+html.dark .chat-page .chat-input .el-textarea__inner {
+  background-color: var(--gap-chat-input-bg) !important;
+  color: var(--gap-text) !important;
+  box-shadow: 0 0 0 1px var(--gap-card-border) inset;
+}
+
+html.dark .workplace-panel {
+  background: var(--gap-chat-sidebar-bg) !important;
+  border-color: var(--gap-card-border) !important;
+}
+
+html.dark .workplace-panel .panel-header,
+html.dark .workplace-panel .nav-row,
+html.dark .workplace-panel .file-item {
+  background: var(--gap-card-bg) !important;
+  border-color: var(--gap-card-border) !important;
+  color: var(--gap-text);
+}
+
+html.dark .workplace-panel .title,
+html.dark .workplace-panel .file-name {
+  color: var(--gap-text);
+}
+
+html.dark .workplace-panel .file-item.is-dir:hover {
+  background: var(--gap-hover-bg) !important;
+}
+
+/* 浅色模式侧边菜单 */
+html:not(.dark) .layout .el-menu {
+  border-right: none;
+}
+
+html:not(.dark) .layout .el-sub-menu__title:hover,
+html:not(.dark) .layout .el-menu-item:hover {
+  background-color: var(--gap-hover-bg) !important;
+}
+
+/* 监控 / Docker 页面 */
+html.dark .stat-card {
+  background: var(--gap-card-bg) !important;
+  border-color: var(--gap-card-border) !important;
+}
+
+html.dark .stat-value,
+html.dark .name-cell {
+  color: var(--gap-text) !important;
+}
+
+html.dark .stat-label,
+html.dark .stat-sub,
+html.dark .tab-summary,
+html.dark .update-time {
+  color: var(--gap-text-muted) !important;
+}
+
+html.dark .biz-item {
+  background: var(--gap-hover-bg) !important;
+  border: 1px solid transparent;
+}
+
+html.dark .biz-item.highlight {
+  background: rgba(64, 158, 255, 0.12) !important;
+  border-color: rgba(64, 158, 255, 0.35) !important;
+}
+
+html.dark .biz-num {
+  color: var(--gap-text) !important;
+}
+
+html.dark .biz-item.highlight .biz-num {
+  color: var(--gap-primary) !important;
+}
+
+html.dark .info-label,
+html.dark .biz-label {
+  color: var(--gap-text-muted) !important;
+}
+
+html.dark .info-value,
+html.dark .info-value.platform {
+  color: var(--gap-text) !important;
+}
+
+html.dark .panel-title {
+  border-bottom-color: var(--gap-card-border) !important;
+}
+
+html.dark .image-cell {
+  color: var(--gap-text-secondary) !important;
+}
+
+html.dark .data-table :deep(.el-table__header th) {
+  background: var(--gap-hover-bg) !important;
+  color: var(--gap-text-secondary) !important;
+}

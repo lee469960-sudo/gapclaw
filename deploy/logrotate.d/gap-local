@@ -1,0 +1,21 @@
+# Template: __GAP_ROOT__ replaced by scripts/start-local.sh → .local/logrotate.conf
+# Manual: sed "s|__GAP_ROOT__|$PWD|g" deploy/logrotate.d/gap-local > .local/logrotate.conf
+#         logrotate -s .local/logrotate.status .local/logrotate.conf
+# macOS: brew install logrotate
+# Policy: size 50M × rotate 7 ≈ ≥7 days when under 50MB/day
+
+__GAP_ROOT__/.local/logs/api.log
+__GAP_ROOT__/.local/logs/web.log
+__GAP_ROOT__/.local/logs/cloudflared.log
+__GAP_ROOT__/.local/logs/cloudflared-watch.log
+{
+    size 50M
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+}

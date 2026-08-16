@@ -1,0 +1,18 @@
+# Named Cloudflare Tunnel template for GAP local/prod API.
+# Fill TUNNEL_ID / credentials path via env or copy to a concrete file.
+# Run: cloudflared tunnel --config deploy/cloudflared/config.yml run
+#
+# Preferred production path: CLOUDFLARE_TUNNEL_TOKEN (no credentials-file needed):
+#   cloudflared tunnel run --token "$CLOUDFLARE_TUNNEL_TOKEN"
+
+tunnel: REPLACE_TUNNEL_ID
+credentials-file: /path/to/REPLACE_TUNNEL_ID.json
+
+# Connection resilience
+retries: 5
+grace-period: 30s
+
+ingress:
+  - hostname: REPLACE_PUBLIC_HOSTNAME
+    service: http://127.0.0.1:8000
+  - service: http_status:404

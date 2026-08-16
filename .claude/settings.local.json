@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n -E \"^\\(def |class |    def |# ===|# ---|## |# [A-Z][A-Za-z ]{5,}\\)\" /Users/lizhidong/ai-agent-platfrom/apps/api/app/services/react_engine.py)",
+      "Bash(grep -n -E \"^\\\\s{4,8}# |for llm_iter|while |async for|_enter_export_|phase ==|export_phase\" /Users/lizhidong/ai-agent-platfrom/apps/api/app/services/react_engine.py)",
+      "Bash(awk -F: '$1>8105 && $1<16062')"
+    ]
+  }
+}

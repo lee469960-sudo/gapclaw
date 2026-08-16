@@ -1,0 +1,76 @@
+# 使用前：cp .env.example .env 并按环境修改
+# 远程：GAP_REGISTRY + GAP_NAMESPACE 指向阿里云 tools_claw
+# 本地：GAP_REGISTRY 留空，使用 build-local.sh 构建的 gap-api-{arch}:V0.0.1
+# 需 docker-compose 1.13+ 或 docker compose v2
+# RAG 语义检索：DB 建议使用带 pgvector 的镜像（如 pgvector/pgvector:pg16），并配置 EMBEDDING_* 环境变量
+
+version: '3.3'
+
+services:
+  db:
+    image: ${GAP_IMAGE_DB}
+    environment:
+      POSTGRES_USER: gap
+      POSTGRES_PASSWORD: gap
+      POSTGRES_DB: gap
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 宿主机 SQL 工具 / 本地 API 通过 127.0.0.1:15432 连接；容器内 API 仍用 db:5432
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gap -d gap"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    image: ${GAP_IMAGE_API}
+    environment:
+      DATABASE_URL: postgresql://gap:gap@db:5432/gap
+      SECRET_KEY: change-me-in-production
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: admin123
+      DOCKER_REGISTRY_MIRROR: ${DOCKER_REGISTRY_MIRROR:-}
+      GAP_REGISTRY: ${GAP_REGISTRY:-}
+      GAP_NAMESPACE: ${GAP_NAMESPACE:-tools_claw}
+      GAP_ARCH: ${GAP_ARCH:-amd}
+      DATA_DIR: /app/data
+      WORKPLACE_DIR: /app/data/workplaces
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      RAG_MAX_UPLOAD_MB: ${RAG_MAX_UPLOAD_MB:-32}
+      RAG_CANDIDATE_LIMIT: ${RAG_CANDIDATE_LIMIT:-2000}
+      DOCKER_DATA_HOST_PATH: ${DOCKER_DATA_HOST_PATH}
+      ASR_API_KEY: ${ASR_API_KEY:-}
+      ASR_BASE_URL: ${ASR_BASE_URL:-}
+      ASR_MODEL: ${ASR_MODEL:-whisper-1}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      - ${GAP_DATA_DIR:-./data}:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  web:
+    image: ${GAP_IMAGE_WEB}
+    ports:
+      - "5173:8080"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
