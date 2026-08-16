@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from app.agent.models import Agent
     from app.models.mcp import MCP
     from app.models.skill import Skill
-    from app.services.task_policy import TaskPolicy
     from sqlmodel import Session
 
 
@@ -57,31 +56,6 @@ class SystemPromptBuilder:
         if summary_text and summary_text.strip():
             parts.append(f"\n\n会话滚动总结:\n{summary_text.strip()}")
         return "\n".join(parts)
-
-    # ---- Model understanding (identity + task routing) ----
-
-    @staticmethod
-    def build_model_understanding(
-        agent: Agent | None,
-        task_policy: TaskPolicy,
-    ) -> str:
-        """Stable model-side contract: understand first, engine executes contracts."""
-        label = SystemPromptBuilder.agent_identity_label(agent)
-        desc = str(getattr(agent, "description", "") or "").strip()
-        lines = [
-            "【Agent 身份与需求理解协议】",
-            f"- 当前身份：{label}" + (f"；简介：{desc[:300]}" if desc else "。"),
-            "- Agent 基础提示词已作为最前 system 生效；回复要体现身份和职责，但禁止复述或引用基础提示词原文。",
-            "- 每轮先判断用户真实意图：寒暄/问答/澄清/文件处理/工具操作/数据导出/导出修复。",
-            "- 不要把所有对话都套成数据导出；非导出意图应自然回应、必要时提出一个澄清问题，只有需要执行时才进入通用 PLAN。",
-            "- 对导出任务，模型只负责理解需求并形成契约化输入：任务类型、时间窗、人群口径、输出列、歧义和验收标准；SQL、分页、落盘、验证和修复由引擎执行。",
-            "- 若用户需求不完整，优先询问缺失约束；不要用散文 PLAN 替代 TaskSpec/ColumnPlan/Verifier。",
-        ]
-        if task_policy.export_like:
-            lines.append("- 当前路由：导出候选；请特别保留用户原始列名、时间描述和口径差异。")
-        else:
-            lines.append("- 当前路由：通用交互；除非用户明确要求导出报表，不要提导出状态机或查询图。")
-        return "\n".join(lines)
 
     # ---- Conversational (tool-free) path ----
 
@@ -125,8 +99,6 @@ class SystemPromptBuilder:
         rag_ids: list[str],
         save_dir: str = "",
         im_source: str = "",
-        export_like: bool = False,
-        strategy_blurb: str = "",
     ) -> str:
         """Build the tools description block for the system prompt.
 
@@ -163,35 +135,10 @@ class SystemPromptBuilder:
                 "禁止 WRITE 直接写 *.xlsx/*.pdf 等二进制；禁止把分片堆到根目录；禁止再套 `workplace/`。"
             )
             write_example = "WRITE: task/<毫秒时间戳>/final_data.json"
-        if strategy_blurb.strip():
-            export_strategy = strategy_blurb.strip()
-        elif export_like:
-            export_strategy = (
-                "【导出策略·强制阶段】\n"
-                "1) 发现：list_* / describe_*，最多 1 次样例 query；\n"
-                "2) 必须输出 PLAN:（目标/视图/筛选/输出列/需要资源/预算/SHELL 步骤）；\n"
-                "3) 限量 fetch：仅拉列意图/白名单资源；平台写入 task/page_N.json；"
-                "满页须 OFFSET 续翻至短页；\n"
-                + (
-                    "4) 分析：白名单齐套后优先 SHELL 写当前目录交付物；\n"
-                    if has_shell else
-                    "4) 分析：白名单齐套后写 task JSON/CSV，由平台生成最终交付物；\n"
-                ) +
-                "5) FINAL（含缺口诚实说明）。依赖以 PLAN「需要资源」+ 列计划为准，禁止默认全量拉取。\n"
-                "建议控制分页；勿在 FINAL 粘贴数据表。"
-            )
-        else:
-            export_strategy = (
-                "【通用策略】先 PLAN（目标/步骤/完成标准/工具预算）；"
-                "再按步骤调用工具；对照完成标准后 FINAL。优先阅读已绑定 Skill。"
-            )
-        if not has_shell:
-            export_strategy = export_strategy.replace(
-                "SHELL 步骤", "平台交付步骤"
-            ).replace(
-                "优先 SHELL 写当前目录交付物",
-                "由平台生成并校验当前目录交付物",
-            )
+        export_strategy = (
+            "【通用策略】先 PLAN（目标/步骤/完成标准/工具预算）；"
+            "再按步骤调用工具；对照完成标准后 FINAL。优先阅读已绑定 Skill。"
+        )
         lines = [
             "【重要】每次只输出一种工具调用，且必须从行首开始，禁止使用 XML/tool_call 格式。",
             (
@@ -301,26 +248,6 @@ class SystemPromptBuilder:
             "【当前工作目录】以下列表与左侧文件面板一致（API 持久化目录）。"
             "查看文件请优先用 READ: <相对路径>，不要用 SHELL: ls /workplace 判断文件是否存在。\n"
             f"{truncated}"
-        )
-
-    @staticmethod
-    def build_prior_exports_hint(prior_paths: list[str]) -> str:
-        """Build the recent exports hint for system prompt."""
-        return (
-            "【近期已导出文件】"
-            + "、".join(f"`{p}`" for p in prior_paths)
-            + "。若用户只要把已有报表发到 Telegram/TG，禁止再调用 query_ads_view / describe_ads_view；"
-            "直接 FINAL 说明由平台推送，或提示用户说「发给tg」。"
-        )
-
-    @staticmethod
-    def build_whitelist_hint(resource_names: list[str]) -> str:
-        """Build the resource whitelist hint for need-based queries."""
-        return (
-            "【按需拉取白名单】优先 query view/resource ∈ {"
-            + ", ".join(resource_names)
-            + "}；勿默认全量拉取/分页全表。"
-            "若 list/describe 发现更合适的资源名，以目录为准。"
         )
 
     @staticmethod

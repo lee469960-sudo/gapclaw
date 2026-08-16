@@ -13,17 +13,12 @@ Layers (ordered from most stable to most volatile):
   6. COACH_HINT       — Dynamic coaching / phase hints (replaced each iteration)
   7. HISTORY          — User/assistant message history (appended)
   8. TOOL_RESULT      — Tool execution results (appended, periodically trimmed)
-  9. OBSERVATION      — Verifier output (replaced each iteration)
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from app.services.agent_runtime.types import VerificationResult
 
 # Token estimation: ~3.5 chars per token for Chinese-majority text (conservative).
 _CHARS_PER_TOKEN_ESTIMATE = 3.0
@@ -77,7 +72,6 @@ class ContextManager:
             "coach_hint": _Layer("coach_hint"),
             "history": _Layer("history"),
             "tool_result": _Layer("tool_result"),
-            "observation": _Layer("observation"),
         }
         self._tool_result_indices: list[int] = []  # Fast lookup for trimming
         self._version: int = 0
@@ -327,43 +321,6 @@ class ContextManager:
 
         wrapped = f"{label}:\n{content.strip()}"
         return self._append_user(wrapped)
-
-    # -- Layer 9: Observation (Verifier output, replaced each iteration) --
-
-    def push_observation(self, verification: VerificationResult) -> None:
-        """Inject a structured observation from the Verifier.
-
-        This replaces the previous observation (not appended), since only the
-        most recent verification matters for the next decision.
-        """
-        status_icon = "✓" if verification.success else "✗"
-        parts = [
-            f"【上一步验证】{status_icon} confidence={verification.confidence:.0%}",
-            f"结果: {verification.reason}",
-        ]
-        if verification.matched_criteria:
-            parts.append(f"满足条件: {', '.join(verification.matched_criteria)}")
-        if verification.missed_criteria:
-            parts.append(f"未满足条件: {', '.join(verification.missed_criteria)}")
-        if verification.suggestion:
-            parts.append(f"建议: {verification.suggestion}")
-        if verification.evidence:
-            parts.append(f"证据: {verification.evidence}")
-        self._replace_layer("observation", "\n".join(parts))
-
-    def clear_observation(self) -> None:
-        """Remove the observation layer."""
-        layer = self._layers["observation"]
-        if not layer.present:
-            return
-        del self._messages[layer.start : layer.end]
-        shift = layer.count
-        for name, l in self._layers.items():
-            if l.present and l.start >= layer.end:
-                l.start -= shift
-                l.end -= shift
-        layer.start = layer.end = -1
-        self._version += 1
 
     # -- Trimming --
 
