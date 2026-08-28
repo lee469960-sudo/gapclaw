@@ -32,3 +32,10 @@ benchmark/datasets/workbuddy_official/manifest.json
 logs/
 .codex/
 .claude/settings.local.json
+
+# Production secrets (server-local only)
+deploy/.env
+*.pem
+id_rsa
+id_rsa.pub
+*.key

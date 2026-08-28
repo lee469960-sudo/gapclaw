@@ -1,0 +1,100 @@
+# Production stack: pull pre-built ACR images only (no docker build).
+# Usage:
+#   IMAGE_TAG=v1.0.0 docker compose --env-file /opt/gap/.env -f deploy/docker-compose.prod.yml up -d
+# Prefer scripts/deploy.sh v1.0.0
+
+services:
+  db:
+    image: ${IMAGE_DB}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gap}
+      POSTGRES_DB: ${POSTGRES_DB:-gap}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${GAP_DB_HOST_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gap} -d ${POSTGRES_DB:-gap}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - gap
+
+  api:
+    image: ${IMAGE_API}:${IMAGE_TAG}
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gap}:${POSTGRES_PASSWORD:-gap}@db:5432/${POSTGRES_DB:-gap}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      DOCKER_REGISTRY_MIRROR: ${DOCKER_REGISTRY_MIRROR:-}
+      GAP_REGISTRY: ${GAP_REGISTRY:-}
+      GAP_NAMESPACE: ${GAP_NAMESPACE:-tools_claw}
+      GAP_ARCH: ${GAP_ARCH:-amd}
+      DATA_DIR: /app/data
+      WORKPLACE_DIR: /app/data/workplaces
+      CODE_REPOSITORY_ALLOWLIST: '${CODE_REPOSITORY_ALLOWLIST:-[]}'
+      CODE_REPOSITORY_INTERNAL_CIDRS: '${CODE_REPOSITORY_INTERNAL_CIDRS:-[]}'
+      CODE_REPOSITORY_USE_TRANSPORT_PROXY: '${CODE_REPOSITORY_USE_TRANSPORT_PROXY:-false}'
+      CODE_REPOSITORY_ALLOW_PUBLIC_HTTP: '${CODE_REPOSITORY_ALLOW_PUBLIC_HTTP:-false}'
+      CODE_REPOSITORY_HTTP_PROXY: '${CODE_REPOSITORY_HTTP_PROXY:-}'
+      CODE_REPOSITORY_HTTPS_PROXY: '${CODE_REPOSITORY_HTTPS_PROXY:-}'
+      CODE_WORKSPACE_API_ROOT: /app/data/code-agent/runs
+      CODE_WORKSPACE_HOST_ROOT: ${GAP_DATA_DIR:-./data}/code-agent/runs
+      CODE_LOCAL_REPOSITORY_ROOTS: '["${GAP_DATA_DIR:-./data}/code-agent/repos"]'
+      CODE_TRUSTED_IMAGE_DIGESTS: '${CODE_TRUSTED_IMAGE_DIGESTS:-[]}'
+      CODE_CLAUDE_CODE_RUNTIME_ENABLED: '${CODE_CLAUDE_CODE_RUNTIME_ENABLED:-false}'
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      RAG_MAX_UPLOAD_MB: ${RAG_MAX_UPLOAD_MB:-32}
+      RAG_CANDIDATE_LIMIT: ${RAG_CANDIDATE_LIMIT:-2000}
+      DOCKER_DATA_HOST_PATH: ${DOCKER_DATA_HOST_PATH}
+      ASR_API_KEY: ${ASR_API_KEY:-}
+      ASR_BASE_URL: ${ASR_BASE_URL:-}
+      ASR_MODEL: ${ASR_MODEL:-whisper-1}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      - ${GAP_DATA_DIR:-./data}:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - gap
+
+  web:
+    image: ${IMAGE_WEB}:${IMAGE_TAG}
+    ports:
+      - "${WEB_PORT:-5173}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - gap
+
+volumes:
+  pgdata:
+
+networks:
+  gap:
+    name: gap-prod
