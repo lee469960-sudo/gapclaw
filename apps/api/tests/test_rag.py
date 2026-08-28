@@ -12,7 +12,7 @@ from app.database import Base
 from app.models import RagChunk, RagCorpus
 from app.services.rag_extract import RagExtractError, extract_text
 from app.services.rag_indexer import index_corpus, search_corpus
-from app.services.tool_parser import detect_action_from_reply, extract_tool_steps
+from app.services.tool_parser import extract_tool_steps
 
 
 class ToolParserRagTests(unittest.TestCase):
@@ -21,15 +21,6 @@ class ToolParserRagTests(unittest.TestCase):
         self.assertTrue(any(s.action == "rag_query" for s in steps))
         rag = next(s for s in steps if s.action == "rag_query")
         self.assertEqual(rag.reply, "RAG: 报销流程是什么")
-
-    def test_detect_rag_allowed(self):
-        action, reply = detect_action_from_reply("RAG: hello", ["rag_query"])
-        self.assertEqual(action, "rag_query")
-        self.assertTrue(reply.startswith("RAG:"))
-
-    def test_detect_rag_not_allowed(self):
-        action, _ = detect_action_from_reply("RAG: hello", ["shell"])
-        self.assertIsNone(action)
 
 
 class RagExtractTests(unittest.TestCase):

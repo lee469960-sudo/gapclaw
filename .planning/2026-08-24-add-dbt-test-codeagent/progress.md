@@ -1,0 +1,55 @@
+# Progress: add dbt-test CodeAgent
+
+## Log
+
+- 2026-08-24: Started discovery for operational creation of `dbt-test` CodeAgent.
+- 2026-08-24: Confirmed local SQLite database at `apps/api/data/gap.db`.
+- 2026-08-24: Confirmed `dbt-clickhouse-gamestat` skill id `2e6b6a87`.
+- 2026-08-24: Confirmed existing `dbt_test` CodeProject id `ae834a47`.
+- 2026-08-24: `git ls-remote --heads http://g.testskydata.com/system/dbt-gamestat-ck.git` failed with HTTP 502, so Manifest publish was not possible.
+- 2026-08-24: Created draft source `92d97550`, draft Manifest `6c1d79cd`, and CodeAgent `dbt-test` id `8c862281`.
+- 2026-08-24: Verified `dbt-test` serializes with `profile="code"`, `code_project_id="ae834a47"`, `skills=["2e6b6a87"]`; project availability is still `manifest_missing`.
+- 2026-08-24: Verified database assertions: one matching `dbt-test` CodeAgent row and one matching draft Manifest row.
+- 2026-08-24: API curl verification to `127.0.0.1:8000` failed with connection refused; database verification remains the completed verification source.
+- 2026-08-24: Fixed save-time `repository_source_not_allowed` by adding remote source syntax normalization for drafts and preserving strict publish validation.
+- 2026-08-24: Added regression coverage for saving an unapproved remote source as a repairable draft.
+- 2026-08-24: Added compose env passthrough for `CODE_REPOSITORY_ALLOWLIST` and `CODE_REPOSITORY_INTERNAL_CIDRS`.
+- 2026-08-24: Verified targeted tests: `84 passed` across source policy, manifest publish, and control-plane UI tests.
+- 2026-08-24: Added built-in `code-agent-runner` digest to local and deploy env files.
+- 2026-08-24: Relaxed draft save for untrusted image digest to save as a repairable draft; publish remains strict.
+- 2026-08-24: Verified `CODE_TRUSTED_IMAGE_DIGESTS` parses correctly from `apps/api/.env`, `deploy/.env`, and compose config.
+- 2026-08-24: Re-ran relevant suites: `84 passed` across source policy, manifest publish, and control-plane UI tests.
+- 2026-08-24: Reproduced publish failure as `repository_unreachable`; DB Manifest/source/Agent are correctly configured and no longer fail source allowlist or image digest validation.
+- 2026-08-24: Added explicit repository transport proxy mode (`CODE_REPOSITORY_USE_TRANSPORT_PROXY` plus `CODE_REPOSITORY_HTTP_PROXY`/`CODE_REPOSITORY_HTTPS_PROXY`) and compose/example env passthrough.
+- 2026-08-24: Added regression coverage for proxy-mode network guard behavior, Git importer proxy env/no-IP-pinning behavior, and config readiness for HTTP sources through a trusted proxy.
+- 2026-08-24: Verified targeted suites: `115 passed` across network policy, git importer, config, manifest publish, and control-plane UI tests.
+- 2026-08-24: Proxy-mode publish still returns `repository_unreachable` because direct `git ls-remote` via proxy returns HTTP 502 for both tested repository URLs.
+- 2026-08-24: Fixed a control-plane test fixture to mock router settings consistently with control-plane settings.
+- 2026-08-24: Verified CodeAgent full suite: `539 passed, 4 skipped`.
+- 2026-08-24: Fixed local `.env` for proxy-mode publishing: enabled `CODE_REPOSITORY_USE_TRANSPORT_PROXY`, set local repository HTTP/HTTPS proxy, made local data/workspace paths absolute, and created the local CodeAgent workspace directories.
+- 2026-08-24: Verified `apps/api/.env` CodeAgent security readiness is now `ready=true`.
+- 2026-08-24: Restarted local API on `127.0.0.1:8000`; health endpoint returned `{"status":"ok","version":"1.9.0-clone"}` from the host network.
+- 2026-08-24: Reproduced publish path with corrected settings: `repository_network_policy_denied` is gone; remaining publish blocker is `repository_unreachable` because `git ls-remote` through the configured proxy returns HTTP 502.
+- 2026-08-24: User confirmed UI publish now returns `repository_unreachable`; verified both current Manifest URL (`:2222`) and original no-port URL return HTTP 502 for Git Smart HTTP and `git ls-remote`.
+- 2026-08-24: Switched to no-proxy direct mode per user direction: disabled repository transport proxy in local/deploy env, added explicit public HTTP opt-in config/code/tests, and changed allowlist to `http://g.testskydata.com:80`.
+- 2026-08-24: Corrected dbt Manifest/source URL from `http://g.testskydata.com:2222/...` to canonical `http://g.testskydata.com:80/system/dbt-gamestat-ck.git`.
+- 2026-08-24: Verified targeted tests: `95 passed` across network policy, config, manifest publish, and control-plane UI.
+- 2026-08-24: Restarted local API with direct config; health is ok and CodeAgent security readiness is `ready=true`.
+- 2026-08-24: Confirmed no deploy credentials exist and current source has `credential_ref=""`; direct HTTP Git returns 401, so publish now requires a deploy credential/token.
+- 2026-08-25: Added inline Git credential creation to Manifest draft save and exposed credential label/username/password fields in the Code Projects Manifest UI.
+- 2026-08-25: Added regression coverage proving inline credential creation binds `credential_ref` to Manifest/source and does not return raw secret material.
+- 2026-08-25: Verified targeted backend suites: `50 passed` for control-plane UI + secret store, and `96 passed` for network policy/config/manifest publish/control-plane UI.
+- 2026-08-25: Verified frontend production build with `npm run build` in `apps/web`.
+- 2026-08-25: Restarted local API on `127.0.0.1:8000`; health endpoint returned `{"status":"ok","version":"1.9.0-clone"}`.
+- 2026-08-25: Implemented `policy.secret_policy` handling for source secret scan warnings: source defaults to `block`, explicit `source: "warn"` allows complete source scans with findings to publish, while patch remains `block` and output remains `redact`.
+- 2026-08-25: Updated runtime source scan validation to honor frozen run `effective_policy.secret_policy.source`, so a warning-published source snapshot can still start a CodeAgent run.
+- 2026-08-25: Updated Code Projects UI default policy JSON to show `secret_policy` explicitly.
+- 2026-08-25: Updated local `dbt_test` draft Manifest `6c1d79cd` policy to `{"network":false,"secret_policy":{"source":"warn","patch":"block","output":"redact"}}`.
+- 2026-08-25: Verified target backend suites: `107 passed` across policy layers, control plane, manifest publish, source scan gate, and control-plane UI.
+- 2026-08-25: Verified frontend production build with `npm run build`; restarted local API and health endpoint returned `{"status":"ok","version":"1.9.0-clone"}`.
+- 2026-08-25: Implemented `policy.secret_policy.source_unscannable` handling for source-only binary/unsupported scan warnings; default remains `block`, explicit `warn` allows publish with skipped path metadata.
+- 2026-08-25: Updated scanner persistence to preserve incomplete scan `failure_reason` such as `scanner_binary_unsupported` instead of masking it with `secret_detected`; warning paths are stored in `findings` with non-secret classifications while `findings_count` remains secret-only.
+- 2026-08-25: Updated runtime source scan validation to honor frozen `effective_policy.secret_policy.source_unscannable`.
+- 2026-08-25: Updated local `dbt_test` draft Manifest `6c1d79cd` policy to `{"network":false,"secret_policy":{"source":"warn","source_unscannable":"warn","patch":"block","output":"redact"}}`.
+- 2026-08-25: Verified target backend suites: `118 passed` across scanner, manifest publish, source scan gate, policy layers, control plane, and control-plane UI.
+- 2026-08-25: Verified frontend production build with `npm run build`; restarted local API and health endpoint returned `{"status":"ok","version":"1.9.0-clone"}`.

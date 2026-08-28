@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db
 from app.deps import create_session, delete_session, get_session_user, resolve_user_permissions
 from app.menu_config import APP_VERSION, MENU_GROUPS, PAGE_ROUTE_MAP
@@ -39,7 +40,7 @@ async def login(body: LoginBody, request: Request, response: Response, db: Sessi
     if not user or user.disabled or not verify_password(body.password, user.password_hash):
         return fail("用户名或密码错误")
     sid = create_session(db, user.username)
-    response.set_cookie("session_id", sid, httponly=True, max_age=720 * 3600)
+    response.set_cookie("session_id", sid, httponly=True, max_age=get_settings().session_ttl_hours * 3600)
     return ok({"redirect": "/render.cgi", "username": user.username}, "登录成功")
 
 

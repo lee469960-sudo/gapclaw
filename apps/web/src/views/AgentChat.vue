@@ -12,6 +12,12 @@
           <div v-if="isImSession" class="im-banner">
             此会话同步消息渠道（飞书等）对话；在手机端与机器人聊天也会出现在这里。
           </div>
+          <div v-if="inboundNotice" class="inbound-banner">
+            <span class="inbound-text">
+              {{ inboundNotice.sender ? inboundNotice.sender + '：' : '' }}消息渠道有新消息
+            </span>
+            <el-button link type="primary" size="small" @click="switchToInboundSession">查看</el-button>
+          </div>
         </div>
       </div>
       <div class="top-actions">
@@ -36,6 +42,59 @@
         />
       </div>
       <div class="chat-main">
+        <div v-if="agent?.profile === 'code'" class="code-agent-context">
+          <el-tag type="primary">Code Agent</el-tag>
+          <span>{{ agent.code_project_name || '项目不可访问' }}</span>
+          <el-tag :type="agent.code_project_availability?.ready ? 'success' : 'danger'">
+            Manifest {{ projectStatusLabel(agent.code_project_availability) }}
+          </el-tag>
+          <router-link
+            v-if="!agent.code_project_availability?.ready"
+            to="/code-projects"
+          >
+            管理 Code Projects
+          </router-link>
+        </div>
+        <div v-if="agent?.profile === 'code' && codeRunResult" class="code-result-banner" :class="`is-${codeRunResult.severity || 'info'}`">
+          <div class="code-result-title">
+            <el-tag :type="codeResultTagType" size="small" effect="plain">{{ codeRunResult.label }}</el-tag>
+            <span>Code run {{ shortId(codeRunResult.run_id) }}</span>
+          </div>
+          <div class="code-result-facts">
+            Manifest v{{ codeRunResult.manifest_version || '-' }} ·
+            Runtime {{ codeRuntimeLabel(codeRunResult.runtime?.coding_runtime) }} ·
+            Verifier {{ codeRunResult.verified ? '通过' : '未通过或证据不足' }} ·
+            Sealed artifact {{ codeRunResult.sealed ? '已生成' : '不可用' }}
+          </div>
+          <div v-if="codeRunResult.runtime?.coding_runtime === 'claude_code'" class="code-result-facts">
+            Preflight {{ codeRunResult.runtime?.preflight?.passed ? '通过' : '未通过或不可用' }} ·
+            Skills {{ codeRunResult.runtime?.skills?.length || 0 }} ·
+            MCP {{ codeRunResult.runtime?.mcp_servers?.length || 0 }}
+          </div>
+          <details v-if="codeRunResult.runtime?.coding_runtime === 'claude_code'" class="code-verifier-evidence">
+            <summary>Claude Code Runtime 证据</summary>
+            <pre>{{ JSON.stringify(codeRunResult.runtime || {}, null, 2) }}</pre>
+          </details>
+          <div v-if="codeRunResult.directly_adoptable && codeRunResult.artifact" class="code-result-facts">
+            Base {{ shortId(codeRunResult.artifact.base_commit) }} · Diff {{ shortId(codeRunResult.artifact.diff_hash) }}
+          </div>
+          <div v-if="codeRunResult.warning" class="code-result-warning">{{ codeRunResult.warning }}</div>
+          <div v-if="codeRunResult.failure?.reason" class="code-result-facts">
+            Failure {{ codeRunResult.failure.reason }} ·
+            Stage {{ codeRunResult.failure.stage }} ·
+            {{ codeRunResult.failure.detail }}
+          </div>
+          <details v-if="codeRunResult.terminal" class="code-verifier-evidence">
+            <summary>Verifier 证据</summary>
+            <pre>{{ JSON.stringify(codeRunResult.verifier_report || {}, null, 2) }}</pre>
+          </details>
+          <div v-if="codeRunResult.directly_adoptable && codeRunResult.artifact" class="code-result-actions">
+            <el-button size="small" @click="openCodeArtifactReview">审阅 Patch 与证据</el-button>
+            <el-button size="small" @click="downloadCodeArtifact('patch')">下载 Patch</el-button>
+            <el-button size="small" @click="downloadCodeArtifact('verifier')">下载验证报告</el-button>
+            <el-button v-if="codeRunResult.directly_adoptable" size="small" type="primary" @click="acceptCodeArtifact">接受封存工件</el-button>
+          </div>
+        </div>
         <div class="chat-body" ref="scrollRef" @scroll.passive="onChatScroll">
           <div v-if="!messages.length && !streaming" class="empty-chat">
             <el-icon :size="48" color="#dcdfe6"><ChatDotRound /></el-icon>
@@ -127,6 +186,7 @@
                   class="content md-render"
                   :class="{ 'is-empty-fallback': !String(item.m.content || '').trim() }"
                   v-html="renderMessage(item.m)"
+                  v-sql-hydrate
                   @click="onMarkdownClick"
                 />
               </div>
@@ -144,7 +204,7 @@
           <div v-if="streaming" class="msg-row assistant-row">
             <div class="agent-avatar"><span>∞</span></div>
             <div class="msg-col">
-              <div v-if="liveStepVisibleCount" class="exec-card">
+              <div class="exec-card">
                 <div class="exec-header" role="button" @click="toggleExec('live')">
                   <el-icon class="exec-arrow" :class="{ open: isExecOpen('live') }"><ArrowRight /></el-icon>
                   <span class="exec-title">{{ liveExecTitle }}</span>
@@ -161,39 +221,36 @@
                   <span class="exec-badge">{{ liveStepsBadge }}</span>
                 </div>
                 <div v-if="isExecOpen('live')" class="exec-steps">
-                  <div v-if="liveStepsView.older" class="exec-older">更早 {{ liveStepsView.older }} 步已折叠</div>
-                  <div
-                    v-for="(step, si) in liveStepsView.steps"
-                    :key="`${step.type}-${step.iteration || si}-${step.action || ''}-${si}`"
-                    v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length]"
-                    class="exec-step"
-                  >
-                    <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
+                  <div v-if="!liveStepVisibleCount" class="exec-step">
+                    <span class="step-glyph" aria-hidden="true">⏳</span>
                     <div class="step-body">
-                      <div class="step-title">{{ stepTitle(step) }}</div>
-                      <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
-                      <div v-if="step.checkpoint_path || step.sql_checkpoint_path" class="step-checkpoints">
-                        <button v-if="step.checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.checkpoint_path)">轮次记录</button>
-                        <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
-                      </div>
+                      <div class="step-title">{{ liveStatusText }} · 已用时 {{ liveElapsedSeconds }} 秒</div>
+                      <div class="step-content">{{ liveProgress.contextLabel }}</div>
                     </div>
-                    <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
-                    <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
-                    <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
+                    <el-icon class="step-status running is-loading"><Loading /></el-icon>
                   </div>
-                </div>
-              </div>
-              <div v-else class="thinking">
-                <el-progress
-                  class="exec-progress-ring"
-                  type="circle"
-                  :percentage="liveProgress.percent"
-                  :width="42"
-                  :stroke-width="4"
-                />
-                <div class="thinking-copy">
-                  <span class="thinking-text">{{ liveStatusText }} · 已用时 {{ liveElapsedSeconds }} 秒</span>
-                  <span class="thinking-context">{{ liveProgress.contextLabel }}</span>
+                  <template v-else>
+                    <div v-if="liveStepsView.older" class="exec-older">更早 {{ liveStepsView.older }} 步已折叠</div>
+                    <div
+                      v-for="(step, si) in liveStepsView.steps"
+                      :key="`${step.type}-${step.iteration || si}-${step.action || ''}-${si}`"
+                      v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length]"
+                      class="exec-step"
+                    >
+                      <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
+                      <div class="step-body">
+                        <div class="step-title">{{ stepTitle(step) }}</div>
+                        <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
+                        <div v-if="step.checkpoint_path || step.sql_checkpoint_path" class="step-checkpoints">
+                          <button v-if="step.checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.checkpoint_path)">轮次记录</button>
+                          <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
+                        </div>
+                      </div>
+                      <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
+                      <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
+                      <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
+                    </div>
+                  </template>
                 </div>
               </div>
             </div>
@@ -228,6 +285,16 @@
       :agent-id="agentId"
       :session-id="sessionId"
     />
+    <el-dialog v-model="codeReviewVisible" title="Code 工件审阅" width="80%">
+      <div v-if="codeArtifactReview" class="code-review">
+        <h4>工件哈希</h4>
+        <pre>{{ JSON.stringify(codeArtifactReview.hashes, null, 2) }}</pre>
+        <h4>Canonical Patch</h4>
+        <pre>{{ codeArtifactReview.patch || '（无代码变更）' }}</pre>
+        <h4>Verifier 证据</h4>
+        <pre>{{ JSON.stringify(codeArtifactReview.verifier_report, null, 2) }}</pre>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -245,6 +312,7 @@ import { marked } from 'marked'
 import {
   enhanceMarkdownHtml,
   extractFinalDisplayContent,
+  highlightCodeToHtml,
   toggleCodeSnippet,
   prepareMarkdownForPreview,
 } from '../utils/markdownPreview'
@@ -259,6 +327,10 @@ const router = useRouter()
 const agentId = route.params.id
 const sessionId = ref(route.query.session || '')
 const agent = ref(null)
+const codeRunResult = ref(null)
+const activeCodeRunId = ref('')
+const codeReviewVisible = ref(false)
+const codeArtifactReview = ref(null)
 const messages = shallowRef([])
 const hydratedSteps = ref({})
 const input = ref('')
@@ -275,6 +347,8 @@ const tickVisible = ref(false)
 const scrollRef = ref(null)
 const wpRef = ref(null)
 const execOpen = ref({})
+const unreadSessions = ref({})
+const inboundNotice = ref(null)
 let ws = null
 let statusTimer = null
 let statusEtag = ''
@@ -345,6 +419,73 @@ const isImSession = computed(() => {
 })
 
 const agentSandboxId = computed(() => agent.value?.sandbox || agent.value?.sandbox_id || '')
+const codeResultTagType = computed(() => {
+  const severity = codeRunResult.value?.severity
+  return severity === 'danger' ? 'danger' : severity === 'warning' ? 'warning' : severity === 'success' ? 'success' : 'info'
+})
+
+function projectStatusLabel(availability) {
+  const labels = {
+    ready: '已就绪',
+    project_disabled: '项目已停用',
+    project_environment_not_allowed: '环境不支持',
+    manifest_missing: '尚未发布',
+    manifest_invalid: 'Manifest 无效',
+    code_project_unauthorized: '项目不可访问',
+  }
+  return labels[availability?.reason] || availability?.reason || '状态未知'
+}
+
+function codeRuntimeLabel(runtime) {
+  if (runtime === 'claude_code') return 'Claude Code'
+  return 'Legacy CodeAgent'
+}
+
+async function loadCodeRunResult() {
+  if (agent.value?.profile !== 'code' || !sessionId.value) return
+  const res = await getCgi('/pages/page_agent_chat.cgi', {
+    action: 'get_code_result',
+    agent_id: agentId,
+    session_id: sessionId.value,
+    code_run_id: activeCodeRunId.value || undefined,
+  })
+  codeRunResult.value = res.data || null
+  if (res.data?.run_id) activeCodeRunId.value = res.data.run_id
+}
+
+async function openCodeArtifactReview() {
+  const artifactId = codeRunResult.value?.artifact?.id
+  if (!artifactId || !codeRunResult.value?.directly_adoptable) return
+  const res = await getCgi('/pages/page_agent_chat.cgi', {
+    action: 'review_code_artifact',
+    artifact_id: artifactId,
+  })
+  codeArtifactReview.value = res.data
+  codeReviewVisible.value = true
+}
+
+function downloadCodeArtifact(kind) {
+  const artifactId = codeRunResult.value?.artifact?.id
+  if (!artifactId || !codeRunResult.value?.directly_adoptable) return
+  const params = new URLSearchParams({
+    action: 'download_code_artifact', artifact_id: artifactId, artifact_kind: kind,
+  })
+  window.location.href = `/pages/page_agent_chat.cgi?${params.toString()}`
+}
+
+async function acceptCodeArtifact() {
+  const artifactId = codeRunResult.value?.artifact?.id
+  if (!artifactId || !codeRunResult.value?.directly_adoptable) return
+  await ElMessageBox.confirm(
+    '接受动作只记录此封存工件及其哈希，不会提交、推送或创建 PR。是否继续？',
+    '接受 Code 工件',
+    { type: 'warning' },
+  )
+  await postCgi('/pages/page_agent_chat.cgi?action=accept_code_artifact', {
+    artifact_id: artifactId,
+  })
+  ElMessage.success('已记录对封存工件的接受')
+}
 
 function messageSourceLabel(m) {
   const src = m?.meta?.source || ''
@@ -610,6 +751,7 @@ function stepTitle(step) {
 function stepGlyph(step) {
   if (step.type === 'llm') return '🤖'
   if (step.action === 'skill_loaded' || step.action === 'skill_read_md') return '📘'
+  if ((step.action || '').startsWith('code_')) return '🧰'
   if (step.action === 'no_tools' || step.action === 'no_tools_export' || step.action === 'conversational_reply') return '💬'
   if (step.type === 'info' || step.action === 'mcp_loaded') return '🔌'
   if (step.action === 'shell') return '💻'
@@ -715,6 +857,40 @@ async function downloadWorkplaceFile(relPath) {
   } catch (e) {
     ElMessage.error(e?.msg || e?.message || '下载失败')
   }
+}
+
+async function hydrateSqlBlocks(root) {
+  if (!root) return
+  const nodes = root.querySelectorAll?.('.md-sql-inline[data-sql-loaded="false"]') || []
+  if (!nodes.length) return
+  for (const node of nodes) {
+    node.setAttribute('data-sql-loaded', 'true')
+    const path = node.getAttribute('data-wp-path') || ''
+    const codeEl = node.querySelector('.md-sql-inline-code')
+    if (!path || !codeEl) continue
+    try {
+      const result = await api.get('/pages/page_agent_chat.cgi', {
+        params: { action: 'view_workplace', agent_id: agentId, path },
+      })
+      const content = result?.data?.content
+      if (content && String(content).trim()) {
+        codeEl.innerHTML = highlightCodeToHtml(content, 'sql')
+      } else {
+        codeEl.textContent = '（空文件或无内容）'
+      }
+    } catch {
+      codeEl.textContent = '（加载失败）'
+    }
+  }
+}
+
+const vSqlHydrate = {
+  mounted(el) {
+    nextTick(() => hydrateSqlBlocks(el))
+  },
+  updated(el) {
+    nextTick(() => hydrateSqlBlocks(el))
+  },
 }
 
 async function onMarkdownClick(e) {
@@ -968,6 +1144,7 @@ async function finishRunFromDone(content, { truncated = false } = {}) {
   }
   markRunFinished()
   await loadHistory({ preserveHydrationFrom: tmpKey })
+  await loadCodeRunResult()
 }
 
 async function checkStatus({ forIdlePoll = false } = {}) {
@@ -994,6 +1171,7 @@ async function checkStatus({ forIdlePoll = false } = {}) {
   }
   if (!next) userRequestedStop = false
   running.value = next
+  if (prev && !next) await loadCodeRunResult()
   if (forIdlePoll) bumpStatusBackoff(next !== prev)
   return next
 }
@@ -1111,6 +1289,39 @@ function applyStepEvent(data) {
   }
 }
 
+function profileEventToStep(data) {
+  const profile = data?.profile || {}
+  if (profile.profile !== 'code') return null
+  const phaseLabels = {
+    prepare: '准备运行环境',
+    verify_baseline: '捕获验证基线',
+    runtime_started: '启动 Claude Code Runtime',
+    skill_loaded: '加载 Claude Code Skill',
+    mcp_loaded: '加载 Claude Code MCP',
+    tool_call: 'Claude Code 工具调用',
+    file_changed: 'Claude Code 文件变化',
+    test_run: 'Claude Code 测试执行',
+    verifier_failed_retrying: 'Verifier 失败，继续 Claude Code 修复',
+    verifier_passed: 'Verifier 已通过',
+    artifact_sealed: '封存工件已生成',
+    verify: '执行验证',
+    seal: '封装可采用补丁',
+    cleanup: '清理 Sandbox',
+    terminate: '结束 Code Run',
+  }
+  const status = profile.status === 'failed'
+    ? 'error'
+    : (profile.status === 'completed' ? 'done' : 'running')
+  return {
+    type: 'info',
+    action: `code_${profile.phase || 'profile'}`,
+    title: `${phaseLabels[profile.phase] || 'CodeAgent 运行阶段'} · ${profile.status || 'running'}`,
+    status,
+    content: profile.reason || profile.summary || profile.skill_name || profile.mcp_name
+      || profile.command || profile.path || profile.artifact_id || '',
+  }
+}
+
 function startResumePoll() {
   if (resumePollTimer) return
   resumePollTimer = setInterval(async () => {
@@ -1160,7 +1371,7 @@ async function resumeIfRunning() {
     sending.value = true
     liveStatusText.value = '任务仍在运行，正在恢复进度'
     startLiveElapsed()
-    execOpen.value = { ...execOpen.value, live: false }
+    execOpen.value = { ...execOpen.value, live: true }
     startResumePoll()
     return
   }
@@ -1234,10 +1445,36 @@ function connectWs() {
       if (text) liveStatusText.value = text.replace(/\.{3}$/, '')
       startLiveElapsed()
     }
+    if (data.type === 'user_message') {
+      if (data.session_id === sessionId.value) appendIncomingUserMessage(data)
+      return
+    }
+    if (data.type === 'inbound') {
+      if (data.session_id !== sessionId.value) {
+        unreadSessions.value = {
+          ...unreadSessions.value,
+          [data.session_id]: (unreadSessions.value[data.session_id] || 0) + 1,
+        }
+        inboundNotice.value = {
+          session_id: data.session_id,
+          sender: data.sender,
+          content: data.content,
+        }
+      }
+      return
+    }
     if (data.type === 'step') {
       if (userRequestedStop) return
       startLiveElapsed()
       applyStepEvent(data)
+    }
+    if (data.type === 'profile') {
+      if (userRequestedStop) return
+      const step = profileEventToStep(data)
+      if (step) {
+        startLiveElapsed()
+        applyStepEvent({ type: 'step', op: 'append', step })
+      }
     }
     if (data.type === 'done') {
       userRequestedStop = false
@@ -1269,6 +1506,13 @@ function connectWs() {
 
 async function send() {
   if (!input.value.trim()) return
+  if (agent.value?.profile === 'code') {
+    await loadAgent()
+    if (!agent.value?.code_project_availability?.ready) {
+      ElMessage.error(`${projectStatusLabel(agent.value?.code_project_availability)}，请先管理 Code Project`)
+      return
+    }
+  }
   const text = input.value.trim()
   messages.value = [...messages.value, { role: 'user', content: text }]
   input.value = ''
@@ -1279,17 +1523,20 @@ async function send() {
   startLiveElapsed()
   liveSteps.value = []
   liveStepsBaseIndex = 0
-  execOpen.value = { ...execOpen.value, live: false }
+  execOpen.value = { ...execOpen.value, live: true }
   running.value = true
+  codeRunResult.value = null
+  activeCodeRunId.value = ''
   userPinnedBottom = true
   scrollBottom()
-  await postCgi('/pages/page_agent_chat.cgi?action=submit_chat', {
+  const submitted = await postCgi('/pages/page_agent_chat.cgi?action=submit_chat', {
     agent_id: agentId,
     session_id: sessionId.value,
     message: text,
     workplace_dir: wpRef.value?.getSelectedFolder?.() || '',
     workplace_files: wpRef.value?.getSelectedFiles?.() || [],
   })
+  activeCodeRunId.value = submitted.data?.code_run_id || ''
   startResumePoll()
 }
 
@@ -1371,9 +1618,36 @@ function scrollBottom() {
   }, SCROLL_THROTTLE_MS)
 }
 
+function appendIncomingUserMessage(data) {
+  const content = (data.content || '').trim()
+  if (!content) return
+  const list = messages.value || []
+  const last = list[list.length - 1]
+  if (last && last.role === 'user' && (last.content || '').trim() === content) return
+  messages.value = [...list, { role: 'user', content, id: `tmp-${Date.now()}`, created_at: '', meta: {} }]
+  userPinnedBottom = true
+  scrollBottom()
+}
+
+function clearInboundNotice(sid) {
+  if (!sid) return
+  const next = { ...unreadSessions.value }
+  delete next[sid]
+  unreadSessions.value = next
+  if (inboundNotice.value?.session_id === sid) inboundNotice.value = null
+}
+
+function switchToInboundSession() {
+  const sid = inboundNotice.value?.session_id
+  if (!sid) return
+  clearInboundNotice(sid)
+  router.push({ query: { ...route.query, session: sid } })
+}
+
 watch(() => route.query.session, async (sid) => {
   if (sid && sid !== sessionId.value) {
     sessionId.value = sid
+    clearInboundNotice(sid)
     clearResumePoll()
     await loadHistory()
     connectWs()
@@ -1395,6 +1669,7 @@ onMounted(async () => {
   pageAlive = true
   await loadAgent()
   await loadHistory()
+  await loadCodeRunResult()
   connectWs()
   await resumeIfRunning()
   resetIdleStatusPoll()
@@ -1456,6 +1731,11 @@ onUnmounted(() => {
   margin-top: 6px; font-size: 12px; color: #067a3a;
   background: #f0f9eb; border-radius: 4px; padding: 4px 8px; display: inline-block;
 }
+.inbound-banner {
+  margin-top: 6px; font-size: 12px; color: #b8860b;
+  background: #fff7e6; border-radius: 4px; padding: 4px 8px; display: inline-flex;
+  align-items: center; gap: 6px;
+}
 .top-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .top-actions .el-button {
   color: var(--gap-chat-top-text);
@@ -1465,6 +1745,64 @@ onUnmounted(() => {
 .main-body { display: flex; flex: 1; min-height: 0; }
 .sidebar { width: 340px; flex-shrink: 0; height: 100%; overflow: hidden; }
 .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--gap-chat-body-bg); }
+.code-result-banner {
+  margin: 12px 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--gap-card-border);
+  border-radius: 10px;
+  background: var(--gap-chat-bubble-bg);
+  box-shadow: 0 1px 4px var(--gap-shadow);
+  color: var(--gap-text);
+}
+.code-agent-context { margin: 12px 16px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.code-result-banner.is-info { box-shadow: inset 3px 0 0 var(--gap-primary), 0 1px 4px var(--gap-shadow); }
+.code-result-banner.is-success { box-shadow: inset 3px 0 0 var(--gap-accent), 0 1px 4px var(--gap-shadow); }
+.code-result-banner.is-warning { box-shadow: inset 3px 0 0 var(--el-color-warning), 0 1px 4px var(--gap-shadow); }
+.code-result-banner.is-danger { box-shadow: inset 3px 0 0 var(--el-color-danger), 0 1px 4px var(--gap-shadow); }
+.code-result-title { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--gap-text); }
+.code-result-title span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 500;
+}
+.code-result-facts { margin-top: 6px; color: var(--gap-text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+.code-result-warning { margin-top: 6px; color: var(--el-color-danger); font-weight: 600; }
+.code-result-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.code-result-actions .el-button {
+  color: var(--gap-text);
+  border-color: var(--gap-card-border);
+  background: var(--gap-hover-bg);
+}
+.code-result-actions .el-button--primary {
+  color: #fff;
+  border-color: var(--gap-primary);
+  background: var(--gap-primary);
+}
+.code-verifier-evidence { margin-top: 8px; }
+.code-verifier-evidence summary { cursor: pointer; font-weight: 600; color: var(--gap-text); }
+.code-verifier-evidence pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px;
+  border: 1px solid var(--gap-card-border);
+  border-radius: 6px;
+  background: var(--gap-hover-bg);
+  color: var(--gap-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.code-review pre {
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--gap-card-border);
+  background: var(--gap-hover-bg);
+  color: var(--gap-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .chat-body { flex: 1; overflow: auto; padding: 12px 16px; background: var(--gap-chat-body-bg); }
 .empty-chat { text-align: center; color: var(--gap-text-muted); padding-top: 80px; }
 .empty-chat p { margin-top: 12px; }
@@ -1728,33 +2066,6 @@ onUnmounted(() => {
   gap: 8px;
   font-size: 12px;
   color: var(--gap-text-muted);
-}
-
-.thinking {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 4px;
-}
-.thinking .exec-progress-ring { margin-left: 0; }
-.thinking-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-.thinking-text {
-  color: var(--gap-text-muted);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-.thinking-context {
-  max-width: min(560px, 68vw);
-  overflow: hidden;
-  color: var(--gap-text-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .chat-input {

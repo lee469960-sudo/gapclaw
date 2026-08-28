@@ -89,7 +89,21 @@ async def llm_post(body: LLMBody, user: User = Depends(get_session_user), db: Se
         elif action == "create" and body.type == "llm":
             return fail("请填写 API Key")
         item.model = body.model
-        item.members = json.dumps(body.members or [])
+        # react-engine-v11 R1: 写入时校验模型组成员，拦截自引用 / 组套组 / 不存在成员
+        # （运行时 R2 环检测兜底旧坏数据 / 直接改库）。叶子模型无成员概念，清空 members。
+        if body.type == "group":
+            members = list(body.members or [])
+            for mid in members:
+                if mid == item.id:
+                    return fail("模型组不能包含自身（自引用）")
+                member = db.query(LLMResource).filter(LLMResource.id == mid).first()
+                if not member:
+                    return fail(f"模型组成员不存在：{mid}")
+                if member.type != "llm":
+                    return fail("模型组成员必须是叶子模型（type=llm），禁止组套组")
+            item.members = json.dumps(members)
+        else:
+            item.members = json.dumps([])
         item.description = body.description
         item.max_context_tokens = body.max_context_tokens
         item.max_output_tokens = body.max_output_tokens

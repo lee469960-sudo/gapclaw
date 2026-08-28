@@ -64,7 +64,8 @@ class ConversationalHandler:
         msgs: list[dict] = [
             {"role": "system", "content": SystemPromptBuilder.build_conversational_system(agent)},
         ]
-        trimmed = ConversationalHandler.trim_history(history)
+        n_rounds = max(1, int(getattr(agent, "history_length", None) or 3))
+        trimmed = ConversationalHandler.trim_history(history, max_msgs=n_rounds * 2)
         # Drop trailing user (just committed); we append effective_message once
         if trimmed and trimmed[-1].get("role") == "user":
             trimmed = trimmed[:-1]

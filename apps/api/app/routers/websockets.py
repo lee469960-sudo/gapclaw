@@ -7,6 +7,7 @@ from app.database import SessionLocal
 from app.deps import get_session_user, resolve_ws_user
 from app.models import User, Agent, Sandbox, SshServer
 from app.services.agent_runtime import hub
+from app.services.agent_runtime.hub import inbox_key
 from app.services import docker_service
 from app.services.ssh_service import _connect
 
@@ -17,6 +18,7 @@ router = APIRouter(tags=["ws"])
 async def agent_chat_ws(websocket: WebSocket):
     await websocket.accept()
     key = None
+    agent_inbox_key = None
 
     async def on_event(event):
         try:
@@ -38,7 +40,11 @@ async def agent_chat_ws(websocket: WebSocket):
         agent_id = data.get("agent_id", "")
         session_id = data.get("session_id", "")
         key = f"{agent_id}:{session_id}"
+        if agent_id:
+            agent_inbox_key = inbox_key(agent_id)
         hub.subscribe(key, on_event)
+        if agent_inbox_key:
+            hub.subscribe(agent_inbox_key, on_event)
         await websocket.send_json({"type": "connected", "key": key})
         while True:
             msg = await websocket.receive_text()
@@ -49,6 +55,8 @@ async def agent_chat_ws(websocket: WebSocket):
     finally:
         if key:
             hub.unsubscribe(key, on_event)
+        if agent_inbox_key:
+            hub.unsubscribe(agent_inbox_key, on_event)
 
 
 @router.websocket("/pages/page_sandbox.ws")
@@ -210,7 +218,7 @@ async def external_agent_api(agent_id: str, message: str, user: User = Depends(g
         if not agent:
             return {"code": 1, "msg": "Agent 不存在"}
         sid = json.loads(agent.session_list or "[]")[0]["session_id"] if agent.session_list else agent.id
-        result = await run_agent(db, agent, sid, message, user.username)
+        result = await run_agent(db, agent, sid, message)
         return {"code": 0, "msg": "ok", "data": {"reply": result}}
     finally:
         db.close()

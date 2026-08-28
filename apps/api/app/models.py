@@ -1,6 +1,9 @@
 import json
 from datetime import datetime
-from sqlalchemy import String, Text, Boolean, Integer, DateTime, ForeignKey, JSON
+from sqlalchemy import (
+    String, Text, Boolean, Integer, DateTime, ForeignKey, JSON,
+    CheckConstraint, UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -21,6 +24,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    organization_id: Mapped[str] = mapped_column(String(64), default="default", index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     roles: Mapped[str] = mapped_column(Text, default='["user"]')
     assignable_roles: Mapped[str] = mapped_column(Text, default="[]")
@@ -33,6 +37,7 @@ class User(Base):
         tokens = _json_list(self.tokens)
         d = {
             "username": self.username,
+            "organization_id": self.organization_id or "default",
             "role": "",
             "roles": _json_list(self.roles),
             "assignable_roles": _json_list(self.assignable_roles),
@@ -238,23 +243,25 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text, default="")
     prompt: Mapped[str] = mapped_column(Text, default="")
-    engine: Mapped[str] = mapped_column(String(32), default="react")
+    profile: Mapped[str] = mapped_column(String(16), default="standard")
+    code_project_id: Mapped[str] = mapped_column(String(16), default="")
     llm_id: Mapped[str] = mapped_column(String(16), default="")
     sandbox_id: Mapped[str] = mapped_column(String(16), default="")
     skills: Mapped[str] = mapped_column(Text, default="[]")
     mcps: Mapped[str] = mapped_column(Text, default="[]")
     rags: Mapped[str] = mapped_column(Text, default="[]")
+    httpmcps: Mapped[str] = mapped_column(Text, default="[]")
     max_iterations: Mapped[int] = mapped_column(Integer, default=150)
     history_length: Mapped[int] = mapped_column(Integer, default=30)
-    summary_max_words: Mapped[int] = mapped_column(Integer, default=5000)
     proactivity: Mapped[int] = mapped_column(Integer, default=2)
     llm_timeout: Mapped[int] = mapped_column(Integer, default=1800)
     skill_timeout: Mapped[int] = mapped_column(Integer, default=1800)
     shell_timeout: Mapped[int] = mapped_column(Integer, default=1800)
     mcp_soft_circuit: Mapped[int] = mapped_column(Integer, default=5)
+    tool_result_clip: Mapped[int] = mapped_column(Integer, default=6000)
     visibility: Mapped[str] = mapped_column(String(16), default="private")
     allowed_users: Mapped[str] = mapped_column(Text, default="[]")
-    allowed_actions: Mapped[str] = mapped_column(Text, default='["self_ask","skill_read_md","skill_read_script","skill_run_script","mcp_tool_call","httpmcp_call","shell","file_read","file_write","file_search","file_search_replace"]')
+    allowed_actions: Mapped[str] = mapped_column(Text, default='["skill_read_md","skill_run_script","mcp_tool_call","shell","file_read","file_write","file_search_replace","file_search"]')
     memory: Mapped[str] = mapped_column(Text, default="")
     session_list: Mapped[str] = mapped_column(Text, default="[]")
     creator: Mapped[str] = mapped_column(String(64), default="")
@@ -267,20 +274,22 @@ class Agent(Base):
             "name": self.name,
             "description": self.description,
             "prompt": self.prompt,
-            "engine": self.engine,
+            "profile": self.profile or "standard",
+            "code_project_id": self.code_project_id or "",
             "llm": self.llm_id,
             "sandbox": self.sandbox_id,
             "skills": _json_list(self.skills),
             "mcps": _json_list(self.mcps),
             "rags": _json_list(self.rags),
+            "httpmcps": _json_list(self.httpmcps),
             "max_iterations": self.max_iterations,
             "history_length": self.history_length,
-            "summary_max_words": self.summary_max_words,
             "proactivity": self.proactivity,
             "llm_timeout": self.llm_timeout,
             "skill_timeout": self.skill_timeout,
             "shell_timeout": self.shell_timeout,
             "mcp_soft_circuit": self.mcp_soft_circuit,
+            "tool_result_clip": self.tool_result_clip,
             "visibility": self.visibility,
             "allowed_users": _json_list(self.allowed_users),
             "allowed_actions": _json_list(self.allowed_actions),
@@ -289,6 +298,317 @@ class Agent(Base):
             "modified_at": self.modified_at,
             "session_list": _json_list(self.session_list),
         }
+
+
+class CodeProject(Base):
+    __tablename__ = "code_projects"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    organization_id: Mapped[str] = mapped_column(String(64), default="default", index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    environment_tier: Mapped[str] = mapped_column(String(32), default="internal_non_production")
+    visibility: Mapped[str] = mapped_column(String(16), default="private")
+    allowed_users: Mapped[str] = mapped_column(Text, default="[]")
+    policy: Mapped[str] = mapped_column(Text, default="{}")
+    workspace_retention_hours: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    creator: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+    modified_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeScanReport(Base):
+    __tablename__ = "code_scan_reports"
+    __table_args__ = (
+        CheckConstraint("scope IN ('source', 'patch')", name="ck_code_scan_report_scope"),
+        CheckConstraint(
+            "status IN ('pending', 'complete', 'incomplete', 'failed')",
+            name="ck_code_scan_report_status",
+        ),
+        CheckConstraint("findings_count >= 0", name="ck_code_scan_report_findings_count"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16), index=True)
+    input_hash: Mapped[str] = mapped_column(String(64), index=True)
+    scanner: Mapped[str] = mapped_column(String(64))
+    scanner_version: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    findings_count: Mapped[int] = mapped_column(Integer, default=0)
+    files_discovered: Mapped[int] = mapped_column(Integer, default=0)
+    files_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_discovered: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    truncated_count: Mapped[int] = mapped_column(Integer, default=0)
+    findings: Mapped[str] = mapped_column(Text, default="[]")
+    failure_reason: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeRepositorySource(Base):
+    __tablename__ = "code_repository_sources"
+    __table_args__ = (
+        CheckConstraint(
+            "source_type IN ('https', 'ssh', 'http', 'local')",
+            name="ck_code_repository_source_type",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'disabled', 'failed')",
+            name="ck_code_repository_source_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(16), ForeignKey("code_projects.id", ondelete="CASCADE"), index=True
+    )
+    source_type: Mapped[str] = mapped_column(String(16), index=True)
+    locator: Mapped[str] = mapped_column(String(1024))
+    credential_ref: Mapped[str] = mapped_column(String(128), default="", index=True)
+    requested_ref: Mapped[str] = mapped_column(String(128), default="HEAD")
+    policy_ref: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeDeployCredential(Base):
+    __tablename__ = "code_deploy_credentials"
+    __table_args__ = (
+        CheckConstraint(
+            "credential_kind = 'deploy_token'",
+            name="ck_code_deploy_credential_kind",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'disabled')",
+            name="ck_code_deploy_credential_status",
+        ),
+        CheckConstraint(
+            "read_only = TRUE",
+            name="ck_code_deploy_credential_read_only",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(String(64), index=True)
+    label: Mapped[str] = mapped_column(String(128))
+    credential_kind: Mapped[str] = mapped_column(String(32), default="deploy_token")
+    auth_username: Mapped[str] = mapped_column(String(128), default="")
+    secret_enc: Mapped[str] = mapped_column(Text)
+    allowed_project_ids: Mapped[str] = mapped_column(Text, default="[]")
+    read_only: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeSourceSnapshot(Base):
+    __tablename__ = "code_source_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('importing', 'scanning', 'sealed', 'failed', 'deleted')",
+            name="ck_code_source_snapshot_status",
+        ),
+        CheckConstraint("ref_count >= 0", name="ck_code_source_snapshot_ref_count"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    source_id: Mapped[str] = mapped_column(
+        String(16), ForeignKey("code_repository_sources.id", ondelete="CASCADE"), index=True
+    )
+    resolved_commit: Mapped[str] = mapped_column(String(64), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    storage_path: Mapped[str] = mapped_column(String(1024))
+    scan_report_id: Mapped[str] = mapped_column(
+        String(16), ForeignKey("code_scan_reports.id"), index=True
+    )
+    importer_version: Mapped[str] = mapped_column(String(64))
+    policy_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="importing", index=True)
+    ref_count: Mapped[int] = mapped_column(Integer, default=0)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    file_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+    sealed_at: Mapped[str] = mapped_column(String(32), default="")
+    cleanup_after: Mapped[str] = mapped_column(String(32), default="")
+    cleanup_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    cleanup_error: Mapped[str] = mapped_column(String(64), default="")
+    cleanup_next_attempt: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeProjectManifest(Base):
+    __tablename__ = "code_project_manifests"
+    __table_args__ = (UniqueConstraint("project_id", "version", name="uq_code_project_manifest_version"),)
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(16), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    source_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    source_type: Mapped[str] = mapped_column(String(16), default="")
+    credential_ref: Mapped[str] = mapped_column(String(128), default="")
+    requested_ref: Mapped[str] = mapped_column(String(128), default="")
+    resolved_commit: Mapped[str] = mapped_column(String(64), default="")
+    snapshot_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), default="")
+    source_scan_report_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    repository: Mapped[str] = mapped_column(String(512), default="")
+    base_commit: Mapped[str] = mapped_column(String(128), default="")
+    allowed_paths: Mapped[str] = mapped_column(Text, default="[]")
+    validation_plan: Mapped[str] = mapped_column(Text, default="[]")
+    trusted_image: Mapped[str] = mapped_column(String(255), default="")
+    image_digest: Mapped[str] = mapped_column(String(128), default="")
+    security_schema_version: Mapped[int] = mapped_column(Integer, default=0)
+    allowed_tools: Mapped[str] = mapped_column(Text, default="[]")
+    policy: Mapped[str] = mapped_column(Text, default="{}")
+    budgets: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeControlAudit(Base):
+    __tablename__ = "code_control_audits"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    actor: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(32), index=True)
+    project_id: Mapped[str] = mapped_column(String(16), index=True)
+    manifest_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    details: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeAgentRun(Base):
+    __tablename__ = "code_agent_runs"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(16), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    project_id: Mapped[str] = mapped_column(String(16), index=True)
+    manifest_id: Mapped[str] = mapped_column(String(16), index=True)
+    manifest_version: Mapped[int] = mapped_column(Integer)
+    source_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    source_type: Mapped[str] = mapped_column(String(16), default="")
+    requested_ref: Mapped[str] = mapped_column(String(128), default="")
+    resolved_commit: Mapped[str] = mapped_column(String(64), default="")
+    snapshot_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), default="")
+    source_scan_report_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    repository: Mapped[str] = mapped_column(String(512), default="")
+    base_commit: Mapped[str] = mapped_column(String(128), default="")
+    image: Mapped[str] = mapped_column(String(255), default="")
+    image_digest: Mapped[str] = mapped_column(String(128), default="")
+    security_schema_version: Mapped[int] = mapped_column(Integer, default=0)
+    task_contract: Mapped[str] = mapped_column(Text, default="{}")
+    effective_policy: Mapped[str] = mapped_column(Text, default="{}")
+    effective_policy_hash: Mapped[str] = mapped_column(String(64), default="")
+    workspace_path: Mapped[str] = mapped_column(String(1024), default="")
+    source_facts: Mapped[str] = mapped_column(Text, default="{}")
+    runner_facts: Mapped[str] = mapped_column(Text, default="{}")
+    container_id: Mapped[str] = mapped_column(String(128), default="")
+    runner_network_id: Mapped[str] = mapped_column(String(128), default="")
+    runner_state: Mapped[str] = mapped_column(String(32), default="not_started")
+    execution_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    cleanup_state: Mapped[str] = mapped_column(String(32), default="not_required")
+    cleanup_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    cleanup_error: Mapped[str] = mapped_column(String(64), default="")
+    cleanup_next_attempt: Mapped[str] = mapped_column(String(32), default="")
+    workspace_state: Mapped[str] = mapped_column(String(32), default="prepared")
+    workspace_retention_hours: Mapped[int] = mapped_column(Integer, default=168)
+    retained_until: Mapped[str] = mapped_column(String(32), default="")
+    workspace_downloadable: Mapped[bool] = mapped_column(Boolean, default=False)
+    tool_audit: Mapped[str] = mapped_column(Text, default="[]")
+    tool_calls_used: Mapped[int] = mapped_column(Integer, default=0)
+    budget_usage: Mapped[str] = mapped_column(Text, default="{}")
+    verification_baseline: Mapped[str] = mapped_column(Text, default="{}")
+    verifier_report: Mapped[str] = mapped_column(Text, default="{}")
+    artifact_id: Mapped[str] = mapped_column(String(16), default="")
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    failure_reason: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeArtifact(Base):
+    __tablename__ = "code_artifacts"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    project_id: Mapped[str] = mapped_column(String(16), index=True)
+    manifest_version: Mapped[int] = mapped_column(Integer)
+    base_commit: Mapped[str] = mapped_column(String(128))
+    diff_hash: Mapped[str] = mapped_column(String(64))
+    policy_hash: Mapped[str] = mapped_column(String(64))
+    verifier_report_hash: Mapped[str] = mapped_column(String(64))
+    image: Mapped[str] = mapped_column(String(255), default="")
+    image_id: Mapped[str] = mapped_column(String(255), default="")
+    storage_path: Mapped[str] = mapped_column(String(1024))
+    status: Mapped[str] = mapped_column(String(32), default="sealed")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeArtifactReview(Base):
+    __tablename__ = "code_artifact_reviews"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(16), index=True)
+    project_id: Mapped[str] = mapped_column(String(16), index=True)
+    action: Mapped[str] = mapped_column(String(16), default="accepted")
+    reviewer: Mapped[str] = mapped_column(String(64))
+    manifest_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodeKillSwitch(Base):
+    __tablename__ = "code_kill_switches"
+    __table_args__ = (UniqueConstraint("scope", "target", name="uq_code_kill_switch_scope_target"),)
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16), index=True)
+    target: Mapped[str] = mapped_column(String(512), default="*")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    reason: Mapped[str] = mapped_column(String(128), default="")
+    updated_by: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodePilotEvaluation(Base):
+    __tablename__ = "code_pilot_evaluations"
+    __table_args__ = (UniqueConstraint("pilot_id", "task_key", name="uq_code_pilot_task"),)
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    pilot_id: Mapped[str] = mapped_column(String(64), index=True)
+    task_key: Mapped[str] = mapped_column(String(64))
+    project_id: Mapped[str] = mapped_column(String(16), index=True)
+    run_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    risk_level: Mapped[str] = mapped_column(String(16), default="low")
+    status: Mapped[str] = mapped_column(String(16), default="planned")
+    result_status: Mapped[str] = mapped_column(String(32), default="")
+    verifier_reproducible: Mapped[bool] = mapped_column(Boolean, default=False)
+    human_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    cost_microunits: Mapped[int] = mapped_column(Integer, default=0)
+    elapsed_milliseconds: Mapped[int] = mapped_column(Integer, default=0)
+    cleanup_result: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+    observed_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodePilotReport(Base):
+    __tablename__ = "code_pilot_reports"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    pilot_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    artifact_path: Mapped[str] = mapped_column(String(1024))
+    artifact_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="complete")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
 
 
 class AgentTick(Base):
@@ -331,7 +651,19 @@ class ChatSummary(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     agent_id: Mapped[str] = mapped_column(String(16), index=True)
     session_id: Mapped[str] = mapped_column(String(16), index=True)
+    chat_id: Mapped[str] = mapped_column(String(64), default="", index=True)
     content: Mapped[str] = mapped_column(Text, default="")
+
+
+class AgentRunState(Base):
+    __tablename__ = "agent_run_states"
+    __table_args__ = (UniqueConstraint("agent_id", "session_id", name="uq_agent_run_state"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(16), index=True)
+    session_id: Mapped[str] = mapped_column(String(16), index=True)
+    state: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
 
 
 class AgentGroup(Base):

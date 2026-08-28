@@ -27,6 +27,36 @@ BUILTIN_ROLES = [
         ],
         "builtin": True,
     },
+    {
+        "name": "owner",
+        "label": "Code 项目负责人",
+        "permissions": [
+            "/pages/system_me.cgi",
+            "/pages/page_agent.cgi",
+            "/pages/page_code_project.cgi",
+        ],
+        "builtin": True,
+    },
+    {
+        "name": "operator",
+        "label": "Code 运行操作员",
+        "permissions": [
+            "/pages/system_me.cgi",
+            "/pages/page_agent.cgi",
+            "/pages/page_code_project.cgi",
+        ],
+        "builtin": True,
+    },
+    {
+        "name": "reviewer",
+        "label": "Code 工件审核员",
+        "permissions": [
+            "/pages/system_me.cgi",
+            "/pages/page_agent.cgi",
+            "/pages/page_code_project.cgi",
+        ],
+        "builtin": True,
+    },
 ]
 
 
@@ -47,15 +77,17 @@ def _require_admin(user: User):
 
 
 def _ensure_builtin_roles(db: Session) -> None:
-    if db.query(RoleDefinition).count():
-        return
     for item in BUILTIN_ROLES:
-        db.add(RoleDefinition(
-            name=item["name"],
-            label=item["label"],
-            permissions=json.dumps(item["permissions"]),
-            builtin=item["builtin"],
-        ))
+        existing = db.query(RoleDefinition).filter(
+            RoleDefinition.name == item["name"]
+        ).first()
+        if not existing:
+            db.add(RoleDefinition(
+                name=item["name"],
+                label=item["label"],
+                permissions=json.dumps(item["permissions"]),
+                builtin=item["builtin"],
+            ))
     db.commit()
 
 

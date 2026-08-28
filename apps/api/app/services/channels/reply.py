@@ -7,9 +7,68 @@ by the platform adapter.
 
 from __future__ import annotations
 
+import re
+
 from app.services.workplace import download_path, is_valid_deliverable_file
 
 _DATA_FILE_SUFFIXES = (".xlsx", ".xls", ".csv")
+
+# react-engine-v7 R4: explicit delivery-path annotation (`attach=path1,path2` inline,
+# or a standalone `ATTACH: path1,path2` line). Parse is channel-agnostic; sending is TG-only.
+_ATTACH_LINE_RE = re.compile(r"(?im)^[ \t]*ATTACH[ \t]*:[ \t]*([^\n]*)\r?\n?")
+_ATTACH_INLINE_RE = re.compile(
+    r"attach\s*=\s*([^\s,]+(?:\s*,\s*[^\s,]+)*)", re.IGNORECASE
+)
+
+
+def _clean_attach_token(token: str) -> str:
+    return (token or "").strip().strip("`").strip()
+
+
+def parse_attach_paths(reply: str) -> list[str]:
+    """Extract explicit delivery paths from an `attach=` / `ATTACH:` annotation."""
+    text = reply or ""
+    paths: list[str] = []
+    for m in _ATTACH_LINE_RE.finditer(text):
+        for part in m.group(1).split(","):
+            p = _clean_attach_token(part)
+            if p:
+                paths.append(p)
+    for m in _ATTACH_INLINE_RE.finditer(text):
+        for part in m.group(1).split(","):
+            p = _clean_attach_token(part)
+            if p:
+                paths.append(p)
+    # Dedupe preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def strip_attach_markers(reply: str) -> str:
+    """Remove attach annotations from the visible reply text."""
+    text = reply or ""
+    text = _ATTACH_LINE_RE.sub("", text)
+    text = _ATTACH_INLINE_RE.sub("", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def resolve_attach_paths(paths: list[str], sandbox_id: str) -> list[str]:
+    """Keep only attach paths that resolve inside the sandbox (防穿越 + existence)."""
+    if not sandbox_id:
+        return []
+    out: list[str] = []
+    for p in paths or []:
+        rel = (p or "").strip().lstrip("/")
+        if rel and download_path(sandbox_id, rel):
+            out.append(rel)
+    return out
 
 
 def _is_data_export_path(path: str) -> bool:

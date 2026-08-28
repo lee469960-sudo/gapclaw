@@ -62,24 +62,38 @@ def sftp_list(server, cwd: str) -> list[dict]:
         return [{"name": f"error: {e}", "is_dir": False, "size": 0}]
 
 
+def resolve_remote_path(sftp, remote_path: str, filename: str | None = None) -> str:
+    raw = (remote_path or "").strip() or "."
+    if raw in {".", "~"} or raw.startswith("~/"):
+        home = sftp.normalize(".")
+        raw = home if raw in {".", "~"} else f"{home.rstrip('/')}{raw[1:]}"
+    if filename:
+        name = Path(filename).name
+        if not name or name in {".", ".."}:
+            raise ValueError("无效文件名")
+        raw = f"{raw.rstrip('/')}/{name}"
+    return raw or "/"
+
+
 def sftp_download(server, remote_path: str) -> bytes:
     client = _connect(server)
     sftp = client.open_sftp()
     buf = io.BytesIO()
-    sftp.getfo(remote_path, buf)
+    sftp.getfo(resolve_remote_path(sftp, remote_path), buf)
     sftp.close()
     client.close()
     return buf.getvalue()
 
 
-def sftp_upload(server, remote_path: str, data: bytes) -> str:
+def sftp_upload(server, remote_path: str, data: bytes, filename: str | None = None) -> str:
     client = _connect(server)
     sftp = client.open_sftp()
+    dest = resolve_remote_path(sftp, remote_path, filename)
     buf = io.BytesIO(data)
-    sftp.putfo(buf, remote_path)
+    sftp.putfo(buf, dest)
     sftp.close()
     client.close()
-    return "ok"
+    return dest
 
 
 def sftp_mkdir(server, remote_path: str) -> str:

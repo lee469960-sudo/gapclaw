@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建 GAP 平台镜像：gap-api-{arm|amd}:V0.0.1 / gap-web-{arm|amd}:V0.0.1
+# 构建 GAP 平台镜像：gap-api-{arm|amd}:V* / gap-web-{arm|amd}:V*（版本见 gap.version）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

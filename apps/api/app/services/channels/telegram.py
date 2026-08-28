@@ -18,6 +18,58 @@ logger = logging.getLogger(__name__)
 
 _bot_username_cache: dict[str, str] = {}
 
+# Bot API `getFile` download limit: documents larger than this are rejected
+# before any download is attempted (react-engine-v6 R1).
+TG_MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+
+
+async def download_document_to_workspace(
+    token: str,
+    document: dict[str, Any],
+    sandbox_id: str,
+) -> str:
+    """Download a TG ``document`` into the sandbox workspace; return its rel path.
+
+    ``file_id`` → ``getFile`` → ``file_path`` → download bytes → ``upload_file``.
+    Raises ``RuntimeError`` on a missing ``file_id``, oversize (>20MB), ``getFile``
+    failure, or a workspace write failure. The returned path is workspace-relative
+    and readable by the agent via the existing ``READ:``/``SHELL:`` protocol.
+    """
+    from app.services.workplace import upload_file
+
+    doc = document if isinstance(document, dict) else {}
+    file_id = str(doc.get("file_id") or "").strip()
+    if not file_id:
+        raise RuntimeError("TG 附件缺少 file_id")
+
+    size = int(doc.get("file_size") or 0)
+    data = await _bot_api(token, "getFile", {"file_id": file_id})
+    if not data.get("ok"):
+        raise RuntimeError(f"getFile 失败: {data.get('description') or data}")
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    file_path = str(result.get("file_path") or "").strip()
+    if not file_path:
+        raise RuntimeError("getFile 返回空 file_path")
+    if size <= 0:
+        size = int(result.get("file_size") or 0)
+    if size > TG_MAX_DOCUMENT_BYTES:
+        raise RuntimeError(f"附件超过 20MB 上限（{size} bytes），无法下载")
+
+    file_name = str(doc.get("file_name") or "").strip() or (
+        file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+    ) or "attachment"
+
+    url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        content = resp.content
+
+    res = upload_file(sandbox_id, "", file_name, content)
+    if not res.get("ok"):
+        raise RuntimeError(f"写入 workspace 失败: {res.get('msg') or res}")
+    return str(res["path"])
+
 
 def build_webhook_url(public_base: str, channel_id: str, webhook_secret: str, provider: str = "telegram") -> str:
     base = (public_base or "").strip().rstrip("/")
@@ -277,6 +329,7 @@ class TelegramAdapter(ChannelAdapter):
 
         message = data.get("message") or data.get("edited_message") or {}
         text = (message.get("text") or message.get("caption") or "").strip()
+        document = message.get("document")
         chat = message.get("chat") or {}
         chat_id = str(chat.get("id") or "")
         user = message.get("from") or {}
@@ -290,7 +343,11 @@ class TelegramAdapter(ChannelAdapter):
         msg_id = str(message.get("message_id") or data.get("update_id") or f"tg-{int(time.time()*1000)}")
         chat_type = "group" if chat.get("type") in ("group", "supergroup") else "p2p"
 
-        if not text or not chat_id:
+        if not chat_id:
+            return WebhookResult(body={"ok": True}, skip_agent=True)
+        # A pure document (no text/caption) must still trigger the agent (R1);
+        # photo/voice/video/audio carry no `document` key, so they keep skipping.
+        if not text and not isinstance(document, dict):
             return WebhookResult(body={"ok": True}, skip_agent=True)
         if not self._allowed(chat_id):
             return WebhookResult(body={"ok": True, "ignored": "chat not allowed"}, skip_agent=True)

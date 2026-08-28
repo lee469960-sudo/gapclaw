@@ -8,12 +8,36 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
 from app.deps import get_session_user
-from app.models import User, Agent, ChatMessage, ChatNote, ChatSummary, AgentTick
+from app.models import (
+    User, Agent, CodeProject, CodeProjectManifest, CodeAgentRun, CodeArtifact,
+    ChatMessage, ChatNote, ChatSummary, AgentTick,
+)
 from app.schemas import ok, fail
 from app.security import new_id, now_str
 from app.services.agent_runtime import stop_chat, hub, is_running, run_agent
 from app.services.session_summary import generate_session_summary
 from app.services import tick_scheduler
+from app.services.code_agent.control_plane import (
+    ManifestUnavailableError,
+    PolicyRejectedError,
+    agent_would_use_claude_code,
+    create_code_run,
+)
+from app.services.code_agent.claude_code_runtime import GRILL_CONFIRMATION
+from app.services.code_agent.results import serialize_code_result
+from app.services.code_agent.kill_switch import CodeKillSwitchError
+from app.services.code_agent.review import (
+    ArtifactReviewError,
+    accept_sealed_artifact,
+    artifact_file,
+    load_reviewable_bundle,
+    review_payload,
+)
+from app.services.code_agent.authorization import (
+    CodeAuthorizationError,
+    require_project_operator,
+    require_project_reviewer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,18 +158,17 @@ class ChatBody(BaseModel):
     dest: str | None = None
     message_ids: list[int] | None = None
     workplace_dir: str | None = None
-    workplace_files: list[str] | None = None
     message_id: int | None = None
     limit: int | None = None
+    artifact_id: str | None = None
 
 
 def _run_chat_bg(
     agent_id: str,
     session_id: str,
     message: str,
-    username: str,
     workplace_dir: str = "",
-    workplace_files: list[str] | None = None,
+    code_run_id: str | None = None,
 ):
     db = SessionLocal()
     try:
@@ -157,14 +180,42 @@ def _run_chat_bg(
                     agent,
                     session_id,
                     message,
-                    username,
                     workplace_dir=workplace_dir,
-                    workplace_files=workplace_files or [],
+                    code_run_id=code_run_id,
                 )
             )
     finally:
         stop_chat(agent_id or "", session_id or "")
         db.close()
+
+
+def _grill_objective(db: Session, agent_id: str, session_id: str) -> str:
+    msgs = db.query(ChatMessage).filter(
+        ChatMessage.agent_id == agent_id,
+        ChatMessage.session_id == session_id,
+    ).order_by(ChatMessage.id).all()
+    parts: list[str] = []
+    for message in msgs:
+        text = str(message.content or "").strip()
+        if not text or text == GRILL_CONFIRMATION:
+            continue
+        role = str(message.role or "").strip() or "user"
+        parts.append(f"{role}: {text}")
+    return "\n\n".join(parts).strip()
+
+
+def _direct_execute_objective(message: str | None) -> tuple[bool, str]:
+    text = str(message or "").strip()
+    prefix = "开始执行:"
+    if not text.startswith(prefix):
+        return False, ""
+    return True, text[len(prefix):].strip()
+
+
+def _enqueue_code_chat(*args) -> str:
+    from app.services.code_agent.queue import code_run_queue
+
+    return code_run_queue.submit(_run_chat_bg, *args)
 
 
 @router.get("")
@@ -174,6 +225,9 @@ async def chat_get(
     agent_id: str = Query(None),
     session_id: str = Query(None),
     path: str = Query(None),
+    code_run_id: str = Query(None),
+    artifact_id: str = Query(None),
+    artifact_kind: str = Query(None),
     message_id: int = Query(None),
     limit: int = Query(None),
     user: User = Depends(get_session_user),
@@ -210,6 +264,49 @@ async def chat_get(
     if action == "get_result":
         msgs = db.query(ChatMessage).filter(ChatMessage.agent_id == agent_id, ChatMessage.session_id == session_id).order_by(ChatMessage.id.desc()).limit(1).all()
         return ok({"content": msgs[0].content if msgs else ""})
+    if action == "get_code_result":
+        query = db.query(CodeAgentRun).filter(CodeAgentRun.agent_id == agent_id)
+        if code_run_id:
+            query = query.filter(CodeAgentRun.id == code_run_id)
+        else:
+            query = query.filter(CodeAgentRun.session_id == (session_id or ""))
+        run = query.order_by(CodeAgentRun.created_at.desc()).first()
+        if not run:
+            return ok(None)
+        project = db.query(CodeProject).filter(CodeProject.id == run.project_id).first()
+        try:
+            require_project_reviewer(user, project, db=db, resource=run)
+        except CodeAuthorizationError as exc:
+            return fail(exc.reason)
+        artifact = (
+            db.query(CodeArtifact).filter(CodeArtifact.id == run.artifact_id).first()
+            if run.artifact_id else None
+        )
+        return ok(serialize_code_result(run, artifact))
+    if action in {"review_code_artifact", "download_code_artifact"}:
+        artifact = db.query(CodeArtifact).filter(CodeArtifact.id == artifact_id).first()
+        run = (
+            db.query(CodeAgentRun).filter(CodeAgentRun.id == artifact.run_id).first()
+            if artifact else None
+        )
+        project = (
+            db.query(CodeProject).filter(CodeProject.id == artifact.project_id).first()
+            if artifact else None
+        )
+        try:
+            bundle = load_reviewable_bundle(
+                db,
+                user=user,
+                artifact=artifact,
+                run=run,
+                project=project,
+            )
+            if action == "review_code_artifact":
+                return ok(review_payload(artifact, bundle))
+            path_value, filename = artifact_file(bundle, artifact_kind or "patch")
+            return FileResponse(path_value, filename=filename)
+        except (ArtifactReviewError, CodeAuthorizationError) as exc:
+            return fail(exc.reason)
     if action == "list_workplace":
         from app.services.workplace import list_dir
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
@@ -261,20 +358,98 @@ async def chat_post(
     act = action or body.action
 
     if act == "submit_chat":
+        agent = db.query(Agent).filter(Agent.id == body.agent_id).first()
+        if not agent:
+            return fail("Agent 不存在")
+        if (agent.profile or "standard") == "code":
+            project = db.query(CodeProject).filter(CodeProject.id == agent.code_project_id).first()
+            try:
+                require_project_operator(user, project, db=db, operation="run:create")
+                trigger_text = ""
+                if agent_would_use_claude_code(db, agent):
+                    message = (body.message or "").strip()
+                    is_direct_execute, direct_objective = _direct_execute_objective(message)
+                    if is_direct_execute:
+                        if not direct_objective:
+                            return fail("缺少任务目标，请使用「开始执行:<objective>」")
+                        objective = direct_objective
+                        trigger_text = message
+                    else:
+                        if message != GRILL_CONFIRMATION:
+                            background_tasks.add_task(
+                                _enqueue_code_chat,
+                                body.agent_id,
+                                body.session_id,
+                                body.message or "",
+                                "",
+                                None,
+                            )
+                            return ok({"status": "grilling", "code_run_id": ""}, "请先确认需求")
+                        objective = _grill_objective(
+                            db, body.agent_id or "", body.session_id or "",
+                        )
+                        if not objective:
+                            return fail("请先描述要改什么，确认后再回复「开始实现」")
+                else:
+                    objective = body.message or ""
+                run = create_code_run(
+                    db,
+                    agent=agent,
+                    actor=user,
+                    project_id=agent.code_project_id,
+                    objective=objective,
+                    session_id=body.session_id or "",
+                    trigger_text=trigger_text,
+                )
+                db.commit()
+            except (
+                CodeAuthorizationError,
+                ManifestUnavailableError,
+                PolicyRejectedError,
+                CodeKillSwitchError,
+            ) as exc:
+                db.rollback()
+                return fail(exc.reason)
+            if run.status == "pending":
+                background_tasks.add_task(
+                    _enqueue_code_chat,
+                    body.agent_id,
+                    body.session_id,
+                    body.message or "",
+                    "",
+                    run.id,
+                )
+            return ok({"status": run.status, "code_run_id": run.id}, "Code 任务已准备")
         background_tasks.add_task(
             _run_chat_bg,
             body.agent_id,
             body.session_id,
             body.message or "",
-            user.username,
             (body.workplace_dir or "").strip(),
-            list(body.workplace_files or []),
         )
         return ok({"status": "started"}, "已提交")
 
     if act == "stop_chat":
         aid = body.agent_id or ""
         sid = body.session_id or ""
+        agent = db.query(Agent).filter(Agent.id == aid).first()
+        if agent and (agent.profile or "standard") == "code":
+            project = db.query(CodeProject).filter(
+                CodeProject.id == agent.code_project_id
+            ).first()
+            run = (
+                db.query(CodeAgentRun)
+                .filter(
+                    CodeAgentRun.agent_id == aid,
+                    CodeAgentRun.session_id == sid,
+                )
+                .order_by(CodeAgentRun.created_at.desc())
+                .first()
+            )
+            try:
+                require_project_operator(user, project, db=db, resource=run)
+            except CodeAuthorizationError as exc:
+                return fail(exc.reason)
         stop_chat(aid, sid)
         try:
             await hub.publish(f"{aid}:{sid}", {
@@ -287,6 +462,59 @@ async def chat_post(
         except Exception:
             logger.exception("stop_chat publish failed agent=%s session=%s", aid, sid)
         return ok(None, "已停止")
+
+    if act == "accept_code_artifact":
+        artifact = db.query(CodeArtifact).filter(CodeArtifact.id == body.artifact_id).first()
+        run = (
+            db.query(CodeAgentRun).filter(CodeAgentRun.id == artifact.run_id).first()
+            if artifact else None
+        )
+        project = (
+            db.query(CodeProject).filter(CodeProject.id == artifact.project_id).first()
+            if artifact else None
+        )
+        try:
+            require_project_reviewer(
+                user,
+                project,
+                db=db,
+                resource=artifact,
+                operation="artifact:accept",
+            )
+            if not run or run.project_id != project.id:
+                require_project_reviewer(
+                    user,
+                    None,
+                    db=db,
+                    resource=artifact,
+                    operation="artifact:accept",
+                )
+            latest_manifest = (
+                db.query(CodeProjectManifest)
+                .filter(
+                    CodeProjectManifest.project_id == run.project_id,
+                    CodeProjectManifest.status == "published",
+                )
+                .order_by(CodeProjectManifest.version.desc())
+                .first()
+            )
+            review = accept_sealed_artifact(
+                db,
+                user=user,
+                artifact=artifact,
+                run=run,
+                project=project,
+                latest_manifest=latest_manifest,
+            )
+            return ok({
+                "review_id": review.id,
+                "artifact_id": review.artifact_id,
+                "action": review.action,
+                "reviewer": review.reviewer,
+                "manifest_hash": review.manifest_hash,
+            }, "工件已接受")
+        except (ArtifactReviewError, CodeAuthorizationError) as exc:
+            return fail(exc.reason)
 
     if act == "clear_history":
         db.query(ChatMessage).filter(ChatMessage.agent_id == body.agent_id, ChatMessage.session_id == body.session_id).delete()

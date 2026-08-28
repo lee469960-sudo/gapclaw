@@ -39,6 +39,20 @@ services:
       GAP_ARCH: ${GAP_ARCH:-amd}
       DATA_DIR: /app/data
       WORKPLACE_DIR: /app/data/workplaces
+      CODE_REPOSITORY_ALLOWLIST: '${CODE_REPOSITORY_ALLOWLIST:-[]}'
+      CODE_REPOSITORY_INTERNAL_CIDRS: '${CODE_REPOSITORY_INTERNAL_CIDRS:-[]}'
+      CODE_REPOSITORY_USE_TRANSPORT_PROXY: '${CODE_REPOSITORY_USE_TRANSPORT_PROXY:-false}'
+      CODE_REPOSITORY_ALLOW_PUBLIC_HTTP: '${CODE_REPOSITORY_ALLOW_PUBLIC_HTTP:-false}'
+      CODE_REPOSITORY_HTTP_PROXY: '${CODE_REPOSITORY_HTTP_PROXY:-}'
+      CODE_REPOSITORY_HTTPS_PROXY: '${CODE_REPOSITORY_HTTPS_PROXY:-}'
+      # 同源 Workspace 双根：API 容器视角 + Docker daemon 宿主机视角，指向同一存储
+      CODE_WORKSPACE_API_ROOT: /app/data/code-agent/runs
+      CODE_WORKSPACE_HOST_ROOT: ${GAP_DATA_DIR:-./data}/code-agent/runs
+      # 本地只读仓库根（JSON 数组字符串），seed 会在此创建默认 demo 仓库
+      CODE_LOCAL_REPOSITORY_ROOTS: '["${GAP_DATA_DIR:-./data}/code-agent/repos"]'
+      # 可信 CodeAgent runner 镜像 digest（构建 deploy/code-agent-runner.Dockerfile 后填入）
+      # 格式: 镜像名@sha256:<64位hex>，例如 code-agent-runner@sha256:...
+      CODE_TRUSTED_IMAGE_DIGESTS: '${CODE_TRUSTED_IMAGE_DIGESTS:-[]}'
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}

@@ -9,13 +9,13 @@
             <el-option label="bash" value="/bin/bash" />
             <el-option label="sh" value="/bin/sh" />
           </el-select>
-          <el-upload :show-file-list="false" :http-request="onUpload" :disabled="!sandboxId">
-            <el-button size="small" :loading="uploading" :disabled="!sandboxId">上传</el-button>
-          </el-upload>
-          <el-button size="small" :loading="downloading" :disabled="!sandboxId" @click="onDownload">
-            下载
-          </el-button>
         </template>
+        <el-upload :show-file-list="false" :http-request="onUpload" :disabled="!resourceId">
+          <el-button size="small" :loading="uploading" :disabled="!resourceId">上传</el-button>
+        </el-upload>
+        <el-button size="small" :loading="downloading" :disabled="!resourceId" @click="onDownload">
+          下载
+        </el-button>
         <el-button size="small" @click="reconnect">重连</el-button>
       </div>
       <span class="status" :class="{ ok: connected, err: errored }">{{ statusText }}</span>
@@ -50,10 +50,67 @@ let term, fitAddon, ws, dataDisposable, resizeDisposable
 let started = false
 
 const statusText = computed(() => statusMsg.value)
-const sandboxId = computed(() => props.initPayload?.id || '')
+const resourceId = computed(() => props.initPayload?.id || '')
+const sandboxId = computed(() => (props.variant === 'sandbox' ? resourceId.value : ''))
+
+function triggerBlobDownload(blob, name) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function blobLooksLikeJsonError(blob) {
+  const ctype = String(blob?.type || '')
+  if (ctype.includes('json') || ctype.includes('text/plain')) {
+    try {
+      const parsed = JSON.parse(await blob.text())
+      if (parsed && typeof parsed.code === 'number' && parsed.code !== 0) {
+        ElMessage.error(parsed.msg || '操作失败')
+        return true
+      }
+    } catch {
+      /* not JSON */
+    }
+  }
+  return false
+}
 
 async function onUpload({ file }) {
-  if (!sandboxId.value) return
+  if (!resourceId.value) return
+  if (props.variant === 'ssh') {
+    let dir = '.'
+    try {
+      const { value } = await ElMessageBox.prompt(
+        '保存到远程目录，例如 /home/ubuntu 或 . （用户主目录）',
+        '上传文件',
+        {
+          confirmButtonText: '上传',
+          cancelButtonText: '取消',
+          inputValue: '.',
+          inputPlaceholder: '远程目录',
+        },
+      )
+      dir = (value || '.').trim() || '.'
+    } catch {
+      return
+    }
+    uploading.value = true
+    try {
+      const fd = new FormData()
+      fd.append('action', 'sftp_upload')
+      fd.append('id', resourceId.value)
+      fd.append('path', dir)
+      fd.append('file', file)
+      const res = await api.post('/pages/page_terminal.cgi', fd)
+      ElMessage.success(res.msg || `已上传 ${file.name}`)
+    } finally {
+      uploading.value = false
+    }
+    return
+  }
   uploading.value = true
   try {
     const fd = new FormData()
@@ -69,7 +126,38 @@ async function onUpload({ file }) {
 }
 
 async function onDownload() {
-  if (!sandboxId.value) return
+  if (!resourceId.value) return
+  if (props.variant === 'ssh') {
+    let path
+    try {
+      const { value } = await ElMessageBox.prompt(
+        '输入远程文件路径，例如 /home/ubuntu/report.md 或 ~/a.txt',
+        '下载文件',
+        {
+          confirmButtonText: '下载',
+          cancelButtonText: '取消',
+          inputPlaceholder: '远程路径',
+          inputValidator: (v) => (!!(v || '').trim() ? true : '请输入路径'),
+        },
+      )
+      path = (value || '').trim()
+    } catch {
+      return
+    }
+    downloading.value = true
+    try {
+      const res = await api.get('/pages/page_terminal.cgi', {
+        params: { action: 'sftp_download', id: resourceId.value, path },
+        responseType: 'blob',
+      })
+      if (await blobLooksLikeJsonError(res.data)) return
+      const name = path.split('/').filter(Boolean).pop() || 'download'
+      triggerBlobDownload(res.data, name)
+    } finally {
+      downloading.value = false
+    }
+    return
+  }
   let path
   try {
     const { value } = await ElMessageBox.prompt(
@@ -92,13 +180,9 @@ async function onDownload() {
       params: { action: 'download_workplace', id: sandboxId.value, path },
       responseType: 'blob',
     })
+    if (await blobLooksLikeJsonError(res.data)) return
     const name = path.split('/').filter(Boolean).pop() || 'download'
-    const url = URL.createObjectURL(res.data)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = name
-    a.click()
-    URL.revokeObjectURL(url)
+    triggerBlobDownload(res.data, name)
   } finally {
     downloading.value = false
   }

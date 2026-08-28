@@ -27,3 +27,8 @@ benchmark/datasets/workbuddy_official/manifest.json
 .vscode/*.http.env
 .env.vscode
 *.http.env
+
+# Local agent/runtime junk (do not publish)
+logs/
+.codex/
+.claude/settings.local.json

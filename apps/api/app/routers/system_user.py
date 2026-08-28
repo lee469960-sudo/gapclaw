@@ -16,6 +16,7 @@ class UserBody(BaseModel):
     action: str | None = None
     username: str | None = None
     old_username: str | None = None
+    organization_id: str | None = None
     password: str | None = None
     roles: list[str] | None = None
     assignable_roles: list[str] | None = None
@@ -68,6 +69,7 @@ async def user_action(body: UserBody, user: User = Depends(get_session_user), db
             roles = [r.strip() for r in roles.split(",") if r.strip()]
         u = User(
             username=body.username or "",
+            organization_id=(body.organization_id or "default").strip() or "default",
             password_hash=hash_password(body.password or "123456"),
             roles=json.dumps(roles),
             permissions=json.dumps(body.permission or []),
@@ -86,6 +88,8 @@ async def user_action(body: UserBody, user: User = Depends(get_session_user), db
             u.username = body.username
         if body.password:
             u.password_hash = hash_password(body.password)
+        if body.organization_id is not None:
+            u.organization_id = body.organization_id.strip() or "default"
         if body.roles is not None:
             u.roles = json.dumps(body.roles)
         if body.permission is not None:

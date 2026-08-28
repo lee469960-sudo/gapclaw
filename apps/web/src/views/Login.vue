@@ -21,7 +21,6 @@
               placeholder="验证码"
               maxlength="4"
               class="captcha-input"
-              @keyup.enter="onLogin"
             />
             <button type="button" class="captcha-box" :title="'点击刷新'" @click="loadCaptcha">
               {{ captchaCode || '····' }}
@@ -40,7 +39,7 @@ import { reactive, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { postCgi } from '../api'
-import { clearShell } from '../session'
+import { clearShell, setLoginExpiry } from '../session'
 import ThemeSwitch from '../components/ThemeSwitch.vue'
 
 const router = useRouter()
@@ -84,6 +83,7 @@ async function loadCaptcha() {
 }
 
 async function onLogin() {
+  if (loading.value) return
   if (!form.captcha?.trim()) {
     ElMessage.warning('请输入验证码')
     return
@@ -92,6 +92,7 @@ async function onLogin() {
   try {
     clearShell()
     await postCgi('/login.cgi', form)
+    setLoginExpiry(Date.now() + 24 * 3600 * 1000)
     router.push('/')
   } catch {
     await loadCaptcha()

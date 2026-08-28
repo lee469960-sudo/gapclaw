@@ -225,6 +225,52 @@ html.dark .md-code-block {
   overflow-x: auto;
 }
 
+/* Inline .sql file → code box (hydrated by AgentChat.vue) */
+.md-sql-inline {
+  margin: 0.7em 0;
+  border: 1px solid var(--gap-card-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.md-sql-inline-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  color: var(--gap-text);
+  background: var(--gap-hover-bg);
+  user-select: none;
+}
+
+.md-sql-inline-summary::-webkit-details-marker {
+  display: none;
+}
+
+.md-sql-inline-summary .md-file-chip-icon {
+  font-weight: 700;
+  color: var(--md-code-lang, #1a7f37);
+}
+
+.md-sql-inline-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.md-sql-inline .md-code-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.md-sql-inline-download {
+  display: inline-flex;
+  margin: 8px 12px;
+}
+
 /* highlight.js token colors (IDE-like) */
 .md-code-block .hljs-keyword,
 .md-code-block .hljs-selector-tag {
@@ -436,11 +482,6 @@ html.dark .md-code-block {
   border: none;
   border-radius: 0;
   border-top: 1px solid var(--gap-card-border);
-}
-
-/* Export result card: stats table + 分析摘要 (执行过程 is Vue exec-card) */
-.md-export-result > .md-table-wrap {
-  margin-top: 0;
 }
 
 /* File download chips */

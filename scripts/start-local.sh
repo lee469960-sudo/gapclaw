@@ -30,29 +30,20 @@ need_cmd() {
 }
 
 start_api() {
-  cd "$ROOT/apps/api"
-  # Only watch app/ source — never data/workplaces (LLM may write task/*.py mid-run).
-  # Use ** globs; after changing excludes: stop-local && start-local.
-  # Prefer WATCHFILES_FORCE_POLLING=0; exclude nested workplaces explicitly.
+  # Uvicorn WatchFilesReload always watches Path.cwd() AND default-includes *.py
+  # (even without --reload-include). Starting from apps/api therefore watches
+  # data/code-agent/runs, reloads mid-prepare, and janitor marks startup_recovery.
+  # cwd must be the code dir only; --app-dir/--env-file keep imports and .env.
+  cd "$ROOT/apps/api/app"
   nohup env WATCHFILES_FORCE_POLLING="${WATCHFILES_FORCE_POLLING:-0}" \
-    .venv/bin/uvicorn app.main:app \
+    "$ROOT/apps/api/.venv/bin/uvicorn" app.main:app \
+    --app-dir "$ROOT/apps/api" \
+    --env-file "$ROOT/apps/api/.env" \
     --host 127.0.0.1 \
     --port "$API_PORT" \
     --log-config "$ROOT/apps/api/logging_config.json" \
     --reload \
-    --reload-dir app \
-    --reload-include '*.py' \
-    --reload-exclude '**/data/**' \
-    --reload-exclude 'data/**' \
-    --reload-exclude '**/workplaces/**' \
-    --reload-exclude '**/workplace/**' \
-    --reload-exclude '**/task/**' \
-    --reload-exclude '**/tmp/**' \
-    --reload-exclude '**/lessons/**' \
-    --reload-exclude '*.pyc' \
-    --reload-exclude '*.json' \
-    --reload-exclude '*.xlsx' \
-    --reload-exclude '*.md' \
+    --reload-dir "$ROOT/apps/api/app" \
     >"$LOG_DIR/api.log" 2>&1 &
   echo $! >"$PID_DIR/api.pid"
 }

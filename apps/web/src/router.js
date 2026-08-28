@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Login from './views/Login.vue'
 import Layout from './views/Layout.vue'
-import { fetchShell, getShell } from './session'
+import { fetchShell, getShell, getLoginExpiry, clearShell } from './session'
 
 const routes = [
   { path: '/login', name: 'login', component: Login, meta: { public: true } },
@@ -24,6 +24,7 @@ const routes = [
     children: [
       { path: 'groups', name: 'groups', component: () => import('./views/Groups.vue'), meta: { route: '/groups' } },
       { path: 'agents', name: 'agents', component: () => import('./views/Agents.vue'), meta: { route: '/agents', keepAlive: true } },
+      { path: 'code-projects', name: 'code-projects', component: () => import('./views/CodeProjects.vue'), meta: { route: '/code-projects' } },
       { path: 'sandboxes', name: 'sandboxes', component: () => import('./views/Sandboxes.vue'), meta: { route: '/sandboxes', keepAlive: true } },
       { path: 'skills', name: 'skills', component: () => import('./views/Skills.vue'), meta: { route: '/skills' } },
       { path: 'mcps', name: 'mcps', component: () => import('./views/Mcps.vue'), meta: { route: '/mcps' } },
@@ -48,6 +49,12 @@ const router = createRouter({ history: createWebHistory(), routes })
 
 router.beforeEach(async (to, from, next) => {
   if (to.meta.public) return next()
+
+  const expiry = getLoginExpiry()
+  if (expiry != null && Date.now() >= expiry) {
+    clearShell()
+    return next('/login')
+  }
 
   let data = getShell()
   if (!data) {

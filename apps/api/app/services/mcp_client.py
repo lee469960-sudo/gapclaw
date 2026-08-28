@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -688,10 +689,6 @@ async def connect_mcp_detail(mcp) -> dict[str, Any]:
     return {"tools": [], "error": f"不支持的协议: {protocol}"}
 
 
-async def connect_mcp(mcp) -> list[dict]:
-    return (await connect_mcp_detail(mcp)).get("tools") or []
-
-
 async def call_mcp_tool(mcp, tool: str, args: dict) -> str:
     protocol = (mcp.protocol or "sse").lower()
     tool_name = (tool or "").strip()
@@ -749,3 +746,468 @@ async def call_mcp_tool(mcp, tool: str, args: dict) -> str:
             return _format_mcp_call_failure(e, url=mcp.url)
 
     return "MCP 调用失败: ValueError: 不支持的协议类型"
+
+
+# ---------- Per-run session manager (reuse + failure recovery) ----------
+
+
+class _SessionBroken(Exception):
+    """Cached MCP session is dead (stdio process exited / streamable transport or session error)."""
+
+
+@dataclass
+class _MCPHandle:
+    """One cached MCP session, discriminated by protocol."""
+
+    protocol: str  # "stdio" | "streamable"
+    stdio: _StdioSession | None = None
+    streamable: _StreamableSession | None = None
+    error: str = ""  # non-empty → handshake failed with a business error; surface it
+
+
+def _stdio_config(mcp) -> tuple[str, list[str], dict]:
+    """Extract (command, args, env) from an MCP row for stdio sessions."""
+    command = (getattr(mcp, "command", None) or "").strip()
+    arg_list = _parse_json_obj(getattr(mcp, "command_args", None), [])
+    if isinstance(getattr(mcp, "command_args", None), list):
+        arg_list = mcp.command_args
+    env = _parse_json_obj(getattr(mcp, "command_env", None), {})
+    if isinstance(getattr(mcp, "command_env", None), dict):
+        env = mcp.command_env
+    headers = _parse_headers(getattr(mcp, "headers", None) or "{}")
+    for k, v in headers.items():
+        env.setdefault(str(k), str(v))
+    if headers.get("Authorization") and "GETNOTE_API_KEY" not in env:
+        env["GETNOTE_API_KEY"] = headers["Authorization"]
+    if headers.get("X-Client-ID") and "GETNOTE_CLIENT_ID" not in env:
+        env["GETNOTE_CLIENT_ID"] = headers["X-Client-ID"]
+    return command, [str(a) for a in arg_list], env
+
+
+def _json_keys_summary(text: str, *, max_keys: int = 24, max_chars: int = 320) -> str:
+    """Compact key/field summary of a JSON payload for the oversized-result notice.
+
+    Lets the model record a view→field mapping without READ-ing the full materialized
+    file. Returns "" for non-JSON or empty payloads (caller drops the line).
+    """
+    try:
+        data = json.loads(text)
+    except Exception:
+        return ""
+    parts: list[str] = []
+    if isinstance(data, dict):
+        top = list(data.keys())
+        parts.extend(str(k) for k in top[:max_keys])
+        for k in top[:3]:
+            v = data.get(k)
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                fields = [str(f) for f in v[0].keys()][:max_keys]
+                parts.append(f"{k}[]: {', '.join(fields)}")
+    elif isinstance(data, list):
+        if not data:
+            return ""
+        parts.append(f"[{len(data)} 项]")
+        if isinstance(data[0], dict):
+            parts.extend(str(f) for f in list(data[0].keys())[:max_keys])
+    if not parts:
+        return ""
+    summary = ", ".join(parts)
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 1] + "…"
+    return f"结构摘要: {summary}"
+
+
+def _result_shape(text: str) -> str:
+    """Compact element/row count for a JSON payload (D13).
+
+    Lets the model judge whether a result is empty/incomplete without READ-ing the
+    materialized file. Returns "" for non-JSON or empty payloads.
+    """
+    try:
+        data = json.loads(text)
+    except Exception:
+        return ""
+    if isinstance(data, list):
+        return f"[{len(data)} 项]"
+    if isinstance(data, dict):
+        lists = [len(v) for v in data.values() if isinstance(v, list)]
+        if lists:
+            return f"[{max(lists)} 行]"
+        return f"[{len(data)} 键]"
+    return ""
+
+
+_SQL_KEYWORD_RE = re.compile(
+    r"\b(select|with|show|desc|describe|explain|insert|update|delete|merge|create|drop|alter|truncate|call)\b",
+    re.I,
+)
+
+
+def _normalize_sql(sql: str) -> str:
+    """Normalize a SQL string for dedup (react-engine-v16 R4).
+
+    Collapses whitespace, lowercases, and strips trailing semicolons so the same
+    query with different formatting/case/punctuation shares one key. LIMIT/OFFSET
+    values are preserved (never stripped), so a legitimately different pagination
+    stays a different key.
+    """
+    s = (sql or "").strip()
+    s = s.rstrip(";").strip()
+    s = " ".join(s.split())
+    return s.lower()
+
+
+def _normalize_ads_sql_args(args: dict) -> dict:
+    """Copy ``args``, SQL-normalizing any SQL-looking string value.
+
+    Only ``execute_ads_sql`` uses this: its payload is the SQL text, so
+    whitespace/case/trailing-semicolon variants collapse to one dedup key. Non-SQL
+    string values (e.g. a database name) are left untouched.
+    """
+    if not isinstance(args, dict):
+        return args
+    out: dict = {}
+    for k, v in args.items():
+        if isinstance(v, str) and _SQL_KEYWORD_RE.search(v):
+            out[k] = _normalize_sql(v)
+        else:
+            out[k] = v
+    return out
+
+
+class McpSessionManager:
+    """Per-run cache of MCP sessions keyed by ``mcp.id``.
+
+    Reuses one stdio subprocess / streamable HTTP session across every tool call
+    in a run instead of handshaking + respawning per call. Legacy ``http``/``rest``
+    is stateless and never cached.
+
+    On a session-level failure (stdio process exit, streamable transport/session
+    error) the dead session is dropped, rebuilt once, and the single call retried
+    — layered on top of the per-call transport retry already in ``call_mcp_tool``.
+
+    Observability: ``events`` records every create/reuse/rebuild, and each is also
+    emitted via ``logger.info`` so the runtime can surface or audit them.
+    """
+
+    def __init__(
+        self,
+        *,
+        query_cache: dict | None = None,
+        mcp_results: list | None = None,
+        run_ts: str = "",
+        sandbox=None,
+        large_result_chars: int = 6000,
+        max_cache_entries: int = 100,
+        max_cached_result_chars: int = 2_000_000,
+        max_mcp_results: int = 100,
+    ) -> None:
+        self._sessions: dict[str, _MCPHandle] = {}
+        self._client: httpx.AsyncClient | None = None
+        self._closed = False
+        self.events: list[dict] = []
+        # Query dedup + oversized-result materialization (wired in by the runtime).
+        self.query_cache: dict = query_cache if query_cache is not None else {}
+        self.mcp_results: list = mcp_results if mcp_results is not None else []
+        self.run_ts: str = run_ts
+        self.sandbox = sandbox
+        self.large_result_chars = large_result_chars
+        # Cross-run query_cache bounds (D7): keep the persisted AgentRunState.state
+        # blob from growing without limit. LRU by entry count + per-entry size cap.
+        self.max_cache_entries = max_cache_entries
+        self.max_cached_result_chars = max_cached_result_chars
+        # Bounds the persisted mcp_results list (D6): keep the most recent N, mirroring
+        # the query_cache LRU. A monotonic seq (not len(list)) avoids file-name reuse
+        # after trimming, so a resumed run never overwrites a previously-written result.
+        self.max_mcp_results = max_mcp_results
+        self._next_mcp_seq = max((int(r.get("seq", 0)) for r in self.mcp_results), default=-1) + 1
+
+    async def __aenter__(self) -> "McpSessionManager":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    def _observe(self, event: str, mcp_id: str, tool: str = "", detail: str = "") -> None:
+        self.events.append(
+            {"event": event, "mcp_id": mcp_id, "tool": tool, "detail": detail}
+        )
+        logger.info("mcp_session %s mcp=%s tool=%s %s", event, mcp_id, tool, detail)
+
+    def _key(self, mcp) -> str:
+        return str(getattr(mcp, "id", None) or "")
+
+    def _client_for_streamable(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=_STREAMABLE_CALL_TIMEOUT, trust_env=False
+            )
+        return self._client
+
+    async def call_tool(self, mcp, tool: str, args: dict) -> str:
+        protocol = (mcp.protocol or "sse").lower()
+        tool_name = (tool or "").strip()
+        if not tool_name:
+            return "MCP 错误: 未指定工具名"
+
+        # Query dedup: identical (mcp, tool, args) already materialized → return a
+        # reference instead of re-calling + re-writing the result file.
+        key = self._dedup_key(mcp, tool_name, args)
+        cached = self.query_cache.get(key)
+        if cached:
+            self._observe("dedup_hit", self._key(mcp), tool_name, str(cached.get("path", "")))
+            return self._cached_reference(cached)
+
+        # Legacy http/rest is stateless: direct call, never session-cached.
+        if protocol in ("http", "rest", "legacy"):
+            headers = _parse_headers(mcp.headers)
+            if not mcp.url:
+                text = "MCP URL 未配置"
+            else:
+                try:
+                    text = await _legacy_call_tool(mcp.url, headers, tool_name, args or {})
+                except Exception as e:
+                    text = _format_mcp_call_failure(e, url=mcp.url)
+        else:
+            text = await self._call_with_session(mcp, protocol, tool_name, args or {})
+
+        # Materialize EVERY non-empty result to disk + query_cache as a survival /
+        # dedup side effect (D10/R1): the >6000 gate is gone. Only oversized results
+        # are replaced by a "written to file" reference; small results stay inline
+        # so the model can read them directly (tool_result_clip still clips context).
+        if text:
+            reference = self._materialize(mcp, tool_name, args, text, key)
+            if len(text) > self.large_result_chars:
+                return reference
+        return text
+
+    async def _call_with_session(self, mcp, protocol: str, tool_name: str, args: dict) -> str:
+        key = self._key(mcp)
+        try:
+            handle = self._sessions.get(key)
+            if handle is None:
+                handle = await self._create(mcp, protocol)
+                self._sessions[key] = handle
+                self._observe("create", key, tool_name)
+            else:
+                self._observe("reuse", key, tool_name)
+            try:
+                return await self._call(handle, tool_name, args or {})
+            except _SessionBroken as exc:
+                # Dead session → drop, rebuild once, retry the single call.
+                self._observe("rebuild", key, tool_name, str(exc)[:200])
+                await self._close_one(handle)
+                self._sessions.pop(key, None)
+                handle = await self._create(mcp, protocol)
+                self._sessions[key] = handle
+                return await self._call(handle, tool_name, args or {})
+        except _SessionBroken as exc:
+            # Rebuild also failed (or spawn failed up front) → surface as failure text.
+            return _format_mcp_call_failure(exc)
+
+    def _dedup_key(self, mcp, tool: str, args: dict) -> str:
+        # Dedup is MCP-only by design (D11). The `query_cache` signature interface
+        # (`_dedup_key` + `_cached_reference`) is deliberately generic so RAG/httpmcp
+        # can adopt it later without touching the runtime; not implemented for them now.
+        mid = str(getattr(mcp, "id", None) or "")
+        if tool == "execute_ads_sql":
+            # react-engine-v16 R4: SQL 归一化特例 — 去空白/大小写/尾分号，LIMIT/OFFSET 不同仍视为不同。
+            args = _normalize_ads_sql_args(args)
+        try:
+            norm = json.dumps(args or {}, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            norm = repr(args)
+        return f"{mid}\x00{tool}\x00{norm}"
+
+    def _trim_query_cache(self) -> None:
+        """LRU by entry count: drop the oldest-inserted keys past the cap.
+
+        ``dict`` preserves insertion order, so ``next(iter(...))`` is the oldest
+        entry. Bounds the persisted ``query_cache`` (cross-run checkpoint blob)
+        without a hard gate on the loop (D7, memory hygiene only).
+        """
+        while len(self.query_cache) > self.max_cache_entries:
+            oldest = next(iter(self.query_cache))
+            del self.query_cache[oldest]
+
+    def _trim_mcp_results(self) -> None:
+        """Keep only the most recent ``max_mcp_results`` entries (D6).
+
+        Dropped entries leave their result files on disk; only the in-memory
+        manifest (persisted into AgentRunState.state) is bounded.
+        """
+        while len(self.mcp_results) > self.max_mcp_results:
+            self.mcp_results.pop(0)
+
+    def _cached_reference(self, entry: dict) -> str:
+        path = entry.get("path", "")
+        size = entry.get("size", 0)
+        shape = entry.get("shape", "")
+        shape_hint = f"，{shape}" if shape else ""
+        return (
+            f"该结果已缓存/已落盘 {path}（{size} 字符{shape_hint}）。"
+            "请 READ 取回该文件，勿重跑；或用 SHELL 继续处理。"
+        )
+
+    def _materialize(self, mcp, tool: str, args: dict, text: str, key: str) -> str:
+        from app.services.workplace import workplace_root
+
+        sid = self.sandbox.id if self.sandbox else "default"
+        seq = self._next_mcp_seq
+        self._next_mcp_seq += 1
+        rel = f"task/{self.run_ts}/mcp_result_{seq}.json"
+        try:
+            wp = workplace_root(sid) / rel
+            wp.parent.mkdir(parents=True, exist_ok=True)
+            wp.write_text(text, encoding="utf-8")
+        except Exception:
+            return text
+        shape = _result_shape(text)
+        self.mcp_results.append(
+            {"seq": seq, "path": rel, "tool": tool, "args": args, "size": len(text), "shape": shape}
+        )
+        self._trim_mcp_results()
+        if len(text) <= self.max_cached_result_chars:
+            self.query_cache[key] = {"path": rel, "tool": tool, "size": len(text), "shape": shape}
+            self._trim_query_cache()
+        self._observe("materialize", self._key(mcp), tool, rel)
+        keys_summary = _json_keys_summary(text)
+        summary_line = f"{keys_summary}\n" if keys_summary else ""
+        shape_hint = f"，{shape}" if shape else ""
+        return (
+            f"MCP 结果过大（{len(text)} 字符{shape_hint}），已全量写入 {rel}。\n"
+            f"{summary_line}"
+            "请勿在本轮上下文粘贴原始数据；用 READ 查看结构，"
+            "或用 SHELL + pandas/openpyxl 读取该文件继续处理（如生成 xlsx）。"
+        )
+
+    async def _create(self, mcp, protocol: str) -> _MCPHandle:
+        if _is_stdio(protocol):
+            command, arg_list, env = _stdio_config(mcp)
+            if not command:
+                return _MCPHandle("stdio", error="MCP 错误: stdio 未配置 command")
+            sess = _StdioSession(command, arg_list, env)
+            try:
+                await sess.start()
+            except Exception as e:
+                raise _SessionBroken(f"stdio 启动失败: {e}") from e
+            try:
+                init = await sess.request(
+                    "initialize",
+                    {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {"name": "gap", "version": "1.0"},
+                    },
+                )
+            except (RuntimeError, TimeoutError) as e:
+                await sess.close()
+                raise _SessionBroken(f"stdio initialize 失败: {e}") from e
+            if "error" in init:
+                await sess.close()
+                return _MCPHandle("stdio", error=_tool_result_text(init))
+            await sess.notify("notifications/initialized", {})
+            return _MCPHandle("stdio", stdio=sess)
+
+        # streamable
+        client = self._client_for_streamable()
+        sess = _StreamableSession(mcp.url, _parse_headers(mcp.headers))
+        try:
+            init = await sess.initialize(client)
+        except Exception as e:
+            raise _SessionBroken(f"streamable initialize 失败: {e}") from e
+        if init and "error" in init:
+            return _MCPHandle("streamable", error=_tool_result_text(init))
+        return _MCPHandle("streamable", streamable=sess)
+
+    async def _call(self, handle: _MCPHandle, tool: str, args: dict) -> str:
+        if handle.error:
+            return handle.error
+        if handle.protocol == "stdio":
+            return await self._call_stdio(handle.stdio, tool, args)
+        return await self._call_streamable(handle.streamable, tool, args)
+
+    async def _call_stdio(self, sess: _StdioSession, tool: str, args: dict) -> str:
+        try:
+            result = await sess.request("tools/call", {"name": tool, "arguments": args or {}})
+        except (RuntimeError, TimeoutError) as e:
+            raise _SessionBroken(f"stdio 进程异常: {e}") from e
+        except Exception as e:
+            return _format_mcp_call_failure(e)
+        text = _tool_result_text(result)
+        return await _append_tool_catalog_hint(sess, text)
+
+    async def _streamable_rpc_once(
+        self, sess: _StreamableSession, client: httpx.AsyncClient, tool: str, args: dict
+    ) -> str:
+        result = await sess.rpc(client, "tools/call", {"name": tool, "arguments": args or {}})
+        text = _tool_result_text(result)
+        if _looks_like_unknown_tool(text):
+            listed = await sess.rpc(client, "tools/list", {})
+            hint = _format_available_tools(_normalize_tools(listed or {}))
+            if hint:
+                text = (
+                    f"{text}\n{hint}\n"
+                    '请改用上列真实工具名，例如: MCP: list_notes {"since_id":0}'
+                )
+        return text
+
+    async def _call_streamable(self, sess: _StreamableSession, tool: str, args: dict) -> str:
+        client = self._client_for_streamable()
+        max_attempts = (
+            _TRANSPORT_RETRY_MAX
+            if (tool or "").strip().lower() in _QUERY_LIKE_TOOLS
+            else 1
+        )
+        last_exc: BaseException | None = None
+        for attempt in range(max_attempts):
+            try:
+                return await self._streamable_rpc_once(sess, client, tool, args or {})
+            except Exception as e:
+                last_exc = e
+                can_retry = attempt + 1 < max_attempts and _should_retry_transport(tool, e)
+                logger.warning(
+                    "mcp_session streamable call failed tool=%s attempt=%s/%s retry=%s err=%s",
+                    tool,
+                    attempt + 1,
+                    max_attempts,
+                    can_retry,
+                    _format_mcp_call_failure(e, url=sess.url),
+                )
+                if can_retry:
+                    delay = _TRANSPORT_RETRY_BACKOFF_S[
+                        min(attempt, len(_TRANSPORT_RETRY_BACKOFF_S) - 1)
+                    ]
+                    await asyncio.sleep(delay)
+                    continue
+                if _is_transport_error(e):
+                    raise _SessionBroken(f"streamable 连接失败: {e}") from e
+                return _format_mcp_call_failure(e, url=sess.url)
+        raise _SessionBroken(str(last_exc or "streamable call exhausted"))
+
+    async def _close_one(self, handle: _MCPHandle) -> None:
+        if handle.stdio:
+            await handle.stdio.close()
+        # streamable session has no persistent transport of its own (shared client
+        # is closed in close()); nothing else to do here.
+
+    async def close(self) -> None:
+        """Close every cached session, swallowing per-session close errors.
+
+        A single misbehaving subprocess must not mask the run's real outcome (task 1.2).
+        """
+        if self._closed:
+            return
+        self._closed = True
+        for key, handle in list(self._sessions.items()):
+            try:
+                await self._close_one(handle)
+            except Exception:
+                logger.warning("mcp_session close failed mcp=%s", key, exc_info=True)
+        self._sessions.clear()
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+            self._client = None

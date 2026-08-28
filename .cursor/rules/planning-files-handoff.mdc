@@ -1,0 +1,27 @@
+---
+description: Cursor 只继承 Planning Files，不继承 Codex 对话上下文
+alwaysApply: true
+---
+
+# Handoff：Planning Files only
+
+Cursor 会话**不**继承 Codex（或其他 IDE）的对话历史、agent transcripts、或聊天摘要。跨工具接续只读磁盘上的 Planning Files。
+
+## 会话开始时
+
+1. 读 `.planning/.active_plan`（目录名）
+2. 读该目录下的 `task_plan.md`、`findings.md`、`progress.md`
+3. 需要任务/验收时，跟这些文件里的指针走 OpenSpec / specs，不要凭对话记忆补需求
+
+## 不要做
+
+- 不要假设 Codex 对话里说过什么
+- 不要把聊天记录当需求来源
+- 不要为了「接上一段聊天」去翻 transcript
+
+## 状态以文件为准
+
+- 当前 phase / Next Step → `task_plan.md`
+- 已做了什么、测试结果 → `progress.md`
+- 执行中发现 → `findings.md`
+- OpenSpec 勾选源仍是 change 的 `tasks.md`（路径写在 planning 文件里）

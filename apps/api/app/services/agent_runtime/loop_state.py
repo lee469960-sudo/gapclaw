@@ -19,8 +19,17 @@ class AgentLoopState:
     saved_paths: list[str] = field(default_factory=list)
     files_written: int = 0
     progress_lines: list[str] = field(default_factory=list)
-    ran_any_tool: bool = False
-    max_iters: int = 50
+    subtasks: list[dict] = field(default_factory=list)  # [{text, status}] status ∈ done/pending
+    resumed: bool = False  # True when this run resumed from a persisted checkpoint
+    goal: str = ""  # Original task goal (stable across resume; may differ from the latest user message)
+    # Long-task checkpoint extension (resume/perf):
+    run_ts: str = ""  # Task output dir suffix (reused across resume so files aren't orphaned)
+    mcp_results: list[dict] = field(default_factory=list)  # [{seq, path, tool, args, size}]
+    query_cache: dict = field(default_factory=dict)  # {dedup_key: {path, tool, size}}
+    plan_text: str = ""  # Raw PLAN body (carries view_map; restored on resume)
+    no_progress_streak: int = 0  # Consecutive no-progress rounds (v15 R1′ breakthrough-hint trigger, non-gating)
+    completion_signal_streak: int = 0  # Consecutive positive completion-declaration rounds (v16 R1, soft — non-gating)
+    fix_only_until_final: bool = False  # After an effective reflect FAIL, drop PLAN until the next FINAL
 
     def add_progress(self, line: str) -> None:
         """Append a progress line, avoiding dupes and capping length."""

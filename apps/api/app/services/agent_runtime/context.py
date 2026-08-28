@@ -4,10 +4,31 @@ Constructed once per invocation from run_react_loop parameters.
 """
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.models import Agent, LLMResource, Sandbox
+
+
+@dataclass(frozen=True)
+class CodeExecutionContext:
+    """Immutable control-plane snapshot attached only to an explicit Code run."""
+
+    run_id: str
+    project_id: str
+    manifest_id: str
+    manifest_version: int
+    repository: str
+    base_commit: str
+    task_contract_json: str
+    effective_policy_json: str
+    timeout_seconds: int
+    workspace_path: str
+    source_facts_json: str
+    runner_facts_json: str
+    container_id: str
+    image: str
 
 
 @dataclass(frozen=True)
@@ -23,14 +44,16 @@ class AgentContext:
     agent: Agent = field(compare=False, hash=False)
     session_id: str
     user_message: str
-    username: str
 
     # Resolved entities (computed once at startup)
     llm: LLMResource | None = field(compare=False, hash=False)
     sandbox: Sandbox | None = field(compare=False, hash=False)
     allowed_actions: list[str] = field(default_factory=list)
+    profile: str = "standard"
+    code_execution: CodeExecutionContext | None = None
+    tool_executor: Any = field(default=None, compare=False, hash=False)
 
-    # Skill / MCP / RAG bindings
+    # Skill / MCP / RAG / HttpMcp bindings
     skill_ids: list[str] = field(default_factory=list)
     mcp_ids: list[str] = field(default_factory=list)
     rag_ids: list[str] = field(default_factory=list)
@@ -42,13 +65,10 @@ class AgentContext:
     mcp_names: list[str] = field(default_factory=list)
 
     # Workplace / files
-    workplace_dir: str = ""
-    workplace_files: list[str] = field(default_factory=list)
     save_dir: str = ""
 
     # Message metadata
     note_content: str = ""
-    user_meta: dict = field(default_factory=dict)
     message_meta: dict | None = field(default=None)
 
     # Runtime key
@@ -65,13 +85,13 @@ class AgentContext:
         agent: Agent,
         session_id: str,
         user_message: str,
-        username: str,
-        workplace_dir: str = "",
-        workplace_files: list[str] | None = None,
         message_meta: dict | None = None,
         llm: LLMResource | None = None,
         sandbox: Sandbox | None = None,
         allowed_actions: list[str] | None = None,
+        profile: str = "standard",
+        code_execution: CodeExecutionContext | None = None,
+        tool_executor=None,
         skill_ids: list[str] | None = None,
         mcp_ids: list[str] | None = None,
         rag_ids: list[str] | None = None,
@@ -81,7 +101,6 @@ class AgentContext:
         mcp_names: list[str] | None = None,
         save_dir: str = "",
         note_content: str = "",
-        user_meta: dict | None = None,
         im_source: str = "",
     ) -> "AgentContext":
         chat_key = f"{agent.id}:{session_id}"
@@ -90,10 +109,12 @@ class AgentContext:
             agent=agent,
             session_id=session_id,
             user_message=user_message,
-            username=username,
             llm=llm,
             sandbox=sandbox,
             allowed_actions=list(allowed_actions or []),
+            profile=profile,
+            code_execution=code_execution,
+            tool_executor=tool_executor,
             skill_ids=list(skill_ids or []),
             mcp_ids=list(mcp_ids or []),
             rag_ids=list(rag_ids or []),
@@ -101,11 +122,8 @@ class AgentContext:
             skill_mds=list(skill_mds or []),
             skill_names=list(skill_names or []),
             mcp_names=list(mcp_names or []),
-            workplace_dir=workplace_dir,
-            workplace_files=list(workplace_files or []),
             save_dir=save_dir,
             note_content=note_content,
-            user_meta=dict(user_meta or {}),
             message_meta=message_meta,
             chat_key=chat_key,
             im_source=im_source,

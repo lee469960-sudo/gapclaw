@@ -3,6 +3,7 @@
 PAGE_ROUTE_MAP: dict[str, str] = {
     "/pages/page_group.cgi": "/groups",
     "/pages/page_agent.cgi": "/agents",
+    "/pages/page_code_project.cgi": "/code-projects",
     "/pages/page_sandbox.cgi": "/sandboxes",
     "/pages/page_skills.cgi": "/skills",
     "/pages/page_mcp.cgi": "/mcps",
@@ -43,6 +44,7 @@ MENU_GROUPS: list[dict] = [
         "items": [
             ("/pages/page_group.cgi", "智能体群"),
             ("/pages/page_agent.cgi", "_智能体_"),
+            ("/pages/page_code_project.cgi", "Code Projects"),
             ("/pages/page_sandbox.cgi", "沙箱管理"),
             ("/pages/page_skills.cgi", "Skills市场"),
             ("/pages/page_mcp.cgi", "MCP市场"),

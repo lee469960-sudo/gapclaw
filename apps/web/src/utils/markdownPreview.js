@@ -1,9 +1,8 @@
 /**
  * Post-process marked HTML for chat Markdown preview:
- * - linkify workplace file paths in <code>
+ * - linkify workplace file paths (bare or backticked) into download chips
  * - wrap / optionally fold tables
  * - promote file links to .md-file-chip cards
- * - export FINAL: stats table + 分析摘要 only (执行过程 uses AgentChat exec-card)
  * - query FINAL: Markdown table preview card by default
  * - fenced code blocks: toolbar + IDE-like syntax highlight (theme via CSS)
  *
@@ -50,9 +49,9 @@ hljs.registerLanguage('css', langCss)
 
 const FILE_EXT_RE = /\.(?:pdf|xlsx|xlsm|xls|csv|sql)$/i
 const CODE_FILE_RE = /<code>([^<]*\.(?:pdf|xlsx|xlsm|xls|csv|sql))<\/code>/gi
+const BARE_FILE_TOKEN_RE = /(`[^`\n]*`)|((?:[\p{L}\p{N}_.-]+\/)*[\p{L}\p{N}_.-]+\.(?:pdf|xlsx|xlsm|xls|csv|sql))/giu
 const TABLE_RE = /<table[\s\S]*?<\/table>/gi
 const ANCHOR_RE = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi
-const HEADING_RE = /<(h[23])(\s[^>]*)?>([\s\S]*?)<\/\1>/gi
 const JSON_FENCE_RE = /```(?:json|JSON)?\s*\n([\s\S]*?)```/g
 const CODE_BLOCK_RE = /<pre><code([^>]*)>([\s\S]*?)<\/code><\/pre>/gi
 const SQL_LANGUAGES = new Set([
@@ -284,11 +283,6 @@ function hasDeliverableAttachment(html) {
   return false
 }
 
-function isStatsMetaTable(tableHtml) {
-  const t = String(tableHtml || '')
-  return /项目/.test(t) && /内容/.test(t)
-}
-
 function tableDataRows(tableHtml) {
   const rows = String(tableHtml || '').match(/<tr[\s\S]*?<\/tr>/gi) || []
   const hasTh = /<th[\s\S]*?<\/th>/i.test(tableHtml)
@@ -330,11 +324,19 @@ function rowsToMarkdownTable(rows, maxRows = 30) {
   return md
 }
 
+/** Wrap bare file paths in backticks so linkifyWorkplaceFiles turns them into download chips. */
+export function linkifyBareFilePaths(text) {
+  return String(text || '').replace(BARE_FILE_TOKEN_RE, (full, code, bare) => {
+    if (code) return code
+    return `\`${bare}\``
+  })
+}
+
 /** Convert JSON row-array fences into GFM tables before marked.parse */
 export function prepareMarkdownForPreview(text) {
   const src = String(text || '')
   if (!src.trim()) return src
-  return src.replace(JSON_FENCE_RE, (full, body) => {
+  const withTables = src.replace(JSON_FENCE_RE, (full, body) => {
     try {
       const data = JSON.parse(String(body || '').trim())
       const rows = extractRowList(data)
@@ -346,23 +348,7 @@ export function prepareMarkdownForPreview(text) {
       return full
     }
   })
-}
-
-/** Raw markdown / message content: export result card */
-export function isExportResultMarkdown(text) {
-  return /###\s*统计结果/.test(String(text || ''))
-}
-
-/** Query / ads result card (Markdown table preview) */
-export function isQueryResultMarkdown(text) {
-  const s = String(text || '')
-  if (isExportResultMarkdown(s)) return false
-  return /###\s*[^\n]*查询结果/.test(s)
-}
-
-/** Result-card markdown (export/query). Exec-card visibility is independent. */
-export function isResultCardMarkdown(text) {
-  return isExportResultMarkdown(text) || isQueryResultMarkdown(text)
+  return linkifyBareFilePaths(withTables)
 }
 
 export function linkifyWorkplaceFiles(html) {
@@ -372,6 +358,9 @@ export function linkifyWorkplaceFiles(html) {
       return `<code>${escapeAttr(rawPath)}</code>`
     }
     const name = path.split('/').pop() || path
+    if (/\.sql$/i.test(path)) {
+      return sqlInlineBlock(path, name)
+    }
     return (
       `<a href="#" class="wp-download md-file-chip" data-wp-path="${escapeAttr(path)}" ` +
       `title="下载 ${escapeAttr(name)}">` +
@@ -380,6 +369,23 @@ export function linkifyWorkplaceFiles(html) {
       `</a>`
     )
   })
+}
+
+/** Render a .sql file path as an inline code box (fetched + filled by the host page). */
+function sqlInlineBlock(path, name) {
+  return (
+    `<details class="md-sql-inline" open data-wp-path="${escapeAttr(path)}" data-sql-loaded="false">` +
+    `<summary class="md-sql-inline-summary">` +
+    `<span class="md-file-chip-icon" aria-hidden="true">SQL</span>` +
+    `<code class="md-sql-inline-name">${escapeHtmlText(name)}</code>` +
+    `</summary>` +
+    `<div class="md-sql-inline-body md-code-block" data-code-language="sql">` +
+    `<pre class="md-sql-inline-pre"><code class="hljs language-sql md-sql-inline-code">加载 SQL…</code></pre>` +
+    `</div>` +
+    `<a href="#" class="wp-download md-file-chip md-sql-inline-download" ` +
+    `data-wp-path="${escapeAttr(path)}" title="下载 ${escapeAttr(name)}">下载</a>` +
+    `</details>`
+  )
 }
 
 function fileIconFor(name) {
@@ -439,18 +445,14 @@ export function chipifyFileLinks(html) {
   })
 }
 
-/**
- * Non-export messages: wrap tables; fold only when attachment + rows > 8.
- * Never fold 项目|内容 stats tables.
- */
+/** Wrap tables; fold only when the message has a file attachment and rows > 8. */
 export function wrapAndFoldTables(html) {
   const src = String(html || '')
   if (!/<table[\s\S]*?<\/table>/i.test(src)) return src
-  if (/\bmd-export-result\b|\bmd-query-result\b/.test(src)) return src
+  if (/\bmd-query-result\b/.test(src)) return src
   const hasAttach = hasDeliverableAttachment(src)
   return src.replace(TABLE_RE, (table) => {
     const wrapped = wrapTableOnly(table)
-    if (isStatsMetaTable(table)) return wrapped
     const rows = tableDataRows(table)
     if (hasAttach && rows > 8) {
       return (
@@ -464,87 +466,10 @@ export function wrapAndFoldTables(html) {
   })
 }
 
-function normalizeSectionTitle(title) {
-  return stripTags(title).replace(/\s+/g, '')
-}
-
-/**
- * Export FINAL display: stats table + 分析摘要 only.
- * 「执行过程」is the AgentChat exec-card (steps), not a markdown fold.
- * Other h2/h3 sections (过程 / 交付文件 / …) are omitted from the bubble.
- */
-export function focusExportResultHtml(html) {
-  const src = String(html || '')
-  if (!/统计结果/.test(src)) return src
-
-  const headings = []
-  HEADING_RE.lastIndex = 0
-  let match
-  while ((match = HEADING_RE.exec(src)) !== null) {
-    headings.push({
-      index: match.index,
-      end: match.index + match[0].length,
-      full: match[0],
-      title: normalizeSectionTitle(match[3]),
-    })
-  }
-  if (!headings.length) return src
-
-  const segments = []
-  for (let i = 0; i < headings.length; i++) {
-    const h = headings[i]
-    const bodyEnd = i + 1 < headings.length ? headings[i + 1].index : src.length
-    segments.push({
-      headingHtml: h.full,
-      title: h.title,
-      bodyHtml: src.slice(h.end, bodyEnd),
-    })
-  }
-  const preamble = src.slice(0, headings[0].index)
-
-  const statsSeg = segments.find((s) => s.title.includes('统计结果'))
-  const summarySeg = segments.find((s) => s.title.includes('分析摘要'))
-
-  // Keep preamble without stray dump tables (stats meta table allowed)
-  let pre = preamble
-  pre = pre.replace(TABLE_RE, (table) => {
-    if (isStatsMetaTable(table)) return wrapTableOnly(table)
-    return ''
-  })
-
-  let statsTableHtml = ''
-  if (statsSeg) {
-    // Drop the 「统计结果」heading; keep the 项目|内容 table visible
-    let firstStats = true
-    statsSeg.bodyHtml.replace(TABLE_RE, (table) => {
-      if (firstStats && isStatsMetaTable(table)) {
-        firstStats = false
-        statsTableHtml = wrapTableOnly(table)
-      }
-      return ''
-    })
-  }
-
-  let summaryHtml = ''
-  if (summarySeg) {
-    // Drop data tables from 分析摘要; keep list/paragraphs
-    const body = summarySeg.bodyHtml.replace(TABLE_RE, () => '')
-    summaryHtml = `${summarySeg.headingHtml}${body}`
-  }
-
-  return (
-    `<div class="md-export-result">` +
-    pre +
-    statsTableHtml +
-    summaryHtml +
-    `</div>`
-  )
-}
-
 /** Query result: keep tables expanded in a preview card */
 export function focusQueryResultHtml(html) {
   const src = String(html || '')
-  if (/\bmd-export-result\b|\bmd-query-result\b/.test(src)) return src
+  if (/\bmd-query-result\b/.test(src)) return src
   if (!/查询结果/.test(src) && !/<table[\s\S]*?<\/table>/i.test(src)) return src
   const wrapped = wrapAndFoldTables(src)
   return `<div class="md-query-result">${wrapped}</div>`
@@ -554,9 +479,7 @@ export function focusQueryResultHtml(html) {
 export function enhanceMarkdownHtml(html) {
   let out = linkifyWorkplaceFiles(html)
   out = chipifyFileLinks(out)
-  if (/统计结果/.test(out)) {
-    out = focusExportResultHtml(out)
-  } else if (/查询结果/.test(out) || /<table[\s\S]*?<\/table>/i.test(out)) {
+  if (/查询结果/.test(out) || /<table[\s\S]*?<\/table>/i.test(out)) {
     out = focusQueryResultHtml(out)
   } else {
     out = wrapAndFoldTables(out)

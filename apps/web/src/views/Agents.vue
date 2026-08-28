@@ -29,6 +29,26 @@
           <div><span class="label">时间</span> {{ row.created_at || '-' }}</div>
         </div>
         <div class="card-tags">
+          <el-tag size="small" :type="row.profile === 'code' ? 'primary' : 'info'">
+            {{ row.profile === 'code' ? 'Code Agent' : 'Standard' }}
+          </el-tag>
+          <template v-if="row.profile === 'code'">
+            <el-tag size="small" effect="plain">{{ row.code_project_name || '项目不可访问' }}</el-tag>
+            <el-tag
+              size="small"
+              :type="row.code_project_availability?.ready ? 'success' : 'danger'"
+            >
+              Manifest {{ projectStatusLabel(row.code_project_availability) }}
+            </el-tag>
+            <router-link
+              v-if="!row.code_project_availability?.ready"
+              class="card-project-link"
+              to="/code-projects"
+              @click.stop
+            >
+              修复项目配置
+            </router-link>
+          </template>
           <el-tag v-if="row.sandbox_name" size="small" effect="plain">{{ row.sandbox_name }}</el-tag>
           <el-tag v-if="row.llm_name" size="small" type="success" effect="plain">{{ row.llm_name }}</el-tag>
           <el-tag size="small" type="info">Skill {{ (row.skills || []).length }}</el-tag>
@@ -64,6 +84,34 @@
               <el-form-item label="描述" required>
                 <el-input v-model="form.description" type="textarea" :rows="2" placeholder="简要描述" />
               </el-form-item>
+              <el-form-item label="运行 Profile">
+                <el-radio-group v-model="form.profile">
+                  <el-radio value="standard">Standard</el-radio>
+                  <el-radio value="code">Code</el-radio>
+                </el-radio-group>
+              </el-form-item>
+              <template v-if="form.profile === 'code'">
+                <el-form-item label="Code Project" required>
+                  <el-select v-model="form.code_project_id" placeholder="选择已就绪项目" style="width: 100%">
+                    <el-option
+                      v-for="project in codeProjectOptions"
+                      :key="project.id"
+                      :label="`${project.name} · ${projectStatusLabel(project.availability)}`"
+                      :value="project.id"
+                      :disabled="!project.availability?.ready"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-alert
+                  :title="selectedCodeProject?.availability?.ready
+                    ? '项目已就绪，将使用受管 Workspace、Code Tools 与 Verifier'
+                    : projectStatusLabel(selectedCodeProject?.availability)"
+                  :type="selectedCodeProject?.availability?.ready ? 'success' : 'warning'"
+                  show-icon
+                  :closable="false"
+                />
+                <router-link class="project-link" to="/code-projects">管理 Code Projects</router-link>
+              </template>
             </el-form>
           </section>
           <section class="cfg-block cfg-prompt">
@@ -122,6 +170,18 @@
                     <span class="unit">次</span>
                   </div>
                   <div class="field-hint">MCP 同工具失败达该次数后纠偏提示、不中止任务；默认 5</div>
+                  <div class="soft-circuit-row">
+                    <span class="soft-circuit-label">工具结果截断</span>
+                    <el-input-number
+                      v-model="form.tool_result_clip"
+                      :min="1"
+                      :max="100000"
+                      controls-position="right"
+                      size="small"
+                    />
+                    <span class="unit">字符</span>
+                  </div>
+                  <div class="field-hint">单个工具结果入上下文的截断字符数，同时决定超大 MCP 结果落盘阈值；默认 6000</div>
                 </div>
               </div>
 
@@ -154,7 +214,12 @@
                     filterable
                     class="res-inline-select"
                   >
-                    <el-option v-for="l in llms" :key="l.id" :label="l.name" :value="l.id" />
+                    <el-option-group label="单模型">
+                      <el-option v-for="l in singleLlms" :key="l.id" :label="l.name" :value="l.id" />
+                    </el-option-group>
+                    <el-option-group label="模型组">
+                      <el-option v-for="l in groupLlms" :key="l.id" :label="l.name" :value="l.id" />
+                    </el-option-group>
                   </el-select>
                   <el-icon class="res-chevron muted"><ArrowRight /></el-icon>
                 </div>
@@ -182,6 +247,32 @@
                       {{ mcpName(id) }}
                     </el-tag>
                     <button type="button" class="add-link" @click="openMcpPicker">+ 添加</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- HttpMcp -->
+              <div class="res-item" :class="{ open: resourcePanel === 'httpmcp' }">
+                <button type="button" class="res-head" @click="toggleResourcePanel('httpmcp')">
+                  <el-icon class="res-ico"><Connection /></el-icon>
+                  <span class="res-label">HTTP 请求代理</span>
+                  <span class="res-meta">共{{ httpmcps.length }}个</span>
+                  <span class="res-meta accent">已选{{ (form.httpmcps || []).length }}个</span>
+                  <el-icon class="res-chevron"><ArrowDown /></el-icon>
+                </button>
+                <div v-show="resourcePanel === 'httpmcp'" class="res-body">
+                  <div class="tag-row">
+                    <el-tag
+                      v-for="id in form.httpmcps"
+                      :key="id"
+                      closable
+                      effect="plain"
+                      type="warning"
+                      @close="removeHttpmcp(id)"
+                    >
+                      {{ httpmcpName(id) }}
+                    </el-tag>
+                    <button type="button" class="add-link" @click="openHttpmcpPicker">+ 添加</button>
                   </div>
                 </div>
               </div>
@@ -399,6 +490,19 @@
         <el-button type="primary" @click="confirmRags">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- HttpMcp 选择 -->
+    <el-dialog v-model="httpmcpPickerVisible" title="选择 HTTP 请求代理" width="480px">
+      <el-checkbox-group v-model="pickerHttpmcps">
+        <div v-for="h in httpmcps" :key="h.id" class="picker-item">
+          <el-checkbox :value="h.id">{{ h.name }} ({{ h.id }})</el-checkbox>
+        </div>
+      </el-checkbox-group>
+      <template #footer>
+        <el-button @click="httpmcpPickerVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmHttpmcps">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -414,17 +518,12 @@ defineOptions({ name: 'Agents' })
 
 const DEFAULT_PROMPT = `你是一名专业的XX，收到用户问题后，认真思考，并通过简单的工具调用组合解决/回答用户问题。每次执行任务，在工作区 task/ 下创建以毫秒时间戳为任务ID的文件夹，把过程产物（临时脚本、分片数据、checkpoint 等）全部放在该任务文件夹内；仅把对话需要交付的最终文件写到当前目录（工作区根，或用户选中的文件夹）。路径已相对工作区根，禁止再创建或写入 workplace/ 子目录。`
 
-/** Toggleable actions shown in UI (11 items). `done` is always on, not stored. */
+/** Toggleable actions shown in UI (9 items). `done` is always on, not stored. */
 const ACTION_GROUPS = [
-  {
-    title: 'Self-Ask (内部思考)',
-    items: [{ id: 'self_ask', label: 'Self-Ask 自问自答' }],
-  },
   {
     title: 'Skills (通过沙箱执行)',
     items: [
       { id: 'skill_read_md', label: '读取 Skill 说明' },
-      { id: 'skill_read_script', label: '读取脚本源码' },
       { id: 'skill_run_script', label: '执行 Skill 脚本' },
     ],
   },
@@ -465,6 +564,7 @@ const ticksVisible = ref(false)
 const skillPickerVisible = ref(false)
 const mcpPickerVisible = ref(false)
 const ragPickerVisible = ref(false)
+const httpmcpPickerVisible = ref(false)
 const memoryContent = ref('')
 const memoryAgentId = ref('')
 const ticks = ref([])
@@ -473,9 +573,12 @@ const llms = ref([])
 const skills = ref([])
 const mcps = ref([])
 const rags = ref([])
+const httpmcps = ref([])
+const codeProjects = ref([])
 const pickerSkills = ref([])
 const pickerMcps = ref([])
 const pickerRags = ref([])
+const pickerHttpmcps = ref([])
 const advOpen = ref(false)
 const resourcePanel = ref('')
 const sessionDialogVisible = ref(false)
@@ -491,12 +594,50 @@ const ADV_DEFAULTS = {
   skill_timeout: 1800,
   shell_timeout: 1800,
   mcp_soft_circuit: 5,
+  tool_result_clip: 6000,
 }
 
 const selectedActionCount = computed(() => {
   const selected = form.allowed_actions || []
   return selected.filter((a) => ALL_TOGGLEABLE_ACTIONS.includes(a)).length
 })
+
+// react-engine-v14 V12: 模型下拉框同时列出单模型与模型组，按 l.type 拆分。
+const singleLlms = computed(() => llms.value.filter((l) => l.type === 'llm'))
+const groupLlms = computed(() => llms.value.filter((l) => l.type === 'group'))
+const codeProjectOptions = computed(() => {
+  const options = [...codeProjects.value]
+  if (
+    form.profile === 'code'
+    && form.code_project_id
+    && !options.some((project) => project.id === form.code_project_id)
+  ) {
+    options.push({
+      id: form.code_project_id,
+      name: form.code_project_name || '当前绑定',
+      availability: form.code_project_availability || {
+        ready: false,
+        reason: 'code_project_unauthorized',
+      },
+    })
+  }
+  return options
+})
+const selectedCodeProject = computed(() =>
+  codeProjectOptions.value.find((project) => project.id === form.code_project_id),
+)
+
+function projectStatusLabel(availability) {
+  const labels = {
+    ready: '已就绪',
+    project_disabled: '项目已停用',
+    project_environment_not_allowed: '环境不支持',
+    manifest_missing: '尚未发布 Manifest',
+    manifest_invalid: 'Manifest 无效',
+    code_project_unauthorized: '项目不可访问',
+  }
+  return labels[availability?.reason] || availability?.reason || '请选择项目'
+}
 
 function sanitizeAllowedActions(actions) {
   const list = Array.isArray(actions) ? actions : []
@@ -534,6 +675,10 @@ function ragName(id) {
   return rags.value.find((r) => r.id === id)?.name || id
 }
 
+function httpmcpName(id) {
+  return httpmcps.value.find((h) => h.id === id)?.name || id
+}
+
 async function loadResources({ force = false } = {}) {
   if (force) {
     invalidateListCache('/pages/page_agent.cgi')
@@ -541,10 +686,12 @@ async function loadResources({ force = false } = {}) {
   const res = await cachedGetCgi('/pages/page_agent.cgi', { action: 'refs' }, force ? 0 : 60000)
   const data = res.data || {}
   sandboxes.value = data.sandboxes || []
-  llms.value = (data.llms || []).filter((l) => l.type === 'llm')
+  llms.value = data.llms || []
   skills.value = data.skills || []
   mcps.value = data.mcps || []
   rags.value = data.rags || []
+  httpmcps.value = data.httpmcps || []
+  codeProjects.value = data.code_projects || []
   resourcesLoaded.value = true
 }
 
@@ -577,8 +724,9 @@ function resetSearch() {
 }
 
 function defaultLlmId() {
-  const minmax = llms.value.find((l) => l.name === 'MinMax')
-  return minmax?.id || llms.value[0]?.id || ''
+  // 默认优先单模型：先 MinMax，再首个单模型；不默认选中模型组。
+  const minmax = singleLlms.value.find((l) => l.name === 'MinMax')
+  return minmax?.id || singleLlms.value[0]?.id || ''
 }
 
 function defaultSandboxId() {
@@ -595,21 +743,27 @@ async function openForm(row) {
   // Always refresh refs so newly created sandbox/MCP/skill appear immediately
   await loadResources({ force: true })
   if (row) {
+    const detail = await getCgi('/pages/page_agent.cgi', { action: 'get', id: row.id })
+    const currentRow = detail.data || row
     Object.assign(form, {
       ...ADV_DEFAULTS,
-      ...row,
-      skills: [...(row.skills || [])],
-      mcps: [...(row.mcps || [])],
-      rags: [...(row.rags || [])],
-      allowed_actions: sanitizeAllowedActions(row.allowed_actions),
-      allowedUsersStr: (row.allowed_users || []).join(','),
-      max_iterations: row.max_iterations ?? ADV_DEFAULTS.max_iterations,
-      history_length: row.history_length ?? ADV_DEFAULTS.history_length,
-      summary_max_words: row.summary_max_words ?? ADV_DEFAULTS.summary_max_words,
-      llm_timeout: row.llm_timeout ?? ADV_DEFAULTS.llm_timeout,
-      skill_timeout: row.skill_timeout ?? ADV_DEFAULTS.skill_timeout,
-      shell_timeout: row.shell_timeout ?? ADV_DEFAULTS.shell_timeout,
-      mcp_soft_circuit: row.mcp_soft_circuit ?? ADV_DEFAULTS.mcp_soft_circuit,
+      ...currentRow,
+      skills: [...(currentRow.skills || [])],
+      mcps: [...(currentRow.mcps || [])],
+      rags: [...(currentRow.rags || [])],
+      httpmcps: [...(currentRow.httpmcps || [])],
+      allowed_actions: sanitizeAllowedActions(currentRow.allowed_actions),
+      profile: currentRow.profile || 'standard',
+      code_project_id: currentRow.code_project_id || '',
+      allowedUsersStr: (currentRow.allowed_users || []).join(','),
+      max_iterations: currentRow.max_iterations ?? ADV_DEFAULTS.max_iterations,
+      history_length: currentRow.history_length ?? ADV_DEFAULTS.history_length,
+      summary_max_words: currentRow.summary_max_words ?? ADV_DEFAULTS.summary_max_words,
+      llm_timeout: currentRow.llm_timeout ?? ADV_DEFAULTS.llm_timeout,
+      skill_timeout: currentRow.skill_timeout ?? ADV_DEFAULTS.skill_timeout,
+      shell_timeout: currentRow.shell_timeout ?? ADV_DEFAULTS.shell_timeout,
+      mcp_soft_circuit: currentRow.mcp_soft_circuit ?? ADV_DEFAULTS.mcp_soft_circuit,
+      tool_result_clip: currentRow.tool_result_clip ?? ADV_DEFAULTS.tool_result_clip,
     })
   } else {
     Object.assign(form, {
@@ -622,7 +776,10 @@ async function openForm(row) {
       skills: [],
       mcps: [],
       rags: [],
+      httpmcps: [],
       allowed_actions: [...ALL_TOGGLEABLE_ACTIONS],
+      profile: 'standard',
+      code_project_id: '',
       proactivity: 2,
       visibility: 'private',
       allowedUsersStr: '',
@@ -643,6 +800,10 @@ async function save() {
     ElMessage.warning('请填写描述')
     return
   }
+  if (form.profile === 'code' && !selectedCodeProject.value?.availability?.ready) {
+    ElMessage.warning(projectStatusLabel(selectedCodeProject.value?.availability))
+    return
+  }
   const allowed_users = form.allowedUsersStr
     ? form.allowedUsersStr.split(',').map((s) => s.trim()).filter(Boolean)
     : []
@@ -651,12 +812,15 @@ async function save() {
     id: form.id || undefined,
     name: form.name,
     description: form.description,
+    profile: form.profile || 'standard',
+    code_project_id: form.profile === 'code' ? form.code_project_id : '',
     prompt: form.prompt,
     llm: form.llm || undefined,
     sandbox: form.sandbox || undefined,
     skills: form.skills,
     mcps: form.mcps,
     rags: form.rags,
+    httpmcps: form.httpmcps,
     proactivity: form.proactivity,
     visibility: form.visibility,
     allowed_users,
@@ -667,6 +831,7 @@ async function save() {
     skill_timeout: form.skill_timeout,
     shell_timeout: form.shell_timeout,
     mcp_soft_circuit: form.mcp_soft_circuit,
+    tool_result_clip: form.tool_result_clip,
     allowed_actions: sanitizeAllowedActions(form.allowed_actions),
   })
   ElMessage.success('保存成功')
@@ -731,6 +896,10 @@ function removeRag(id) {
   form.rags = form.rags.filter((r) => r !== id)
 }
 
+function removeHttpmcp(id) {
+  form.httpmcps = form.httpmcps.filter((h) => h !== id)
+}
+
 function openSkillPicker() {
   ensureResources().then(() => {
     pickerSkills.value = [...(form.skills || [])]
@@ -755,6 +924,14 @@ function openRagPicker() {
   })
 }
 
+function openHttpmcpPicker() {
+  ensureResources().then(() => {
+    pickerHttpmcps.value = [...(form.httpmcps || [])]
+    resourcePanel.value = 'httpmcp'
+    httpmcpPickerVisible.value = true
+  })
+}
+
 function confirmSkills() {
   form.skills = [...pickerSkills.value]
   skillPickerVisible.value = false
@@ -768,6 +945,11 @@ function confirmMcps() {
 function confirmRags() {
   form.rags = [...pickerRags.value]
   ragPickerVisible.value = false
+}
+
+function confirmHttpmcps() {
+  form.httpmcps = [...pickerHttpmcps.value]
+  httpmcpPickerVisible.value = false
 }
 
 onMounted(() => {
@@ -815,6 +997,7 @@ onActivated(() => {
 .card-meta { font-size: 13px; color: var(--gap-text-secondary); line-height: 1.8; margin-bottom: 10px; }
 .card-meta .label { color: var(--gap-text-muted); margin-right: 6px; }
 .card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.card-project-link { font-size: 12px; line-height: 24px; }
 .card-actions {
   display: flex;
   gap: 8px;
@@ -848,6 +1031,7 @@ onActivated(() => {
   font-weight: 500;
   color: var(--gap-text-secondary);
 }
+.project-link { display: inline-block; margin-top: 8px; }
 .prompt-input :deep(textarea) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 13px;

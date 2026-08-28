@@ -117,6 +117,7 @@ const PAGE_GROUPS = [
     items: [
       { path: '/pages/page_group.cgi', label: '智能体群' },
       { path: '/pages/page_agent.cgi', label: '智能体' },
+      { path: '/pages/page_code_project.cgi', label: 'Code Projects' },
       { path: '/pages/page_sandbox.cgi', label: '沙箱管理' },
       { path: '/pages/page_skills.cgi', label: 'Skills市场' },
       { path: '/pages/page_mcp.cgi', label: 'MCP市场' },

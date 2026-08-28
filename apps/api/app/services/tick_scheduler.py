@@ -22,7 +22,7 @@ def _run_tick(tick_id: str):
         agent = db.query(Agent).filter(Agent.id == tick.agent_id).first()
         if not agent:
             return
-        asyncio.run(run_agent(db, agent, tick.session_id, tick.message or "定时任务", tick.creator or "system"))
+        asyncio.run(run_agent(db, agent, tick.session_id, tick.message or "定时任务"))
     except Exception as e:
         logger.exception("tick %s failed", tick_id)
     finally:

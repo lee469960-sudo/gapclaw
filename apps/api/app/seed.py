@@ -3,14 +3,26 @@
 import json
 import logging
 import os
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import Agent, LLMResource, MCP, Sandbox, Skill, SqlServer
+from app.models import (
+    Agent,
+    CodeProject,
+    CodeProjectManifest,
+    CodeRepositorySource,
+    LLMResource,
+    MCP,
+    Sandbox,
+    Skill,
+    SqlServer,
+)
 from app.security import encrypt_secret, new_id, now_str
 from app.services.llm_client import normalize_openai_base_url
 from app.services.sql_service import parse_database_url
@@ -80,20 +92,39 @@ MCP: tail_log {"source":"api","lines":200,"grep":"Traceback"}
 完成后 FINAL: 给出摘要与建议要点。"""
 
 TUSHARE_ACTIONS = [
-    "self_ask", "skill_read_md", "mcp_tool_call",
+    "skill_read_md", "mcp_tool_call",
     "file_read", "file_write", "file_search_replace",
 ]
 
 LOG_ANALYST_ACTIONS = [
-    "self_ask", "skill_read_md", "mcp_tool_call",
+    "skill_read_md", "mcp_tool_call",
     "file_read", "file_write",
 ]
 
 DEFAULT_ACTIONS = [
-    "self_ask", "skill_read_md", "skill_read_script", "skill_run_script",
-    "mcp_tool_call", "httpmcp_call",
-    "shell", "file_read", "file_write", "file_search", "file_search_replace",
+    "skill_read_md", "skill_run_script",
+    "mcp_tool_call",
+    "shell", "file_read", "file_write", "file_search_replace",
 ]
+
+CODE_AGENT_DEMO_PROJECT = "code-agent-demo"
+CODE_AGENT_DEMO_AGENT = "code-agent"
+CODE_AGENT_DEMO_REPO_DIR = "demo-code"
+
+CODE_AGENT_PROMPT = """你是 GAP 平台的代码智能体（Code Agent），在一个受控的容器化 Workspace 中工作。
+你可以使用 read/search/edit/test/shell/git 等受限工具读取、修改并验证项目代码。
+- 只修改冻结策略允许路径内的文件；先读后改，用 test/shell 验证结果。
+- 完成后 FINAL: 简要说明改动与验证结果。"""
+
+CODE_DEMO_BUDGETS = {
+    "cpu_count": 2,
+    "memory_mb": 512,
+    "pids_limit": 256,
+    "tmpfs_mb": 64,
+    "disk_mb": 1024,
+    "timeout_seconds": 1800,
+    "output_limit_bytes": 100000,
+}
 
 
 def run_seed(db: Session, creator: str = "admin") -> dict:
@@ -152,7 +183,6 @@ def run_seed(db: Session, creator: str = "admin") -> dict:
                 name="dba",
                 description="数据库管理员 Agent，支持 SQL 查询与 workplace 文件管理",
                 prompt=DBA_PROMPT,
-                engine="react",
                 llm_id=llm.id,
                 sandbox_id=sb.id,
                 skills=json.dumps([]),
@@ -180,7 +210,216 @@ def run_seed(db: Session, creator: str = "admin") -> dict:
         logs = _seed_system_logs(db, creator, settings, llm=llm, sandbox=sb)
         result.update(logs)
 
+    code = _seed_code_project(db, creator, settings, llm=llm)
+    result.update(code)
+
     return result
+
+
+def _json_string_list(raw: str) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _ensure_demo_repository(demo_root: Path) -> None:
+    """Create a minimal git repo once; the importer needs a real commit SHA."""
+    demo_root.mkdir(parents=True, exist_ok=True)
+    if (demo_root / ".git").is_dir():
+        return
+    (demo_root / "README.md").write_text(
+        "# code-agent demo\n\n默认演示仓库（本地 source）。\n", encoding="utf-8"
+    )
+    (demo_root / "main.py").write_text(
+        'def greet(name: str) -> str:\n    return f"hello, {name}"\n\n\n'
+        'if __name__ == "__main__":\n    print(greet("code-agent"))\n',
+        encoding="utf-8",
+    )
+    (demo_root / "test_main.py").write_text(
+        'def test_greet():\n    from main import greet\n\n'
+        '    assert greet("code-agent") == "hello, code-agent"\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.setdefault("GIT_CONFIG_GLOBAL", os.devnull)
+    env.setdefault("GIT_CONFIG_SYSTEM", os.devnull)
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=demo_root,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+
+    _git("init", "-q")
+    _git("add", "-A")
+    _git("-c", "user.email=seed@local", "-c", "user.name=seed", "commit", "-q", "-m", "demo")
+
+
+def _seed_code_project(db: Session, creator: str, settings, llm=None) -> dict:
+    """Idempotent default CodeAgent seed.
+
+    Only runs when the fail-closed CodeAgent security config is ready (local roots +
+    trusted image digest + Workspace roots). It then materializes a demo local
+    repository, publishes a Manifest through the real publish pipeline (import →
+    scan → seal → publish) and attaches a ``profile="code"`` Agent to the project.
+    """
+    out = {"code_project_id": None, "code_agent_id": None}
+    if not getattr(settings, "seed_code_agent", True):
+        return out
+
+    readiness = settings.code_agent_security_readiness()
+    if not readiness.get("ready"):
+        logger.warning(
+            "seed code-agent skip: security config not ready (%s)",
+            ",".join(sorted(readiness.get("errors", {}))) or "unknown",
+        )
+        return out
+
+    local_roots = _json_string_list(settings.code_local_repository_roots)
+    trusted_digests = _json_string_list(settings.code_trusted_image_digests)
+    if not local_roots or not trusted_digests:
+        logger.warning("seed code-agent skip: missing local root or trusted digest")
+        return out
+
+    demo_root = Path(local_roots[0]).resolve() / CODE_AGENT_DEMO_REPO_DIR
+    try:
+        _ensure_demo_repository(demo_root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("seed code-agent skip: demo repo init failed: %s", exc)
+        return out
+
+    project = (
+        db.query(CodeProject)
+        .filter(CodeProject.name == CODE_AGENT_DEMO_PROJECT)
+        .first()
+    )
+    if project is None:
+        project = CodeProject(
+            id=new_id(),
+            name=CODE_AGENT_DEMO_PROJECT,
+            organization_id="default",
+            description="默认 Code Agent 演示项目（本地 demo 仓库）",
+            enabled=True,
+            environment_tier="internal_non_production",
+            visibility="private",
+            allowed_users="[]",
+            policy="{}",
+            creator=creator,
+            created_at=now_str(),
+            modified_at=now_str(),
+        )
+        db.add(project)
+        db.commit()
+        logger.info("seeded CodeProject %s id=%s", CODE_AGENT_DEMO_PROJECT, project.id)
+    out["code_project_id"] = project.id
+
+    published = (
+        db.query(CodeProjectManifest)
+        .filter(
+            CodeProjectManifest.project_id == project.id,
+            CodeProjectManifest.status == "published",
+        )
+        .first()
+    )
+    if published is None:
+        image_digest = trusted_digests[0]
+        source = CodeRepositorySource(
+            id=new_id(),
+            project_id=project.id,
+            source_type="local",
+            locator=str(demo_root),
+            credential_ref="",
+            requested_ref="HEAD",
+            policy_ref="",
+            status="draft",
+            created_by=creator,
+            created_at=now_str(),
+            updated_at=now_str(),
+        )
+        manifest = CodeProjectManifest(
+            id=new_id(),
+            project_id=project.id,
+            version=1,
+            status="draft",
+            source_id=source.id,
+            source_type="local",
+            repository=str(demo_root),
+            credential_ref="",
+            requested_ref="HEAD",
+            base_commit="HEAD",
+            image_digest=image_digest,
+            trusted_image=image_digest,
+            security_schema_version=1,
+            allowed_paths=json.dumps(["."], sort_keys=True),
+            validation_plan=json.dumps([{"command": "pytest -q"}], sort_keys=True),
+            allowed_tools=json.dumps(
+                ["read", "search", "edit", "test", "shell", "git_read"],
+                sort_keys=True,
+            ),
+            policy=json.dumps({}, sort_keys=True),
+            budgets=json.dumps(CODE_DEMO_BUDGETS, sort_keys=True),
+            created_at=now_str(),
+        )
+        db.add(source)
+        db.add(manifest)
+        db.commit()
+        actor = SimpleNamespace(
+            username=creator,
+            roles='["admin"]',
+            organization_id="default",
+        )
+        from app.services.code_agent.manifest_publish import (
+            ManifestPublishError,
+            build_manifest_publish_service,
+        )
+        try:
+            build_manifest_publish_service(db).publish(
+                actor=actor,
+                project=project,
+                manifest=manifest,
+            )
+        except ManifestPublishError as exc:
+            logger.warning("seed code-agent: publish failed: %s", exc.reason)
+            return out
+        logger.info("seeded published Manifest for %s", project.id)
+
+    if llm is None:
+        llm = db.query(LLMResource).filter(LLMResource.name == "MinMax").first()
+
+    agent = db.query(Agent).filter(Agent.name == CODE_AGENT_DEMO_AGENT).first()
+    if agent is None and llm is not None:
+        aid = new_id()
+        agent = Agent(
+            id=aid,
+            name=CODE_AGENT_DEMO_AGENT,
+            description="默认 Code Agent，绑定 code-agent-demo 项目（容器化 read/search/edit/git/test/shell）",
+            prompt=CODE_AGENT_PROMPT,
+            profile="code",
+            code_project_id=project.id,
+            llm_id=llm.id,
+            sandbox_id="",
+            skills=json.dumps([]),
+            mcps=json.dumps([]),
+            rags=json.dumps([]),
+            allowed_actions=json.dumps([]),
+            creator=creator,
+            created_at=now_str(),
+            modified_at=now_str(),
+            session_list=json.dumps([{"name": "default", "session_id": aid}]),
+        )
+        db.add(agent)
+        db.commit()
+        logger.info("seeded Agent %s id=%s", CODE_AGENT_DEMO_AGENT, agent.id)
+    if agent is not None:
+        out["code_agent_id"] = agent.id
+    return out
 
 
 def _absolute_sqlite_url(database_url: str) -> str:
@@ -311,7 +550,6 @@ def _seed_system_logs(db: Session, creator: str, settings, llm=None, sandbox=Non
             name="log-analyst",
             description="系统日志分析 Agent：读取 .local/logs，归类错误并给出优化建议",
             prompt=prompt,
-            engine="react",
             llm_id=llm.id,
             sandbox_id=sandbox.id if sandbox else "",
             skills=json.dumps(skill_ids),
@@ -435,7 +673,6 @@ def _seed_tushare(db: Session, creator: str, settings, llm=None, sandbox=None) -
             name="tushare",
             description="Tushare 金融数据分析 Agent，默认绑定 tushareMcp，支持 A 股行情、财报、板块、资金流等查询",
             prompt=TUSHARE_PROMPT.replace("<tushare-data skill id>", skill.id if skill else ""),
-            engine="react",
             llm_id=llm.id,
             sandbox_id=sandbox.id if sandbox else "",
             skills=json.dumps(skill_ids),

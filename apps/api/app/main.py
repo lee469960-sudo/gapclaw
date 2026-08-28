@@ -21,7 +21,7 @@ from app.routers import (
     auth, system_me, system_user, system_role,
     llm, skills, mcp, sandbox, agent, agent_chat, group, group_chat,
     sql, terminal, files, rag, httpmcp, site, monitor, docker_page, websockets,
-    channel, channel_hooks, console_log, ops_alert,
+    channel, channel_hooks, console_log, ops_alert, code_project,
 )
 
 logger = logging.getLogger("app.main")
@@ -48,6 +48,8 @@ async def lifespan(app: FastAPI):
         db.close()
     from app.services.tick_scheduler import start_scheduler
     start_scheduler()
+    from app.services.code_agent.lifecycle_janitor import start_lifecycle_janitor
+    start_lifecycle_janitor()
     from app.services.channels.telegram import resync_all_telegram_channels
     await resync_all_telegram_channels(settings.public_base_url_normalized)
     from app.services.channels.telegram_poller import start_telegram_poller
@@ -55,6 +57,8 @@ async def lifespan(app: FastAPI):
     yield
     from app.services.tick_scheduler import stop_scheduler
     stop_scheduler()
+    from app.services.code_agent.lifecycle_janitor import stop_lifecycle_janitor
+    stop_lifecycle_janitor()
     from app.services.channels.telegram_poller import stop_telegram_poller
     stop_telegram_poller()
 
@@ -78,7 +82,7 @@ def create_app() -> FastAPI:
         auth, system_me, system_user, system_role,
         llm, skills, mcp, sandbox, agent, agent_chat, group, group_chat,
         sql, terminal, files, rag, httpmcp, site, monitor, docker_page, websockets,
-        channel, channel_hooks, console_log, ops_alert,
+        channel, channel_hooks, console_log, ops_alert, code_project,
     ]
     for r in routers:
         app.include_router(r.router)

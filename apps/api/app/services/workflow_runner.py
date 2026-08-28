@@ -54,7 +54,7 @@ async def run_workflow(
             sid = m.get("session_id") or session_id
             subtask = m.get("_task") or task
             msg = subtask if subtask.startswith("[群任务]") else f"[群任务] {subtask}"
-            reply = await run_agent(db, agent, sid, msg, username)
+            reply = await run_agent(db, agent, sid, msg)
             results.append({
                 "agent_id": agent.id,
                 "name": m.get("name") or agent.name,

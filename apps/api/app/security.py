@@ -48,6 +48,13 @@ def decrypt_secret(value: str) -> str:
         return value
 
 
+def decrypt_secret_strict(value: str) -> str:
+    """Decrypt security-sensitive values without legacy plaintext fallback."""
+    if not value:
+        raise ValueError("encrypted_secret_missing")
+    return _fernet().decrypt(value.encode()).decode()
+
+
 def mask_secret(value: str, visible: int = 4) -> str:
     if not value:
         return ""

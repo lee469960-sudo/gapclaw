@@ -1,6 +1,8 @@
 import json
-import stat
-from fastapi import APIRouter, Depends, Query
+from pathlib import Path
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -30,7 +32,35 @@ class TerminalBody(BaseModel):
     visibility: str = "private"
     allowed_users: list[str] | None = None
     cwd: str = "/"
+    path: str = ""
     files: list[str] | None = None
+
+
+def _filter_servers(items: list[SshServer], user: User, scope: str = "all") -> list[SshServer]:
+    visible = [s for s in items if can_access_resource(user, s.visibility, s.allowed_users, s.creator)]
+    if scope == "mine":
+        return [s for s in visible if s.creator == user.username]
+    return visible
+
+
+def _accessible_server(db: Session, user: User, server_id: str | None) -> SshServer | None:
+    if not server_id:
+        return None
+    s = db.query(SshServer).filter(SshServer.id == server_id).first()
+    if not s or not can_access_resource(user, s.visibility, s.allowed_users, s.creator):
+        return None
+    return s
+
+
+def _download_response(data: bytes, remote_path: str) -> Response:
+    name = Path(remote_path.rstrip("/") or "download").name or "download"
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+        },
+    )
 
 
 def _filter_servers(items: list[SshServer], user: User, scope: str = "all") -> list[SshServer]:
@@ -70,6 +100,7 @@ async def terminal_get(
     action: str = Query("list"),
     id: str = Query(None),
     scope: str = Query("all"),
+    path: str = Query(""),
     user: User = Depends(get_session_user),
     db: Session = Depends(get_db),
 ):
@@ -77,23 +108,62 @@ async def terminal_get(
         items = _filter_servers(db.query(SshServer).order_by(SshServer.name).all(), user, scope)
         return ok([s.to_dict() for s in items])
     if action == "get" and id:
-        s = db.query(SshServer).filter(SshServer.id == id).first()
-        if not s or not can_access_resource(user, s.visibility, s.allowed_users, s.creator):
+        s = _accessible_server(db, user, id)
+        if not s:
             return fail("不存在或无权限")
         return ok(s.to_dict())
     if action == "sftp_list" and id:
         from app.services.ssh_service import sftp_list
-        s = db.query(SshServer).filter(SshServer.id == id).first()
+        s = _accessible_server(db, user, id)
         if not s:
-            return fail("不存在")
-        return ok(sftp_list(s, "/"))
+            return fail("不存在或无权限")
+        return ok(sftp_list(s, path or "/"))
     if action == "sftp_download" and id:
-        return fail("请使用 POST 下载")
+        from app.services.ssh_service import sftp_download
+        s = _accessible_server(db, user, id)
+        if not s:
+            return fail("不存在或无权限")
+        remote = (path or "").strip()
+        if not remote:
+            return fail("请输入远程文件路径")
+        try:
+            data = sftp_download(s, remote)
+        except Exception as exc:
+            return fail(str(exc) or "下载失败")
+        return _download_response(data, remote)
     return fail("未知操作")
 
 
 @router.post("")
-async def terminal_post(body: TerminalBody, user: User = Depends(get_session_user), db: Session = Depends(get_db)):
+async def terminal_post(request: Request, user: User = Depends(get_session_user), db: Session = Depends(get_db)):
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        act = form.get("action")
+        if act != "sftp_upload":
+            return fail("未知操作")
+        s = _accessible_server(db, user, str(form.get("id") or ""))
+        if not s:
+            return fail("不存在或无权限")
+        file = form.get("file")
+        if not file or not hasattr(file, "read"):
+            return fail("请选择文件")
+        from app.services.ssh_service import sftp_upload
+
+        data = await file.read()
+        filename = getattr(file, "filename", None) or "upload.bin"
+        remote_dir = str(form.get("path") or form.get("cwd") or ".")
+        try:
+            dest = sftp_upload(s, remote_dir, data, filename)
+        except Exception as exc:
+            return fail(str(exc) or "上传失败")
+        return ok({"path": dest}, f"已上传到 {dest}")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return fail("请求格式错误")
+    body = TerminalBody(**payload)
     action = body.action or "create"
 
     if action == "list":
@@ -156,39 +226,43 @@ async def terminal_post(body: TerminalBody, user: User = Depends(get_session_use
 
     if action == "sftp_list":
         from app.services.ssh_service import sftp_list
-        s = db.query(SshServer).filter(SshServer.id == body.id).first()
+        s = _accessible_server(db, user, body.id)
         if not s:
-            return fail("不存在")
-        return ok({"files": sftp_list(s, body.cwd or "/"), "cwd": body.cwd or "/"})
+            return fail("不存在或无权限")
+        cwd = body.path or body.cwd or "/"
+        return ok({"files": sftp_list(s, cwd), "cwd": cwd})
 
     if action == "sftp_download":
         from app.services.ssh_service import sftp_download
-        s = db.query(SshServer).filter(SshServer.id == body.id).first()
+        s = _accessible_server(db, user, body.id)
         if not s:
-            return fail("不存在")
-        remote = body.cwd or "/"
-        data = sftp_download(s, remote)
-        return Response(content=data, media_type="application/octet-stream")
+            return fail("不存在或无权限")
+        remote = (body.path or body.cwd or "").strip()
+        if not remote:
+            return fail("请输入远程文件路径")
+        try:
+            data = sftp_download(s, remote)
+        except Exception as exc:
+            return fail(str(exc) or "下载失败")
+        return _download_response(data, remote)
 
     if action == "sftp_upload":
-        if not body.id or not body.files:
-            return fail("参数错误")
-        return ok({"status": "use multipart upload endpoint"})
+        return fail("请使用表单上传文件")
 
     if action == "sftp_mkdir":
         from app.services.ssh_service import sftp_mkdir
-        s = db.query(SshServer).filter(SshServer.id == body.id).first()
+        s = _accessible_server(db, user, body.id)
         if not s:
-            return fail("不存在")
-        sftp_mkdir(s, body.cwd or "/")
+            return fail("不存在或无权限")
+        sftp_mkdir(s, body.path or body.cwd or "/")
         return ok(None, "创建成功")
 
     if action == "sftp_delete":
         from app.services.ssh_service import sftp_delete
-        s = db.query(SshServer).filter(SshServer.id == body.id).first()
+        s = _accessible_server(db, user, body.id)
         if not s:
-            return fail("不存在")
-        sftp_delete(s, body.cwd or "/")
+            return fail("不存在或无权限")
+        sftp_delete(s, body.path or body.cwd or "/")
         return ok(None, "删除成功")
 
     return fail("未知操作")

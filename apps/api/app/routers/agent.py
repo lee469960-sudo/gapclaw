@@ -5,9 +5,23 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import can_access_resource, get_session_user
-from app.models import User, Agent, AgentTick, LLMResource, Sandbox, Skill, MCP, RagCorpus
+from app.models import (
+    User,
+    Agent,
+    AgentTick,
+    CodeProject,
+    CodeProjectManifest,
+    LLMResource,
+    Sandbox,
+    Skill,
+    MCP,
+    RagCorpus,
+    HttpMcp,
+)
 from app.schemas import ok, fail
 from app.security import new_id, now_str
+from app.services.code_agent.control_plane import can_use_code_project, project_availability
+from app.services.code_agent.claude_code_runtime import claude_code_llm_binding_reason
 
 router = APIRouter(prefix="/pages/page_agent.cgi", tags=["agent"])
 
@@ -19,19 +33,22 @@ class AgentBody(BaseModel):
     description: str = ""
     prompt: str = ""
     engine: str = "react"
+    profile: str | None = None
+    code_project_id: str | None = None
     llm: str | None = None
     sandbox: str | None = None
     skills: list[str] | None = None
     mcps: list[str] | None = None
     rags: list[str] | None = None
+    httpmcps: list[str] | None = None
     max_iterations: int = 150
     history_length: int = 30
-    summary_max_words: int = 5000
     proactivity: int = 2
     llm_timeout: int = 1800
     skill_timeout: int = 1800
     shell_timeout: int = 1800
     mcp_soft_circuit: int = 5
+    tool_result_clip: int = 6000
     visibility: str = "private"
     allowed_users: list[str] | None = None
     allowed_actions: list[str] | None = None
@@ -46,12 +63,14 @@ class AgentBody(BaseModel):
 
 
 DEFAULT_ACTIONS = [
-    "self_ask", "skill_read_md", "skill_read_script", "skill_run_script",
+    "skill_read_md", "skill_run_script",
     "mcp_tool_call", "httpmcp_call",
     "shell", "file_read", "file_write", "file_search", "file_search_replace",
+    "recall",
 ]
 
 KNOWN_ACTIONS = set(DEFAULT_ACTIONS) | {"rag_query"}
+KNOWN_PROFILES = {"standard", "code"}
 
 
 def _normalize_allowed_actions(actions: list[str] | None) -> list[str]:
@@ -68,6 +87,54 @@ def _normalize_allowed_actions(actions: list[str] | None) -> list[str]:
     return cleaned or list(DEFAULT_ACTIONS)
 
 
+def _validate_profile(profile: str | None) -> str | None:
+    if profile is None or profile in KNOWN_PROFILES:
+        return None
+    return f"不支持的 Profile: {profile}"
+
+
+def _latest_published_coding_runtime(db: Session, project_id: str | None) -> str:
+    manifest = (
+        db.query(CodeProjectManifest)
+        .filter(
+            CodeProjectManifest.project_id == (project_id or ""),
+            CodeProjectManifest.status == "published",
+        )
+        .order_by(CodeProjectManifest.version.desc())
+        .first()
+    )
+    if manifest is None:
+        return "legacy"
+    try:
+        policy = json.loads(manifest.policy or "{}")
+    except json.JSONDecodeError:
+        return "legacy"
+    if not isinstance(policy, dict):
+        return "legacy"
+    runtime = str(policy.get("coding_runtime") or "legacy").strip()
+    return runtime if runtime in {"legacy", "claude_code"} else "legacy"
+
+
+def _validate_code_profile_selection(
+    db: Session, user: User, profile: str, project_id: str | None, llm_id: str | None
+) -> str | None:
+    if profile != "code":
+        return None
+    if not project_id:
+        return "code_project_required"
+    project = db.query(CodeProject).filter(CodeProject.id == project_id).first()
+    if not can_use_code_project(user, project):
+        return "code_project_unauthorized"
+    availability = project_availability(db, project)
+    if not availability["ready"]:
+        return availability["reason"]
+    if _latest_published_coding_runtime(db, project_id) == "claude_code":
+        reason = claude_code_llm_binding_reason(db, llm_id or "")
+        if reason:
+            return reason
+    return None
+
+
 def _filter_agents(items: list[Agent], user: User, scope: str = "all") -> list[Agent]:
     visible = [a for a in items if can_access_resource(user, a.visibility, a.allowed_users, a.creator)]
     if scope == "mine":
@@ -75,7 +142,25 @@ def _filter_agents(items: list[Agent], user: User, scope: str = "all") -> list[A
     return visible
 
 
-def _agent_dict(a: Agent, db: Session) -> dict:
+def _code_project_display(db: Session, user: User, project_id: str | None) -> dict:
+    project = db.query(CodeProject).filter(CodeProject.id == (project_id or "")).first()
+    if not can_use_code_project(user, project):
+        return {
+            "code_project_name": "",
+            "code_project_availability": {
+                "ready": False,
+                "status": "unavailable",
+                "reason": "code_project_unauthorized",
+                "detail": "",
+            },
+        }
+    return {
+        "code_project_name": project.name,
+        "code_project_availability": project_availability(db, project),
+    }
+
+
+def _agent_dict(a: Agent, db: Session, user: User) -> dict:
     d = a.to_dict()
     if a.llm_id:
         llm = db.query(LLMResource).filter(LLMResource.id == a.llm_id).first()
@@ -87,10 +172,12 @@ def _agent_dict(a: Agent, db: Session) -> dict:
         d["sandbox_name"] = sb.name if sb else ""
     else:
         d["sandbox_name"] = ""
+    if (a.profile or "standard") == "code":
+        d.update(_code_project_display(db, user, a.code_project_id))
     return d
 
 
-def _agents_list(items: list[Agent], db: Session) -> list[dict]:
+def _agents_list(items: list[Agent], db: Session, user: User) -> list[dict]:
     llm_ids = {a.llm_id for a in items if a.llm_id}
     sb_ids = {a.sandbox_id for a in items if a.sandbox_id}
     llm_map = {
@@ -106,6 +193,8 @@ def _agents_list(items: list[Agent], db: Session) -> list[dict]:
         d = a.to_dict()
         d["llm_name"] = llm_map.get(a.llm_id, "") if a.llm_id else ""
         d["sandbox_name"] = sb_map.get(a.sandbox_id, "") if a.sandbox_id else ""
+        if (a.profile or "standard") == "code":
+            d.update(_code_project_display(db, user, a.code_project_id))
         result.append(d)
     return result
 
@@ -137,7 +226,20 @@ def _agent_form_refs(db: Session, user: User) -> dict:
         for r in db.query(RagCorpus).all()
         if can_access_resource(user, r.visibility, r.allowed_users, r.creator)
     ]
-    return {"sandboxes": sandboxes, "llms": llms, "skills": skills, "mcps": mcps, "rags": rags}
+    httpmcps = [
+        {"id": h.id, "name": h.name}
+        for h in db.query(HttpMcp).all()
+        if can_access_resource(user, h.visibility, h.allowed_users, h.creator)
+    ]
+    code_projects = [
+        {"id": p.id, "name": p.name, "availability": project_availability(db, p)}
+        for p in db.query(CodeProject).filter(CodeProject.enabled == True).all()
+        if can_use_code_project(user, p)
+    ]
+    return {
+        "sandboxes": sandboxes, "llms": llms, "skills": skills, "mcps": mcps,
+        "rags": rags, "httpmcps": httpmcps, "code_projects": code_projects,
+    }
 
 
 def _validate_refs(db: Session, body: AgentBody) -> str | None:
@@ -162,14 +264,14 @@ async def agent_get(
 ):
     if action == "list":
         items = _filter_agents(db.query(Agent).all(), user, scope)
-        return ok(_agents_list(items, db))
+        return ok(_agents_list(items, db, user))
     if action == "refs":
         return ok(_agent_form_refs(db, user))
     if action == "get" and id:
         a = db.query(Agent).filter(Agent.id == id).first()
         if not a or not can_access_resource(user, a.visibility, a.allowed_users, a.creator):
             return fail("不存在或无权限")
-        return ok(_agent_dict(a, db))
+        return ok(_agent_dict(a, db, user))
     return fail("未知操作")
 
 
@@ -179,17 +281,30 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
 
     if action == "list":
         items = _filter_agents(db.query(Agent).all(), user, body.scope or "all")
-        return ok(_agents_list(items, db))
+        return ok(_agents_list(items, db, user))
 
     if action == "refs":
         return ok(_agent_form_refs(db, user))
 
     if action in ("create", "update"):
+        a = db.query(Agent).filter(Agent.id == body.id).first() if body.id else None
         err = _validate_refs(db, body)
+        if not err:
+            err = _validate_profile(body.profile)
+        selected_profile = body.profile if body.profile is not None else (a.profile if a else "standard")
+        selected_project_id = body.code_project_id if body.code_project_id is not None else (a.code_project_id if a else "")
+        selected_llm_id = body.llm if body.llm is not None else (a.llm_id if a else "")
+        if not err:
+            err = _validate_code_profile_selection(
+                db,
+                user,
+                selected_profile or "standard",
+                selected_project_id,
+                selected_llm_id,
+            )
         if err:
             return fail(err)
         if body.id:
-            a = db.query(Agent).filter(Agent.id == body.id).first()
             if not a:
                 return fail("不存在")
         else:
@@ -204,7 +319,12 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
         a.name = body.name or a.name or "未命名"
         a.description = body.description
         a.prompt = body.prompt
-        a.engine = "react"
+        if body.profile is not None:
+            a.profile = body.profile
+        elif action == "create":
+            a.profile = "standard"
+        if body.code_project_id is not None:
+            a.code_project_id = body.code_project_id
         if body.llm:
             a.llm_id = body.llm
         if body.sandbox:
@@ -213,6 +333,8 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
             a.skills = json.dumps(body.skills)
         if body.mcps is not None:
             a.mcps = json.dumps(body.mcps)
+        if body.httpmcps is not None:
+            a.httpmcps = json.dumps(body.httpmcps)
         if body.allowed_actions is not None:
             a.allowed_actions = json.dumps(_normalize_allowed_actions(body.allowed_actions))
         elif action == "create":
@@ -224,19 +346,19 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
                 if "rag_query" not in actions:
                     actions.append("rag_query")
                     a.allowed_actions = json.dumps(actions)
-        a.max_iterations = body.max_iterations
+        a.max_iterations = max(1, int(body.max_iterations or 150))
         a.history_length = body.history_length
-        a.summary_max_words = body.summary_max_words
         a.proactivity = body.proactivity
         a.llm_timeout = body.llm_timeout
         a.skill_timeout = body.skill_timeout
         a.shell_timeout = body.shell_timeout
         a.mcp_soft_circuit = max(1, min(int(body.mcp_soft_circuit or 5), 50))
+        a.tool_result_clip = max(1, min(int(body.tool_result_clip or 6000), 100000))
         a.visibility = body.visibility
         a.allowed_users = json.dumps(body.allowed_users or [])
         a.modified_at = now_str()
         db.commit()
-        return ok(_agent_dict(a, db), "保存成功")
+        return ok(_agent_dict(a, db, user), "保存成功")
 
     if action == "delete":
         a = db.query(Agent).filter(Agent.id == body.id).first()

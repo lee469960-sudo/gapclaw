@@ -3,6 +3,7 @@ import { getCgi } from './api'
 const SHELL_KEY = 'gap_shell'
 const ROUTES_KEY = 'gap_allowed_routes'
 const ROLES_KEY = 'gap_roles'
+const EXPIRES_KEY = 'login_expires_at'
 
 let memoryShell = null
 let inflight = null
@@ -70,6 +71,22 @@ export function clearShell() {
   sessionStorage.removeItem(SHELL_KEY)
   sessionStorage.removeItem(ROUTES_KEY)
   sessionStorage.removeItem(ROLES_KEY)
+  sessionStorage.removeItem(EXPIRES_KEY)
+}
+
+/** 记录登录过期时间戳（毫秒），固定 24h 从登录起算。 */
+export function setLoginExpiry(expiresAtMs) {
+  sessionStorage.setItem(EXPIRES_KEY, String(expiresAtMs))
+}
+
+/** 读取登录过期时间戳（毫秒）；无则返回 null（不触发主动过期判断）。 */
+export function getLoginExpiry() {
+  try {
+    const raw = sessionStorage.getItem(EXPIRES_KEY)
+    return raw ? Number(raw) : null
+  } catch {
+    return null
+  }
 }
 
 export function getCurrentUsername() {

@@ -14,7 +14,12 @@ from app.database import SessionLocal
 from app.models import Agent, ChatMessage, ImChannel, ImDedup, ImEventLog, ImSession
 from app.security import new_id, now_str
 from app.services.channels.base import InboundMessage, WebhookResult, create_adapter
-from app.services.channels.reply import format_im_completion_reply
+from app.services.channels.reply import (
+    format_im_completion_reply,
+    parse_attach_paths,
+    resolve_attach_paths,
+    strip_attach_markers,
+)
 from app.services.agent_runtime import run_agent
 from app.services.workplace import download_path
 
@@ -308,18 +313,49 @@ async def process_inbound(channel_id: str, inbound: InboundMessage) -> None:
             if not agent:
                 raise RuntimeError("渠道未绑定有效 Agent")
 
-            username = (
-                inbound.sender_username
-                or inbound.sender_display_name
-                or channel.creator
-                or "admin"
-            )
             log_event(db, channel.id, f"收到消息 chat={inbound.chat_id} agent={agent.id}", "info", inbound.text[:1000])
             channel.last_event_at = now_str()
             channel.last_error = ""
             db.commit()
 
             adapter = create_adapter(channel.provider, channel.id, channel.get_config())
+
+            # TG 入站 document：下载到 agent 沙箱 workspace 并注入路径（react-engine-v6 R1）。
+            # 下载失败（超 20MB / getFile 失败 / 传输失败）→ 提示用户并终止，不跑 Agent。
+            if channel.provider == "telegram":
+                # Mirror handle_webhook's message resolution (message || edited_message).
+                raw_msg = (inbound.raw or {}).get("message") or (inbound.raw or {}).get("edited_message") or {}
+                document = raw_msg.get("document")
+                if isinstance(document, dict):
+                    from app.services.channels.telegram import download_document_to_workspace
+                    token = str((channel.get_config() or {}).get("bot_token") or "")
+                    try:
+                        rel_path = await download_document_to_workspace(
+                            token, document, agent.sandbox_id or "",
+                        )
+                    except Exception as doc_err:
+                        logger.warning(
+                            "TG document download failed channel=%s: %s", channel.id, doc_err,
+                        )
+                        err_text = str(doc_err).strip() or "未知错误"
+                        try:
+                            await adapter.send_text(
+                                inbound.chat_id,
+                                f"附件下载失败：{err_text}",
+                                reply_to=inbound.raw,
+                            )
+                        except Exception:
+                            logger.warning("IM doc-error reply failed channel=%s", channel.id)
+                        log_event(db, channel.id, f"附件下载失败: {err_text}", "error")
+                        channel.last_error = err_text[:2000]
+                        db.commit()
+                        return
+                    prefix = f"附件已下载：{rel_path}"
+                    inbound.text = (
+                        f"{prefix}\n\n{inbound.text}" if inbound.text.strip() else prefix
+                    )
+                    log_event(db, channel.id, f"已下载附件: {rel_path}", "info")
+
             # Best-effort ack so mobile user sees activity while Agent runs
             try:
                 await adapter.send_text(
@@ -335,7 +371,6 @@ async def process_inbound(channel_id: str, inbound: InboundMessage) -> None:
                 agent,
                 im_sess.agent_session_id,
                 inbound.text,
-                username,
                 message_meta={
                     "source": f"im:{channel.provider}",
                     "channel_id": channel.id,
@@ -348,11 +383,18 @@ async def process_inbound(channel_id: str, inbound: InboundMessage) -> None:
             )
 
             saved = _last_assistant_saved_paths(db, agent.id, im_sess.agent_session_id)
-            slim_text, push_paths = format_im_completion_reply(
-                reply or "",
-                saved_paths=saved,
-                sandbox_id=agent.sandbox_id or "",
-            )
+            # R4: explicit `attach=` / `ATTACH:` paths take priority; otherwise fall
+            # back to the existing "newest root xlsx/csv" pick (backward compatible).
+            explicit_paths = parse_attach_paths(reply or "")
+            if explicit_paths:
+                slim_text = strip_attach_markers(reply or "")
+                push_paths = resolve_attach_paths(explicit_paths, agent.sandbox_id or "")
+            else:
+                slim_text, push_paths = format_im_completion_reply(
+                    reply or "",
+                    saved_paths=saved,
+                    sandbox_id=agent.sandbox_id or "",
+                )
             slim_text = _address_group_sender(channel.provider, inbound, slim_text)
             await adapter.send_text(
                 inbound.chat_id, slim_text or "任务结束", reply_to=inbound.raw,
