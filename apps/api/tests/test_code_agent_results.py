@@ -14,7 +14,11 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Agent, CodeAgentRun, CodeArtifact, CodeProject, User
 from app.routers.agent_chat import chat_get
-from app.services.code_agent.results import TERMINAL_PRESENTATION, serialize_code_result
+from app.services.code_agent.results import (
+    TERMINAL_PRESENTATION,
+    format_patch_verification_output,
+    serialize_code_result,
+)
 
 
 def _run(status, *, verified=False):
@@ -41,11 +45,15 @@ def test_required_terminal_states_have_stable_presentation_and_only_verified_sea
     }
     assert required.issubset(TERMINAL_PRESENTATION)
 
-    ready = serialize_code_result(_run("patch_ready", verified=True), _artifact())
+    ready_run = _run("patch_ready", verified=True)
+    ready_run.failure_reason = "patch_ready"
+    ready = serialize_code_result(ready_run, _artifact())
     assert ready["directly_adoptable"] is True
     assert ready["warning"] == ""
     assert ready["manifest_version"] == 3
     assert ready["verifier_report"] == {"passed": True}
+    assert ready["failure"] == {}
+    assert ready["failure_reason"] == ""
 
     for status in required - {"patch_ready"}:
         result = serialize_code_result(_run(status, verified=status == "no_change_justified"), _artifact())
@@ -56,6 +64,68 @@ def test_required_terminal_states_have_stable_presentation_and_only_verified_sea
     inconsistent = serialize_code_result(_run("patch_ready", verified=False), None)
     assert inconsistent["status"] == "infrastructure_error"
     assert inconsistent["directly_adoptable"] is False
+
+
+def test_patch_verification_output_is_present_for_every_terminal_result():
+    ready = serialize_code_result(_run("patch_ready", verified=True), _artifact())
+    ready["verifier_report"]["changed_paths"] = ["models/a.sql"]
+    text = format_patch_verification_output(ready)
+    assert "Patch 验证结果" in text
+    assert "Code run" in text
+    assert "Manifest" in text
+    assert "Runtime" in text
+    assert "Verifier：通过" in text
+    assert "Sealed artifact：已生成" in text
+    assert "models/a.sql" in text
+    assert "Verifier 证据" in text
+    assert "Git 提交/推送：未执行" in text
+
+    claude_run = _run("patch_ready", verified=True)
+    claude_run.task_contract = json.dumps({"coding_runtime": "claude_code"})
+    claude_text = format_patch_verification_output(
+        serialize_code_result(claude_run, _artifact())
+    )
+    assert "Host 验证命令" in claude_text
+
+    failed = serialize_code_result(_run("coding_failed"), None)
+    failed_text = format_patch_verification_output(failed)
+    assert "Verifier：未通过或证据不足" in failed_text
+    assert "可直接采用：否" in failed_text
+
+
+def test_patch_verification_output_shows_redacted_stage_code_snippets_before_result():
+    secret = "sk-" + "z" * 20
+    run = _run("patch_ready", verified=True)
+    run.failure_reason = "patch_ready"
+    run.task_contract = json.dumps({"coding_runtime": "claude_code"})
+    run.effective_policy = json.dumps({"coding_runtime": "claude_code"})
+    run.runner_facts = json.dumps({
+        "claude_code_runtime": {
+            "runtime_events": [
+                {
+                    "type": "file_changed",
+                    "status": "completed",
+                    "path": "gamestat/dbt_project.yml",
+                    "snippet": f"--- 修改前\npg_host: 192.168.1.25\n+++ 修改后\npg_host: 192.168.0.105\npassword={secret}",
+                },
+                {
+                    "type": "test_run",
+                    "status": "completed",
+                    "command": "dbt test",
+                    "output": "PASS 中文输出",
+                },
+            ],
+        },
+    })
+
+    rendered = format_patch_verification_output(serialize_code_result(run, _artifact()))
+
+    assert rendered.index("阶段代码片段") < rendered.index("Patch 验证结果")
+    assert "gamestat/dbt_project.yml" in rendered
+    assert "修改前" in rendered and "修改后" in rendered
+    assert "PASS 中文输出" in rendered
+    assert secret not in rendered
+    assert "[REDACTED:SECRET]" in rendered
 
 
 def test_non_patch_terminal_results_are_distinct_and_not_adoptable():
@@ -129,8 +199,14 @@ def test_code_result_includes_claude_code_runtime_visibility_facts():
     assert result["runtime"]["skills"][0]["name"] == "dbt-clickhouse-gamestat"
     assert result["runtime"]["mcp_servers"][0]["enabled_tool_count"] == 3
     assert result["runtime"]["runtime_result"]["status"] == "coding_completed"
+    assert result["runtime"]["readiness"]["model_preflight"]["status"] == "passed"
+    assert result["runtime"]["readiness"]["model_preflight"]["reason"] == ""
     assert secret not in serialized
     assert "[REDACTED:SECRET]" in serialized
+    result["verifier_report"]["scanner_excerpt"] = secret
+    rendered = format_patch_verification_output(result)
+    assert secret not in rendered
+    assert "[REDACTED:SECRET]" in rendered
 
 
 def test_code_result_surfaces_specific_claude_code_model_binding_reason():
@@ -278,3 +354,21 @@ def test_project_authorized_review_and_fixed_file_download_interfaces(tmp_path):
         action="review_code_artifact", artifact_kind=None, **common,
     ))
     assert blocked["msg"] == "code_artifact_not_reviewable"
+
+
+def test_host_validate_is_output_text_only_for_verified_claude_patch():
+    run = _run("patch_ready", verified=True)
+    run.task_contract = json.dumps({"coding_runtime": "claude_code"})
+    run.effective_policy = json.dumps({"coding_runtime": "claude_code"})
+    result = serialize_code_result(run, _artifact())
+    assert result["host_validate"].startswith("#!/usr/bin/env bash")
+    assert "host-validate.sh" not in result["host_validate"]
+
+
+def test_result_card_preserves_non_success_terminal_states():
+    for status in ("verification_failed", "target_not_found", "needs_user_decision"):
+        result = serialize_code_result(_run(status, verified=False))
+        card = result["result_card"]
+        assert card["status"] == status
+        assert card["directly_adoptable"] is False
+        assert result["directly_adoptable"] is False

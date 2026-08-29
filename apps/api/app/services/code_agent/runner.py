@@ -9,6 +9,7 @@ closed if the running container does not exactly match the ``RunnerSpec``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import socket
@@ -16,6 +17,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 
 from app.services.code_agent.lifecycle import register_code_cleanup
@@ -41,6 +43,8 @@ CLAUDE_CODE_VERSION_COMMAND = ["claude", "--version"]
 # Docker attach/exec multiplex header: stream byte, 3 padding bytes, uint32 size.
 _DOCKER_STDOUT = 1
 _DOCKER_STDERR = 2
+
+logger = logging.getLogger(__name__)
 
 
 def _exec_transport_socket(sock):
@@ -511,11 +515,15 @@ class CodeContainerRunner:
         *,
         timeout_seconds: int,
         environment: dict[str, str] | None = None,
+        on_output: Callable[[str], None] | None = None,
     ) -> tuple[int, str]:
         try:
             container = self.client.containers.get(container_id)
         except Exception as exc:
-            raise RunnerUnavailableError("runner_exec_failed") from exc
+            logger.warning("runner container lookup failed", exc_info=True)
+            raise RunnerUnavailableError(
+                "runner_exec_failed", detail=type(exc).__name__
+            ) from exc
 
         requested_timeout = max(0.0, float(timeout_seconds))
         deadline = self._deadlines.get(container_id)
@@ -541,11 +549,134 @@ class CodeContainerRunner:
                         name = str(key or "").strip()
                         if name:
                             exec_env[name] = str(value)
-                result_holder["result"] = container.exec_run(
-                    ["/bin/sh", "-lc", command],
-                    workdir="/workspace",
-                    environment=exec_env,
-                )
+                if on_output is None:
+                    result_holder["result"] = container.exec_run(
+                        ["/bin/sh", "-lc", command],
+                        workdir="/workspace",
+                        environment=exec_env,
+                    )
+                else:
+                    stream_started = False
+                    try:
+                        exec_id = self.client.api.exec_create(
+                            container.id,
+                            ["/bin/sh", "-lc", command],
+                            stdout=True,
+                            stderr=True,
+                            workdir="/workspace",
+                            environment=exec_env,
+                        )["Id"]
+                        stream = self.client.api.exec_start(exec_id, stream=True, demux=True)
+                        stream_started = True
+                        chunks: list[str] = []
+                        stream_error: BaseException | None = None
+                        try:
+                            try:
+                                for chunk in stream:
+                                    stderr_text = ""
+                                    if isinstance(chunk, tuple):
+                                        stdout_chunk = chunk[0] if len(chunk) > 0 else b""
+                                        stderr_chunk = chunk[1] if len(chunk) > 1 else b""
+                                        chunk = stdout_chunk
+                                        if isinstance(stderr_chunk, bytes):
+                                            stderr_text = stderr_chunk.decode("utf-8", errors="replace")
+                                    if isinstance(chunk, bytes):
+                                        text = chunk.decode("utf-8", errors="replace")
+                                    else:
+                                        text = str(chunk or "")
+                                    if text:
+                                        chunks.append(text)
+                                        # Output observers (for example the live
+                                        # UI event publisher) must never be able
+                                        # to abort the actual container command.
+                                        # A disconnected websocket or a closed
+                                        # event loop is an observer failure, not
+                                        # a runner failure.
+                                        try:
+                                            on_output(text)
+                                        except BaseException:
+                                            logger.warning(
+                                                "stream output observer failed; continuing command",
+                                                exc_info=True,
+                                            )
+                                    if stderr_text:
+                                        chunks.append(stderr_text)
+                            except BaseException as exc:
+                                # Docker daemon/proxy versions occasionally
+                                # close the HTTP stream after the exec has
+                                # already completed. Keep the captured output
+                                # and use exec_inspect as the source of truth
+                                # for the command's exit status.
+                                stream_error = exc
+                                logger.warning(
+                                    "stream closed before EOF; inspecting exec status",
+                                    exc_info=True,
+                                )
+                        finally:
+                            close = getattr(stream, "close", None)
+                            if callable(close):
+                                try:
+                                    close()
+                                except BaseException:
+                                    # Closing a generator backed by a broken
+                                    # Docker socket can itself raise OSError.
+                                    # The process result is determined below by
+                                    # exec_inspect, so cleanup errors must not
+                                    # replace that result with runner_exec_failed.
+                                    logger.warning(
+                                        "stream close failed; continuing to inspect exec status",
+                                        exc_info=True,
+                                    )
+                        # A few Docker API versions briefly report a null
+                        # ExitCode after the streaming generator closes. Poll
+                        # for the terminal value within a small bounded window
+                        # instead of turning that transient state into the
+                        # opaque runner_exec_failed result.
+                        inspected = {}
+                        inspect_error: BaseException | None = None
+                        # Allow the daemon a short grace period to publish the
+                        # exec status when the stream connection is lost while
+                        # the child process is still finishing. This is bounded
+                        # by 30s and therefore cannot bypass the command's
+                        # overall deadline.
+                        inspect_deadline = time.monotonic() + min(
+                            30.0, max(1.0, remaining)
+                        )
+                        while time.monotonic() < inspect_deadline:
+                            try:
+                                inspected = self.client.api.exec_inspect(exec_id)
+                                inspect_error = None
+                            except BaseException as exc:
+                                inspect_error = exc
+                                time.sleep(0.01)
+                                continue
+                            if inspected.get("ExitCode") is not None:
+                                break
+                            time.sleep(0.01)
+                        exit_code = inspected.get("ExitCode")
+                        if exit_code is None:
+                            if stream_error is not None:
+                                raise stream_error
+                            if inspect_error is not None:
+                                raise inspect_error
+                            exit_code = 1
+                        result_holder["result"] = (
+                            int(exit_code),
+                            "".join(chunks),
+                        )
+                    except Exception:
+                        if stream_started:
+                            raise
+                        # Some older Docker daemons reject the streaming exec
+                        # negotiation. The command is still safe to complete
+                        # synchronously; Claude's final stream-json payload is
+                        # parsed after return, but live events are unavailable.
+                        logger.warning("streaming exec unavailable; falling back to sync exec", exc_info=True)
+                        result_holder["result"] = container.exec_run(
+                            ["/bin/sh", "-lc", command],
+                            workdir="/workspace",
+                            environment=exec_env,
+                        )
             except BaseException as exc:
                 result_holder["error"] = exc
             finally:
@@ -562,9 +693,16 @@ class CodeContainerRunner:
         if "error" in result_holder:
             error = result_holder["error"]
             if isinstance(error, BaseException):
-                raise RunnerUnavailableError("runner_exec_failed") from error
+                detail = type(error).__name__
+                if isinstance(error, OSError) and error.errno is not None:
+                    detail = f"{detail}[errno={error.errno}]"
+                raise RunnerUnavailableError(
+                    "runner_exec_failed", detail=detail
+                ) from error
             raise RunnerUnavailableError("runner_exec_failed")
         result = result_holder["result"]
+        if isinstance(result, tuple):
+            return int(result[0]), str(result[1])[:100000]
         exit_code = int(getattr(result, "exit_code", 1))
         output = getattr(result, "output", b"")
         if isinstance(output, bytes):

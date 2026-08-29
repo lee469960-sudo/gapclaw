@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.database import SessionLocal, engine
-from app.menu_config import APP_VERSION
+from app.version import app_version
 from app.middleware.page_auth import PagePermissionMiddleware
 from app.schemas import fail
 from app.startup import init_db
@@ -118,7 +118,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": APP_VERSION}
+        return {"status": "ok", "version": app_version()}
 
     return app
 

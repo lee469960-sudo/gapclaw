@@ -51,6 +51,7 @@
           </el-radio-group>
         </el-form-item>
         <el-form-item v-if="form.type === 'llm'">
+          <el-button type="primary" plain size="small" @click="applyAnthropicPreset">Anthropic Claude</el-button>
           <el-button type="primary" plain size="small" @click="applyMinMaxPreset(false)">MiniMax 国际</el-button>
           <el-button type="primary" plain size="small" @click="applyMinMaxPreset(true)">MiniMax 国内</el-button>
         </el-form-item>
@@ -58,8 +59,9 @@
         <template v-if="form.type === 'llm'">
           <el-form-item label="Provider"><el-input v-model="form.provider" /></el-form-item>
           <el-form-item label="Base URL">
-            <el-input v-model="form.base_url" placeholder="https://api.minimaxi.com/v1" />
-            <div class="field-hint">MiniMax 请用 OpenAI 兼容地址，末尾带 /v1，不要用 /anthropic</div>
+            <el-input v-model="form.base_url" :placeholder="form.provider === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.minimaxi.com/v1'" />
+            <div v-if="form.provider === 'anthropic'" class="field-hint">Claude Code 使用 Anthropic API；CodeAgent 请绑定此类型的单个 LLM</div>
+            <div v-else class="field-hint">MiniMax 请用 OpenAI 兼容地址，末尾带 /v1，不要用 /anthropic</div>
           </el-form-item>
           <el-form-item label="API Key">
             <el-input
@@ -139,6 +141,15 @@ function applyMinMaxPreset(domestic = false) {
   form.base_url = domestic ? 'https://api.minimaxi.com/v1' : 'https://api.minimax.io/v1'
   form.model = 'MiniMax-M3'
   form.description = domestic ? 'MiniMax 国内 OpenAI 兼容' : 'MiniMax 国际 OpenAI 兼容'
+}
+
+function applyAnthropicPreset() {
+  form.type = 'llm'
+  form.name = form.name || 'Claude'
+  form.provider = 'anthropic'
+  form.base_url = 'https://api.anthropic.com'
+  form.model = 'sonnet'
+  form.description = 'Anthropic Claude（CodeAgent）'
 }
 
 function openForm(row) {

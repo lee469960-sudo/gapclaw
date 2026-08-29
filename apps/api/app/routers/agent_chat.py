@@ -1,6 +1,7 @@
 import json
 import asyncio
 import logging
+from pathlib import Path
 from fastapi import APIRouter, Depends, Query, BackgroundTasks, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ from app.services.code_agent.control_plane import (
 )
 from app.services.code_agent.claude_code_runtime import GRILL_CONFIRMATION
 from app.services.code_agent.results import serialize_code_result
+from app.services.code_agent.output_security import redact_code_output
 from app.services.code_agent.kill_switch import CodeKillSwitchError
 from app.services.code_agent.review import (
     ArtifactReviewError,
@@ -230,6 +232,7 @@ async def chat_get(
     artifact_kind: str = Query(None),
     message_id: int = Query(None),
     limit: int = Query(None),
+    since: int = Query(0),
     user: User = Depends(get_session_user),
     db: Session = Depends(get_db),
 ):
@@ -283,6 +286,133 @@ async def chat_get(
             if run.artifact_id else None
         )
         return ok(serialize_code_result(run, artifact))
+    if action == "get_code_events":
+        run = db.query(CodeAgentRun).filter(CodeAgentRun.id == (code_run_id or "")).first()
+        if not run or run.agent_id != agent_id:
+            return fail("code_run_not_found")
+        project = db.query(CodeProject).filter(CodeProject.id == run.project_id).first()
+        try:
+            require_project_reviewer(user, project, db=db, resource=run, operation="events:view")
+        except CodeAuthorizationError as exc:
+            return fail(exc.reason)
+        try:
+            facts = json.loads(run.runner_facts or "{}")
+        except (TypeError, json.JSONDecodeError):
+            facts = {}
+        history = facts.get("code_profile_events")
+        if not isinstance(history, list):
+            history = facts.get("claude_code_runtime_history") or []
+        if not isinstance(history, list):
+            history = []
+        # A process restart can terminate a Run after the live Runtime event
+        # was persisted but before its terminal update reached the hub. On
+        # refresh, synthesize the missing terminal event so the UI cannot keep
+        # showing "Runtime 结果 · started" forever.
+        if run.status not in {"pending", "running"}:
+            runtime_indexes = [
+                index for index, item in enumerate(history)
+                if isinstance(item, dict) and item.get("phase") == "runtime_result"
+            ]
+            if runtime_indexes:
+                last_runtime = history[runtime_indexes[-1]]
+                if str(last_runtime.get("status") or "").lower() not in {"completed", "done", "passed", "success", "failed", "error"}:
+                    history = [*history, {
+                        "version": 1,
+                        "profile": "code",
+                        "phase": "runtime_result",
+                        "status": "failed" if run.status in {"infrastructure_error", "coding_failed", "coding_timeout"} else "completed",
+                        "reason": str(run.failure_reason or run.status or "run_terminated"),
+                        "run_id": run.id,
+                        "manifest_version": run.manifest_version,
+                        "sequence": len(history),
+                    }]
+        page_size = max(1, min(int(limit or 50), 200))
+        start = max(0, int(since or 0))
+        page = history[start:start + page_size]
+        events = []
+        for index, item in enumerate(page):
+            if isinstance(item, dict):
+                event = {str(key): redact_code_output(str(value)).text if isinstance(value, str) else value for key, value in item.items()}
+                event.setdefault("sequence", start + index)
+                events.append(event)
+        return ok({"run_id": run.id, "events": events, "total": len(history), "next_since": start + len(events), "has_more": start + len(events) < len(history)})
+    if action == "get_code_workspace":
+        run = db.query(CodeAgentRun).filter(CodeAgentRun.id == (code_run_id or "")).first()
+        if not run or run.agent_id != agent_id:
+            return fail("code_run_not_found")
+        project = db.query(CodeProject).filter(CodeProject.id == run.project_id).first()
+        try:
+            require_project_reviewer(user, project, db=db, resource=run, operation="workspace:view")
+        except CodeAuthorizationError as exc:
+            return fail(exc.reason)
+        try:
+            source_facts = json.loads(run.source_facts or "{}")
+        except (TypeError, json.JSONDecodeError):
+            source_facts = {}
+        workspace_path = str(run.workspace_path or "")
+        if not workspace_path:
+            state = "workspace_not_prepared"
+        elif run.workspace_state in {"expired", "deleted"} or (
+            run.workspace_state in {"sealed", "retained_read_only"}
+            and not Path(workspace_path).exists()
+        ):
+            state = "workspace_expired"
+        elif not Path(workspace_path).is_dir():
+            state = "workspace_mount_invalid"
+        else:
+            state = "ready"
+        return ok({
+            "run_id": run.id,
+            "state": state,
+            "workspace_path": workspace_path if state == "ready" else "",
+            "repository": run.repository,
+            "resolved_commit": run.resolved_commit,
+            "base_commit": run.base_commit,
+            "readiness": {
+                "repo_root_mode": source_facts.get("repo_root_mode", ""),
+                "repo_root_ready": source_facts.get("repo_root_ready") is True,
+                "repo_root_reason": source_facts.get("repo_root_reason", ""),
+            },
+        })
+    if action in {"list_code_workspace", "read_code_workspace_file", "get_code_workspace_git"}:
+        run = db.query(CodeAgentRun).filter(CodeAgentRun.id == (code_run_id or "")).first()
+        if not run or run.agent_id != agent_id:
+            return fail("code_run_not_found")
+        project = db.query(CodeProject).filter(CodeProject.id == run.project_id).first()
+        try:
+            require_project_reviewer(user, project, db=db, resource=run, operation="workspace:preview")
+            if not run.workspace_path:
+                return fail("workspace_not_prepared")
+            from app.services.code_agent.workspace_preview import (
+                WorkspacePreviewError,
+                list_workspace,
+                read_workspace_file,
+                git_workspace_status,
+            )
+            root = Path(run.workspace_path).resolve(strict=True)
+            if run.workspace_state in {"expired", "deleted"}:
+                return fail("workspace_expired")
+            if not root.is_dir():
+                return fail("workspace_mount_invalid")
+            if action == "get_code_workspace_git":
+                if not (root / ".git").is_dir():
+                    return ok({
+                        "available": False,
+                        "reason": "git_metadata_missing",
+                        "branch": "",
+                        "changed_files": [],
+                        "clean": None,
+                    })
+                return ok(git_workspace_status(root))
+            if action == "list_code_workspace":
+                return ok(list_workspace(root, relative=path or "", depth=2, limit=limit or 500))
+            return ok(read_workspace_file(root, path or ""))
+        except CodeAuthorizationError as exc:
+            return fail(exc.reason)
+        except (FileNotFoundError, NotADirectoryError):
+            return fail("workspace_expired")
+        except WorkspacePreviewError as exc:
+            return fail(exc.reason)
     if action in {"review_code_artifact", "download_code_artifact"}:
         artifact = db.query(CodeArtifact).filter(CodeArtifact.id == artifact_id).first()
         run = (

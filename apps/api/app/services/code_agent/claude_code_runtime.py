@@ -19,6 +19,7 @@ from types import MappingProxyType
 from typing import Any
 
 from app.services.code_agent.output_security import redact_code_output
+from app.services.llm_client import anthropic_base_url
 
 
 @dataclass(frozen=True)
@@ -334,9 +335,20 @@ def resolve_claude_code_exec_env(db, run) -> tuple[dict[str, str], str]:
     llm = claude_code_bound_llm(db, str(agent.llm_id))
     api_key = claude_code_llm_api_key(llm)
     env = {"ANTHROPIC_API_KEY": api_key}
-    base_url = str(getattr(llm, "base_url", "") or "").strip()
+    base_url = anthropic_base_url(str(getattr(llm, "base_url", "") or ""))
     if base_url:
         env["ANTHROPIC_BASE_URL"] = base_url
+    # CodeAgent sandboxes normally have network disabled. Keep dependency
+    # probes from hanging the whole Claude session when a task asks to run a
+    # tool that is not baked into the runner image.
+    env.update({
+        "PIP_DEFAULT_TIMEOUT": "15",
+        "PIP_RETRIES": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "npm_config_fetch_timeout": "15000",
+        "npm_config_fetch_retries": "0",
+        "YARN_HTTP_TIMEOUT": "15000",
+    })
     return env, ""
 
 
@@ -377,11 +389,34 @@ def claude_code_llm_binding_reason(db, llm_id: str) -> str:
         return "llm_not_found"
     if str(getattr(llm, "type", "") or "llm").strip() == "group":
         return "llm_group_not_supported"
+    provider = str(getattr(llm, "provider", "") or "").strip().lower()
+    if provider not in {"anthropic", "cloud_claude"}:
+        # Claude Code speaks the Anthropic API. OpenAI-compatible resources
+        # such as MiniMax are valid for Standard Agents but cannot be passed to
+        # the Claude SDK; reject them before the first coding request.
+        return "llm_provider_not_supported"
     if not claude_code_llm_api_key(llm):
         return "llm_api_key_missing"
     if not str(getattr(llm, "model", "") or "").strip():
         return "llm_model_missing"
     return ""
+
+
+CLAUDE_CODE_LLM_REPAIR_GUIDANCE = {
+    "llm_provider_not_supported": {
+        "repair_action": "select_anthropic_llm",
+        "repair_label": "绑定 provider=anthropic 的单个 LLMResource（不要使用 MiniMax/OpenAI）",
+    },
+    "llm_group_not_supported": {"repair_action": "select_single_llm_resource", "repair_label": "选择单个带 key 和 model 的 LLMResource"},
+    "llm_api_key_missing": {"repair_action": "configure_llm_api_key", "repair_label": "为 LLMResource 配置 API key"},
+    "llm_model_missing": {"repair_action": "configure_llm_model", "repair_label": "为 LLMResource 配置 model"},
+    "llm_not_configured": {"repair_action": "bind_llm_resource", "repair_label": "为 Agent 绑定 LLMResource"},
+    "llm_not_found": {"repair_action": "select_existing_llm_resource", "repair_label": "选择一个仍存在的 LLMResource"},
+}
+
+
+def claude_code_llm_repair_guidance(reason: str) -> dict[str, str]:
+    return dict(CLAUDE_CODE_LLM_REPAIR_GUIDANCE.get(str(reason or "").strip(), {}))
 
 
 def _skill_slug(name: str, fallback: str) -> str:
@@ -536,6 +571,10 @@ def materialize_claude_code_skills(db, run, workspace_path: str) -> ClaudeCodeSk
         if not skill:
             continue
         markdown = skill_runtime.read_md(skill) or ""
+        # CodeAgent repositories are mounted at /workspace. Rewrite legacy
+        # generic-sandbox references so an injected Skill cannot search the
+        # unrelated /workplace scratch volume.
+        markdown = markdown.replace("/workplace", "/workspace")
         skill_source_dir = skill_runtime._skill_dir(skill)
         digest = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
         slug = _skill_slug(skill.name, skill.id)
@@ -604,15 +643,44 @@ def _runtime_summary(exit_code: int, output: str) -> str:
     raw = str(output or "").strip()
     if not raw:
         return ""
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw[:1000]
+    parsed = _runtime_payload(raw)
     if isinstance(parsed, dict):
         for key in ("summary", "result", "text", "message"):
             value = parsed.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()[:1000]
+    # stream-json also emits lifecycle records (notably the large `system`
+    # init object). Never expose those protocol records as the user-facing
+    # coding summary. Prefer assistant text or an explicit error field.
+    stream_text: list[str] = []
+    saw_json_record = False
+    for line in raw.splitlines():
+        try:
+            record = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        saw_json_record = True
+        record_type = str(record.get("type") or "").strip().lower()
+        if record_type in {"system", "stream_event", "rate_limit_event", "user"}:
+            continue
+        message = record.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if isinstance(blocks, list):
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = str(block.get("text") or "").strip()
+                    if text:
+                        stream_text.append(text)
+        for key in ("result", "text", "summary", "error"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                stream_text.append(value.strip())
+    if stream_text:
+        return redact_code_output(stream_text[-1]).text[:1000]
+    if saw_json_record:
+        return "Claude Code 未返回可显示的摘要（请查看执行过程）"
     return raw[:1000]
 
 
@@ -623,6 +691,14 @@ def classify_claude_code_failure(reason: str, *, exit_code: int = 1) -> str:
     if raw in _CLAUDE_REASON_TYPES:
         return _CLAUDE_REASON_TYPES[raw]
     lowered = raw.lower()
+    if (
+        "unrecognized_model" in lowered
+        or "authentication" in lowered
+        or "api key is invalid" in lowered
+        or "unauthorized" in lowered
+        or "401" in lowered
+    ):
+        return "model_unavailable"
     if exit_code == 124 or "timeout" in lowered or "timed out" in lowered:
         return "coding_timeout"
     return "coding_failed"
@@ -632,8 +708,124 @@ def _runtime_payload(output: str) -> dict[str, Any]:
     try:
         parsed = json.loads(str(output or "").strip() or "{}")
     except json.JSONDecodeError:
-        return {}
+        # stream-json emits one JSON object per line; the final result object
+        # remains the canonical payload used for sealing and verification.
+        parsed = None
+        for line in str(output or "").splitlines():
+            try:
+                candidate = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("type") == "result":
+                parsed = candidate
+        if parsed is None:
+            return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _stream_tool_event(event: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Convert one Claude stream-json tool block into a safe runtime event."""
+    event_type = str(event.get("type") or "").strip()
+    payload = event.get("event") if event_type == "stream_event" else event
+    if not isinstance(payload, Mapping):
+        payload = event
+    if event_type == "assistant":
+        message = event.get("message")
+        blocks = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(blocks, list):
+            return None
+        block = next((item for item in blocks if isinstance(item, Mapping) and item.get("type") == "tool_use"), None)
+        if not block:
+            return None
+        name = str(block.get("name") or "tool").strip()
+        parameters = block.get("input") if isinstance(block.get("input"), Mapping) else {}
+        command = str(parameters.get("command") or "").strip()
+        phase = "test_run" if name in {"Bash", "Shell", "bash", "shell"} and any(
+            marker in command.lower() for marker in ("test", "pytest", "npm", "make", "dbt")
+        ) else "file_changed" if name.lower() in {"edit", "write", "multiedit", "file_write"} else "tool_call"
+        detail = command if phase == "test_run" else str(parameters.get("file_path") or parameters.get("path") or "").strip()
+        result = {"type": phase, "status": "started", "tool": name}
+        if command:
+            result["command"] = command
+        if detail and phase == "file_changed":
+            result["path"] = detail
+        snippet = _tool_code_snippet(name, parameters)
+        if snippet:
+            result["snippet"] = snippet
+        result["summary"] = f"Claude Code 调用 {name}"
+        block_id = str(block.get("id") or "").strip()
+        if block_id:
+            result["_stream_tool_id"] = block_id
+        return result
+    if event_type == "user":
+        message = event.get("message")
+        blocks = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(blocks, list):
+            return None
+        block = next((item for item in blocks if isinstance(item, Mapping) and item.get("type") == "tool_result"), None)
+        if not block:
+            return None
+        result = {
+            "type": "tool_call",
+            "status": "completed",
+            "summary": "Claude Code 工具调用完成",
+            "_stream_tool_id": str(block.get("tool_use_id") or "").strip(),
+        }
+        content = block.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, Mapping) and str(item.get("text") or "").strip()
+            )
+        if isinstance(content, str) and content.strip():
+            result["output"] = _safe_runtime_text(content, limit=2400)
+        return result
+    if event_type == "content_block_start":
+        block = payload.get("content_block") if isinstance(payload, Mapping) else None
+        if isinstance(block, Mapping) and block.get("type") == "tool_use":
+            return _stream_tool_event({"type": "assistant", "message": {"content": [block]}})
+    return None
+
+
+def _safe_runtime_text(value: Any, *, limit: int = 2400) -> str:
+    """Return bounded UTF-8 text suitable for a streamed UI event."""
+    text = redact_code_output(str(value or "")).text
+    # Replace malformed surrogate characters before JSON encoding/rendering.
+    text = text.encode("utf-8", errors="replace").decode("utf-8")
+    return text[:limit] + ("\n…（片段已截断）" if len(text) > limit else "")
+
+
+def _tool_code_snippet(name: str, parameters: Mapping[str, Any]) -> str:
+    """Extract a small, redacted code context from Claude edit/write tools."""
+    if not isinstance(parameters, Mapping):
+        return ""
+    tool = str(name or "").lower()
+    if tool in {"edit", "multiedit", "file_edit"}:
+        old = parameters.get("old_string") or parameters.get("old") or ""
+        new = parameters.get("new_string") or parameters.get("new") or ""
+        if old or new:
+            return _safe_runtime_text(
+                f"--- 修改前\n{old}\n+++ 修改后\n{new}",
+                limit=3000,
+            )
+        edits = parameters.get("edits")
+        if isinstance(edits, list):
+            parts = []
+            for item in edits[:8]:
+                if not isinstance(item, Mapping):
+                    continue
+                before = item.get("old_string") or item.get("old") or ""
+                after = item.get("new_string") or item.get("new") or ""
+                if before or after:
+                    parts.append(f"--- 修改前\n{before}\n+++ 修改后\n{after}")
+            if parts:
+                return _safe_runtime_text("\n\n".join(parts), limit=3000)
+    if tool in {"write", "file_write"}:
+        content = parameters.get("content")
+        if content:
+            return _safe_runtime_text(content, limit=3000)
+    return ""
 
 
 def _redact_value(value: Any) -> Any:
@@ -673,6 +865,8 @@ def normalize_claude_code_runtime_event(event: Mapping[str, Any], *, run_id: str
         "artifact_id",
         "retry_attempt",
         "max_retries",
+        "snippet",
+        "output",
     ):
         if key in event:
             payload[key] = _redact_value(event[key])
@@ -714,7 +908,12 @@ def write_claude_code_transcripts(
     return raw_path.relative_to(root).as_posix(), redacted_path.relative_to(root).as_posix()
 
 
-def _build_claude_code_command(runtime_input: ClaudeCodeRuntimeInput) -> str:
+def _build_claude_code_command(
+    runtime_input: ClaudeCodeRuntimeInput,
+    *,
+    resume: bool = True,
+    stream: bool = False,
+) -> str:
     model_ref = str(runtime_input.model_config.get("model_ref") or "").strip()
     if not model_ref:
         model_ref = "sonnet"
@@ -724,9 +923,24 @@ def _build_claude_code_command(runtime_input: ClaudeCodeRuntimeInput) -> str:
             f"{prompt}\n\nVerifier feedback for retry {runtime_input.retry_attempt}:\n"
             f"{redact_code_output(runtime_input.verifier_feedback).text}"
         )
+    explicit_git_publish = bool(
+        re.search(r"(?:git\s+(?:commit|push)|提交|推送)", prompt, flags=re.IGNORECASE)
+    )
+    publish_guard = "" if explicit_git_publish else (
+        "Implement and verify the requested patch, but do not run git commit or git push; "
+        "those actions require an explicit follow-up user request. "
+    )
+    network_guard = ""
+    if not bool(runtime_input.effective_policy.get("network")):
+        network_guard = (
+            "This sandbox has no network access. Do not install or download dependencies "
+            "(pip, npm, yarn, pnpm, apt, curl, wget, or git clone). Use tools already "
+            "available in the image; if a required tool is missing, report the limitation "
+            "and stop instead of retrying package versions. "
+        )
     prompt = (
         "Follow the coding SOP in /workspace/.claude/CLAUDE.md. "
-        f"{prompt}"
+        f"{publish_guard}{network_guard}{prompt}"
     )
     parts = [
         "cd",
@@ -736,7 +950,7 @@ def _build_claude_code_command(runtime_input: ClaudeCodeRuntimeInput) -> str:
         "-p",
         shlex.quote(prompt),
         "--output-format",
-        "json",
+        "stream-json" if stream else "json",
         "--model",
         shlex.quote(model_ref),
         "--max-turns",
@@ -745,7 +959,9 @@ def _build_claude_code_command(runtime_input: ClaudeCodeRuntimeInput) -> str:
         "acceptEdits",
         "--no-chrome",
     ]
-    if runtime_input.retry_attempt > 0:
+    if stream:
+        parts.append("--verbose")
+    if runtime_input.retry_attempt > 0 and resume:
         parts.extend(["--resume", shlex.quote(runtime_input.session_name)])
     else:
         parts.extend(["--name", shlex.quote(runtime_input.session_name)])
@@ -758,18 +974,67 @@ def _build_claude_code_command(runtime_input: ClaudeCodeRuntimeInput) -> str:
 class ClaudeCodeRuntimeAdapter:
     """Run Claude Code as the CodeAgent coding backend through the existing runner."""
 
-    def __init__(self, *, runner):
+    def __init__(self, *, runner, on_event: Callable[[Mapping[str, Any]], None] | None = None):
         self.runner = runner
+        self.on_event = on_event
+        self._stream_buffer = ""
+        self._stream_tools: dict[str, str] = {}
+
+    def _consume_stream_output(self, chunk: str) -> None:
+        if not self.on_event:
+            return
+        self._stream_buffer += str(chunk or "")
+        lines = self._stream_buffer.split("\n")
+        self._stream_buffer = lines.pop() or ""
+        for line in lines:
+            try:
+                parsed = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, Mapping):
+                continue
+            event = _stream_tool_event(parsed)
+            if not event:
+                continue
+            tool_id = str(event.pop("_stream_tool_id", "") or "").strip()
+            if event.get("status") == "started" and tool_id:
+                self._stream_tools[tool_id] = str(event.get("type") or "tool_call")
+            elif event.get("status") == "completed" and tool_id:
+                event["type"] = self._stream_tools.pop(tool_id, "tool_call")
+            self.on_event(event)
 
     def run(self, runtime_input: ClaudeCodeRuntimeInput) -> ClaudeCodeRuntimeResult:
-        command = _build_claude_code_command(runtime_input)
+        streaming = self.on_event is not None
+        command = _build_claude_code_command(runtime_input, stream=streaming)
         exit_code, output = _runner_exec(
             self.runner,
             runtime_input.container_id,
             command,
             max(1, int(runtime_input.timeout_seconds)),
             environment=dict(runtime_input.exec_env),
+            on_output=self._consume_stream_output if streaming else None,
         )
+        # `--name` on a non-interactive `claude -p` invocation is not guaranteed
+        # to create a resumable title in every CLI version. If a verifier retry
+        # receives that specific CLI error, retry once as a fresh session while
+        # keeping the same Workspace and verifier feedback in the prompt.
+        lowered_output = str(output or "").lower()
+        if (
+            runtime_input.retry_attempt > 0
+            and exit_code != 0
+            and "--resume requires a valid session" in lowered_output
+        ):
+            fallback_command = _build_claude_code_command(runtime_input, resume=False, stream=streaming)
+            exit_code, output = _runner_exec(
+                self.runner,
+                runtime_input.container_id,
+                fallback_command,
+                max(1, int(runtime_input.timeout_seconds)),
+                environment=dict(runtime_input.exec_env),
+                on_output=self._consume_stream_output if streaming else None,
+            )
+        if streaming and self._stream_buffer.strip():
+            self._consume_stream_output("\n")
         payload = _runtime_payload(output)
         summary = redact_code_output(_runtime_summary(exit_code, output)).text
         requested_status = str(payload.get("status") or "").strip()
@@ -972,16 +1237,24 @@ def _runner_exec(
     command: str,
     timeout_seconds: int,
     environment: Mapping[str, str] | None = None,
+    on_output: Callable[[str], None] | None = None,
 ) -> tuple[int, str]:
     try:
-        exit_code, output = runner.exec(
-            container_id,
-            command,
-            timeout_seconds=timeout_seconds,
-            environment=dict(environment or {}),
-        )
+        kwargs = {
+            "timeout_seconds": timeout_seconds,
+            "environment": dict(environment or {}),
+        }
+        if on_output is not None:
+            kwargs["on_output"] = on_output
+        exit_code, output = runner.exec(container_id, command, **kwargs)
     except Exception as exc:
-        return 1, f"{type(exc).__name__}: {exc}"
+        # Keep the stable failure reason used by the state machine while
+        # retaining a short, non-sensitive transport detail for the runtime
+        # result. This turns an otherwise opaque runner_exec_failed into an
+        # actionable Docker/API failure without exposing command contents.
+        detail = str(getattr(exc, "detail", "") or "").strip()
+        suffix = f" ({detail[:120]})" if detail else ""
+        return 1, f"{type(exc).__name__}: {exc}{suffix}"
     return int(exit_code), str(output or "")
 
 

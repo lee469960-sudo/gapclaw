@@ -21,7 +21,7 @@ from app.models import (
 from app.schemas import ok, fail
 from app.security import new_id, now_str
 from app.services.code_agent.control_plane import can_use_code_project, project_availability
-from app.services.code_agent.claude_code_runtime import claude_code_llm_binding_reason
+from app.services.code_agent.claude_code_runtime import claude_code_llm_binding_reason, claude_code_llm_repair_guidance
 
 router = APIRouter(prefix="/pages/page_agent.cgi", tags=["agent"])
 
@@ -303,7 +303,8 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
                 selected_llm_id,
             )
         if err:
-            return fail(err)
+            guidance = claude_code_llm_repair_guidance(err)
+            return fail(err, data={"reason": err, **guidance} if guidance else None)
         if body.id:
             if not a:
                 return fail("不存在")

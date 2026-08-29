@@ -172,6 +172,23 @@ function canFormatCode(language) {
 /** Hide model self-talk before the final line-level FINAL marker, including history. */
 export function extractFinalDisplayContent(text) {
   const source = String(text || '')
+    .split('\n')
+    .filter((line) => {
+      const candidate = line.trim()
+      if (!candidate.startsWith('{')) return true
+      try {
+        const record = JSON.parse(candidate)
+        // Claude stream-json lifecycle records are transport metadata, not a
+        // user-facing answer. Filter them here as a compatibility guard for
+        // messages persisted before the server-side summary fix.
+        return !(record?.type === 'system' && record?.subtype === 'init')
+      } catch {
+        // Older messages may contain the same init record truncated at the
+        // former 1000-character summary limit, so it is not valid JSON.
+        return !/^\{\s*"type"\s*:\s*"system"\s*,\s*"subtype"\s*:\s*"init"\b/i.test(candidate)
+      }
+    })
+    .join('\n')
   const marker = /^\s*FINAL\s*[:：]\s*/gim
   let last = null
   let match

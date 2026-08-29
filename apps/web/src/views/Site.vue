@@ -49,10 +49,11 @@
               v-model="form.footer"
               type="textarea"
               :rows="3"
-              placeholder="显示在页面底部的版权或说明文字"
+              :placeholder="`留空则显示版本 ${form.version || ''}`"
               maxlength="200"
               show-word-limit
             />
+            <div class="field-hint">打包版本来自 deploy/gap.version，页脚会自动带上该版本号。</div>
           </el-form-item>
         </el-form>
       </div>
@@ -75,7 +76,7 @@
             <p class="preview-desc">站点名称与 Logo 将应用于登录页与系统顶栏。</p>
           </div>
           <div class="preview-footer">
-            {{ form.footer || '© GAP — 智能工作台' }}
+            {{ previewFooter }}
           </div>
         </div>
       </div>
@@ -96,7 +97,25 @@ const form = reactive({
   site_name: '',
   site_logo: '',
   footer: '',
+  version: '',
 })
+
+function displayFooter(text, version) {
+  const ver = String(version || '').trim()
+  const t = String(text || '').trim()
+  if (!t || /^[vV]?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(t)) return ver
+  if (ver && t.includes(ver)) return t
+  if (!ver) return t
+  return `${t} · ${ver}`
+}
+
+function brandingFrom(data) {
+  return {
+    site_name: data.site_name,
+    site_logo: data.site_logo,
+    footer: data.footer_display || displayFooter(data.footer, data.version || form.version),
+  }
+}
 
 const logoPreview = computed(() => {
   const url = form.site_logo
@@ -104,6 +123,8 @@ const logoPreview = computed(() => {
   if (url.startsWith('http') || url.startsWith('/')) return url
   return url
 })
+
+const previewFooter = computed(() => displayFooter(form.footer, form.version) || '© GAP — 智能工作台')
 
 async function load() {
   loading.value = true
@@ -113,6 +134,7 @@ async function load() {
       site_name: res.data?.site_name ?? '',
       site_logo: res.data?.site_logo ?? '',
       footer: res.data?.footer ?? '',
+      version: res.data?.version ?? '',
     })
   } finally {
     loading.value = false
@@ -121,20 +143,27 @@ async function load() {
 
 function applySiteBranding(data) {
   if (!data) return
-  window.dispatchEvent(new CustomEvent('gap-site-updated', { detail: data }))
+  window.dispatchEvent(new CustomEvent('gap-site-updated', { detail: brandingFrom(data) }))
 }
 
 async function save() {
   saving.value = true
   try {
-    const res = await postCgi('/pages/page_site.cgi', { action: 'save', ...form })
+    const res = await postCgi('/pages/page_site.cgi', {
+      action: 'save',
+      site_name: form.site_name,
+      site_logo: form.site_logo,
+      footer: form.footer,
+    })
     if (res.data) {
       Object.assign(form, {
         site_name: res.data.site_name ?? form.site_name,
         site_logo: res.data.site_logo ?? form.site_logo,
         footer: res.data.footer ?? form.footer,
+        version: res.data.version ?? form.version,
       })
-      patchShellSite(res.data)
+      const branding = brandingFrom(res.data)
+      patchShellSite(branding)
       applySiteBranding(res.data)
     }
     ElMessage.success(res.msg || '保存成功')
@@ -156,9 +185,14 @@ async function onLogoChange(file) {
       return
     }
     form.site_logo = data.data?.site_logo || form.site_logo
-    const branding = { site_name: form.site_name, site_logo: form.site_logo, footer: form.footer }
+    const branding = brandingFrom({
+      site_name: form.site_name,
+      site_logo: form.site_logo,
+      footer: form.footer,
+      version: form.version,
+    })
     patchShellSite(branding)
-    applySiteBranding(branding)
+    applySiteBranding({ ...branding, footer: form.footer, version: form.version, footer_display: branding.footer })
     ElMessage.success('Logo 上传成功，已自动保存')
   } catch (e) {
     ElMessage.error(e.message || '上传失败')

@@ -76,4 +76,10 @@ MENU_GROUPS: list[dict] = [
 ]
 
 ALL_PAGES = [path for group in MENU_GROUPS for path, _ in group["items"]]
-APP_VERSION = "1.9.0-clone"
+
+
+def __getattr__(name: str):
+    if name == "APP_VERSION":
+        from app.version import app_version
+        return app_version()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

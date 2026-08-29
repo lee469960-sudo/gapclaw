@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 0: Planning initialized（complete）
+Phase 6: Acceptance and regression（complete）
 
 ## Next Step
 
@@ -42,19 +42,19 @@ Phase 0: Planning initialized（complete）
 
 - **OpenSpec task mapping:** 4.1–4.3
 - **Depends on:** Phase 3
-- **Status:** in_progress
+- **Status:** complete
 
 ### Phase 5: Host validation output
 
 - **OpenSpec task mapping:** 5.1–5.2
 - **Depends on:** Phase 3
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 6: Acceptance and regression
 
 - **OpenSpec task mapping:** 6.1–6.4
 - **Depends on:** Phases 1–5
-- **Status:** pending
+- **Status:** complete
 
 ## Boundaries
 

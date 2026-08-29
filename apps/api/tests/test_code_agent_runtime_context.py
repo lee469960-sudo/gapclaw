@@ -29,7 +29,7 @@ from app.services.code_agent.runner import (
     RunnerUnavailableError,
 )
 from app.services.code_agent.artifacts import CodeArtifactSealer, SealingResult
-from app.services.code_agent.claude_code_runtime import ClaudeCodeRuntimeResult
+from app.services.code_agent.claude_code_runtime import ClaudeCodePreflightResult, ClaudeCodeRuntimeResult
 from app.services.code_agent.verifier import CodeVerifier, VerificationReport
 
 
@@ -178,8 +178,10 @@ def test_claude_code_preflight_uses_existing_runner_container_and_workspace(monk
     db.commit()
     start_calls = []
     exec_calls = []
+    startup_order = []
 
     def _start(_self, code_run, workspace):
+        startup_order.append("runner_start")
         start_calls.append((code_run.id, workspace.path))
         return RunnerFacts(
             container_id="container1",
@@ -208,6 +210,9 @@ def test_claude_code_preflight_uses_existing_runner_container_and_workspace(monk
         hub.subscribe("code:s1", _collect)
         try:
             with patch("subprocess.run", side_effect=AssertionError("host subprocess not allowed")), patch(
+                "app.services.code_agent.claude_code_runtime.materialize_coding_sop",
+                side_effect=lambda _path: startup_order.append("sop_materialized"),
+            ), patch(
                 "app.services.agent_runtime.runtime.AgentRuntime.run", new=AsyncMock(return_value="ok")
             ) as legacy_run, patch(
                 "app.services.code_agent.claude_code_runtime.ClaudeCodeRuntimeAdapter.run",
@@ -225,6 +230,7 @@ def test_claude_code_preflight_uses_existing_runner_container_and_workspace(monk
 
     assert asyncio.run(_run()) == "ok"
     assert len(start_calls) == 1
+    assert startup_order.index("sop_materialized") < startup_order.index("runner_start")
     assert all(container_id == "container1" for container_id, _command, _timeout in exec_calls)
     assert exec_calls[0][1] == "claude --version"
     assert any(
@@ -302,6 +308,9 @@ def test_code_profile_events_keep_common_envelope_with_versioned_payload():
         "verify", "verify", "seal", "seal", "cleanup",
     ]
     assert all(payload["version"] == 1 and payload["run_id"] == "run1" for payload in payloads)
+    persisted = json.loads(db.get(CodeAgentRun, "run1").runner_facts)["code_profile_events"]
+    assert [event["phase"] for event in persisted] == [payload["phase"] for payload in payloads]
+    assert [event["sequence"] for event in persisted] == list(range(len(persisted)))
 
 
 def test_code_runtime_always_runs_registered_cleanup_and_records_completion():
@@ -548,6 +557,14 @@ def test_claude_code_verifier_failure_retries_same_session_with_redacted_feedbac
     assert retry_events[0]["retry_attempt"] == 1
     assert retry_events[0]["max_retries"] == 1
     assert secret not in json.dumps(retry_events[0], sort_keys=True)
+    runtime_events = [
+        event["profile"]
+        for event in events
+        if event.get("type") == "profile"
+        and event.get("profile", {}).get("phase") == "runtime_result"
+    ]
+    assert runtime_events[0]["status"] == "started"
+    assert runtime_events[1]["status"] == "completed"
 
 
 def test_claude_code_verifier_retry_exhaustion_stops_after_initial_plus_two(monkeypatch):
@@ -679,6 +696,64 @@ def test_claude_code_budget_exhausted_verifier_result_does_not_retry(monkeypatch
     run = db.get(CodeAgentRun, "run1")
     assert run.status == "budget_exhausted"
     assert run.failure_reason == "budget_exhausted"
+
+
+def test_claude_code_workspace_integrity_failure_does_not_retry(monkeypatch):
+    db = _db()
+    _code_run(db)
+    run = db.get(CodeAgentRun, "run1")
+    run.task_contract = json.dumps({
+        "objective": "Fix dbt model",
+        "coding_runtime": "claude_code",
+        "model_config": {"provider": "cloud_claude", "model_ref": "claude-sonnet"},
+        "runtime_budgets": {"max_verifier_retries": 2},
+    })
+    policy = json.loads(run.effective_policy)
+    policy.update({
+        "coding_runtime": "claude_code",
+        "model_config": {"provider": "cloud_claude", "model_ref": "claude-sonnet"},
+        "runtime_budgets": {"max_verifier_retries": 2},
+    })
+    run.effective_policy = json.dumps(policy)
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.code_agent.claude_code_runtime.run_claude_code_preflight",
+        lambda *_args, **_kwargs: ClaudeCodePreflightResult(passed=True),
+    )
+
+    verifier = MagicMock()
+    verifier.capture_baseline.return_value = {"status": "passed", "reason": "", "tests": []}
+    verifier.verify.return_value = VerificationReport(
+        passed=False,
+        outcome="workspace_integrity_error",
+        reason="workspace_external_write",
+        changed_paths=("models/a.sql",),
+        checks=("workspace_integrity",),
+        tests=(),
+    )
+    runtime_inputs = []
+
+    def _claude_run(_adapter, runtime_input):
+        runtime_inputs.append(runtime_input)
+        return ClaudeCodeRuntimeResult(
+            status="coding_completed", exit_code=0, summary="done", changed_files=("models/a.sql",)
+        )
+
+    with patch(
+        "app.services.code_agent.claude_code_runtime.ClaudeCodeRuntimeAdapter.run",
+        new=_claude_run,
+    ):
+        assert asyncio.run(run_agent(
+            db, db.get(Agent, "code"), "s1", "Fix test", code_run_id="run1",
+            code_verifier=verifier,
+        )) == "done"
+
+    assert [item.retry_attempt for item in runtime_inputs] == [0]
+    assert verifier.verify.call_count == 1
+    run = db.get(CodeAgentRun, "run1")
+    assert run.status == "workspace_integrity_error"
+    assert run.failure_reason == "workspace_integrity_error"
 
 
 def test_claude_code_patch_ready_requires_verifier_pass_and_sealer_success(monkeypatch):

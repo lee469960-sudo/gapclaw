@@ -32,14 +32,25 @@ jobs:
           ALIYUN_IMAGE: ${{ secrets.ALIYUN_IMAGE }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          case "${TAG}" in
+          GIT_TAG="${GITHUB_REF_NAME}"
+          case "${GIT_TAG}" in
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *)
-              echo "Refusing tag '${TAG}'; expected vMAJOR.MINOR.PATCH (e.g. v1.0.0)" >&2
+              echo "Refusing git tag '${GIT_TAG}'; expected vMAJOR.MINOR.PATCH (e.g. v1.0.0)" >&2
               exit 1
               ;;
           esac
+          if [ ! -f deploy/gap.version ]; then
+            echo "deploy/gap.version is required" >&2
+            exit 1
+          fi
+          TAG="$(tr -d '[:space:]' < deploy/gap.version)"
+          if [ -z "${TAG}" ]; then
+            echo "deploy/gap.version is empty" >&2
+            exit 1
+          fi
+          # Keep the packaged file identical to git: CI tag only triggers the
+          # build; image tag, /health, and UI footer all read this file.
           if [ -z "${ALIYUN_REGISTRY}" ] || [ -z "${ALIYUN_IMAGE}" ]; then
             echo "ALIYUN_REGISTRY and ALIYUN_IMAGE secrets are required" >&2
             exit 1
@@ -56,6 +67,7 @@ jobs:
             echo "api=${API}"
             echo "web=${WEB}"
           } >> "${GITHUB_OUTPUT}"
+          echo "Using deploy/gap.version=${TAG} (git tag ${GIT_TAG} triggers the build)"
           echo "API image: ${API}:${TAG} (+ :latest)"
           echo "WEB image: ${WEB}:${TAG} (+ :latest)"
 
@@ -84,6 +96,8 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.api }}:${{ steps.meta.outputs.tag }}
             ${{ steps.meta.outputs.api }}:latest
+          build-args: |
+            GAP_VERSION=${{ steps.meta.outputs.tag }}
           cache-from: type=gha,scope=gap-api
           cache-to: type=gha,mode=max,scope=gap-api
 

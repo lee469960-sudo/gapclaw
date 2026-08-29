@@ -103,6 +103,22 @@ def test_integrity_guard_allows_tracked_write_and_rejects_external_write(tmp_pat
     assert run.status == "workspace_integrity_error"
 
 
+def test_integrity_guard_authorizes_managed_runtime_changes_within_allowed_paths(tmp_path):
+    repo, commit = _repo(tmp_path)
+    store, sealed = _seal(tmp_path, repo, commit)
+    run = _run(
+        repo, commit, sealed, status="pending", failure_reason="",
+        effective_policy=json.dumps({"allowed_paths": ["models/"]}),
+    )
+    WorkspaceManager(tmp_path / "runs").prepare(run, snapshot_store=store)
+    models = Path(run.workspace_path) / "models"
+    models.mkdir()
+    (models / "model.sql").write_text("select 1\n", encoding="utf-8")
+
+    assert WorkspaceIntegrityGuard(run).authorize_runtime_changes() == ("models/model.sql",)
+    assert json.loads((Path(run.workspace_path).parent / "control" / "authorized_writes.json").read_text()) == ["models/model.sql"]
+
+
 def test_integrity_guard_rejects_frozen_baseline_drift(tmp_path):
     repo, commit = _repo(tmp_path)
     store, sealed = _seal(tmp_path, repo, commit)
@@ -132,6 +148,24 @@ def test_workspace_cleanup_retains_read_only_non_downloadable_content_then_purge
     assert manager.purge_expired(run) is True
     assert run.workspace_state == "deleted"
     assert not workspace.parent.exists()
+
+
+def test_allocated_sealed_workspace_is_retained_for_run_bound_preview(tmp_path):
+    repo, commit = _repo(tmp_path)
+    store, sealed = _seal(tmp_path, repo, commit)
+    run = _run(repo, commit, sealed, status="patch_ready", failure_reason="patch_ready")
+    manager = WorkspaceManager(tmp_path / "runs", retention_hours=24)
+    manager.prepare(run, snapshot_store=store)
+    run.workspace_state = "sealed"
+
+    manager.cleanup_allocated_workspace(run)
+
+    workspace = Path(run.workspace_path)
+    assert run.workspace_state == "retained_read_only"
+    assert workspace.is_dir()
+    assert (workspace / "app.py").read_text(encoding="utf-8") == "value = 1\n"
+    assert not (workspace / ".git").exists()
+    assert not (workspace.parent / "source.git").exists()
 
 
 def test_workspace_manager_default_root_prefers_configured_api_root(tmp_path, monkeypatch):

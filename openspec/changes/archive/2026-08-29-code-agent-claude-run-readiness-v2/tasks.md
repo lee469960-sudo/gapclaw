@@ -21,18 +21,18 @@
 
 ## 4. LLM binding guidance and readiness UI
 
-- [ ] 4.1 Surface Claude Code LLM binding repair guidance for `llm_group_not_supported`, `llm_api_key_missing` and `llm_model_missing` in Agent edit/run readiness responses; verify backend control-plane tests return reason and repair action without auto-changing `llm_id`
-- [ ] 4.2 Update CodeAgent result/run detail UI to separately show workspace files, Git metadata, repo root, container mount and model preflight statuses; verify UI tests render model failure while still showing passed Skill/workspace steps
-- [ ] 4.3 Ensure UI does not label Git metadata missing, repo root mismatch, container mount failure or model preflight failure as the single generic “仓库未挂载”; verify text/fixture tests cover each readiness reason
+- [x] 4.1 Surface Claude Code LLM binding repair guidance for `llm_group_not_supported`, `llm_api_key_missing` and `llm_model_missing` in Agent edit/run readiness responses; verify backend control-plane tests return reason and repair action without auto-changing `llm_id`
+- [x] 4.2 Update CodeAgent result/run detail UI to separately show workspace files, Git metadata, repo root, container mount and model preflight statuses; verify UI tests render model failure while still showing passed Skill/workspace steps
+- [x] 4.3 Ensure UI does not label Git metadata missing, repo root mismatch, container mount failure or model preflight failure as the single generic “仓库未挂载”; verify text/fixture tests cover each readiness reason
 
 ## 5. Host validation output
 
-- [ ] 5.1 Add final-result support for a copyable `host-validate.sh` text block when a task succeeds and host-side validation is useful; verify it is rendered as output text only
-- [ ] 5.2 Ensure `host-validate.sh` is not written to the business repository and is not treated as automatic Verifier evidence; verify artifact and result tests cover no repo file and no verifier dependency
+- [x] 5.1 Add final-result support for a copyable `host-validate.sh` text block when a task succeeds and host-side validation is useful; verify it is rendered as output text only
+- [x] 5.2 Ensure `host-validate.sh` is not written to the business repository and is not treated as automatic Verifier evidence; verify artifact and result tests cover no repo file and no verifier dependency
 
 ## 6. Acceptance and regression
 
-- [ ] 6.1 Add mock-Claude acceptance tests for single-file IP replacement flow, target-not-found flow and needs-user-decision flow; verify all reach the correct terminal status through the existing Verifier/Sealer boundaries
-- [ ] 6.2 Add local acceptance instructions for `dbt-test`: user must bind a single usable LLMResource, restart API, then run `开始执行:<objective>`; verify documentation or progress notes record that real Claude credentials are an operator prerequisite, not a code task
-- [ ] 6.3 Run focused backend tests for chat gate, workspace, runtime taxonomy, artifacts, control-plane readiness and result presentation; record exact results before marking tasks complete
-- [ ] 6.4 Run `openspec validate code-agent-claude-run-readiness-v2 --strict` and record the result before apply completion
+- [x] 6.1 Add mock-Claude acceptance tests for single-file IP replacement flow, target-not-found flow and needs-user-decision flow; verify all reach the correct terminal status through the existing Verifier/Sealer boundaries
+- [x] 6.2 Add local acceptance instructions for `dbt-test`: user must bind a single usable LLMResource, restart API, then run `开始执行:<objective>`; verify documentation or progress notes record that real Claude credentials are an operator prerequisite, not a code task
+- [x] 6.3 Run focused backend tests for chat gate, workspace, runtime taxonomy, artifacts, control-plane readiness and result presentation; record exact results before marking tasks complete
+- [x] 6.4 Run `openspec validate code-agent-claude-run-readiness-v2 --strict` and record the result before apply completion

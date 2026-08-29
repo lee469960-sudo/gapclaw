@@ -224,6 +224,7 @@ _ALIASES = {
     "claude_code_model_unavailable": FailureReason.MODEL_UNAVAILABLE,
     "llm_not_configured": FailureReason.MODEL_UNAVAILABLE,
     "llm_not_found": FailureReason.MODEL_UNAVAILABLE,
+    "llm_provider_not_supported": FailureReason.MODEL_UNAVAILABLE,
     "llm_group_not_supported": FailureReason.MODEL_UNAVAILABLE,
     "llm_api_key_missing": FailureReason.MODEL_UNAVAILABLE,
     "llm_model_missing": FailureReason.MODEL_UNAVAILABLE,

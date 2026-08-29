@@ -134,6 +134,9 @@ def test_resolve_claude_code_exec_env_uses_bound_llm():
     assert reason == ""
     assert env["ANTHROPIC_API_KEY"] == secret
     assert env["ANTHROPIC_BASE_URL"] == "https://api.example.test"
+    assert env["PIP_DEFAULT_TIMEOUT"] == "15"
+    assert env["PIP_RETRIES"] == "0"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
 
 
 class _ArchiveRunner:

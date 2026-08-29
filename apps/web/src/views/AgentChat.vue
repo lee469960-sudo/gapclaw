@@ -35,7 +35,13 @@
 
     <div class="main-body">
       <div v-show="!sidebarCollapsed" class="sidebar">
-        <WorkplacePanel
+        <CodeWorkspacePanel
+          v-if="agent?.profile === 'code'"
+          ref="codeWpRef"
+          :agent-id="agentId"
+          :code-run-id="activeCodeRunId"
+        />
+        <WorkplacePanel v-else
           ref="wpRef"
           :agent-id="agentId"
           :sandbox-id="agentSandboxId"
@@ -54,46 +60,6 @@
           >
             管理 Code Projects
           </router-link>
-        </div>
-        <div v-if="agent?.profile === 'code' && codeRunResult" class="code-result-banner" :class="`is-${codeRunResult.severity || 'info'}`">
-          <div class="code-result-title">
-            <el-tag :type="codeResultTagType" size="small" effect="plain">{{ codeRunResult.label }}</el-tag>
-            <span>Code run {{ shortId(codeRunResult.run_id) }}</span>
-          </div>
-          <div class="code-result-facts">
-            Manifest v{{ codeRunResult.manifest_version || '-' }} ·
-            Runtime {{ codeRuntimeLabel(codeRunResult.runtime?.coding_runtime) }} ·
-            Verifier {{ codeRunResult.verified ? '通过' : '未通过或证据不足' }} ·
-            Sealed artifact {{ codeRunResult.sealed ? '已生成' : '不可用' }}
-          </div>
-          <div v-if="codeRunResult.runtime?.coding_runtime === 'claude_code'" class="code-result-facts">
-            Preflight {{ codeRunResult.runtime?.preflight?.passed ? '通过' : '未通过或不可用' }} ·
-            Skills {{ codeRunResult.runtime?.skills?.length || 0 }} ·
-            MCP {{ codeRunResult.runtime?.mcp_servers?.length || 0 }}
-          </div>
-          <details v-if="codeRunResult.runtime?.coding_runtime === 'claude_code'" class="code-verifier-evidence">
-            <summary>Claude Code Runtime 证据</summary>
-            <pre>{{ JSON.stringify(codeRunResult.runtime || {}, null, 2) }}</pre>
-          </details>
-          <div v-if="codeRunResult.directly_adoptable && codeRunResult.artifact" class="code-result-facts">
-            Base {{ shortId(codeRunResult.artifact.base_commit) }} · Diff {{ shortId(codeRunResult.artifact.diff_hash) }}
-          </div>
-          <div v-if="codeRunResult.warning" class="code-result-warning">{{ codeRunResult.warning }}</div>
-          <div v-if="codeRunResult.failure?.reason" class="code-result-facts">
-            Failure {{ codeRunResult.failure.reason }} ·
-            Stage {{ codeRunResult.failure.stage }} ·
-            {{ codeRunResult.failure.detail }}
-          </div>
-          <details v-if="codeRunResult.terminal" class="code-verifier-evidence">
-            <summary>Verifier 证据</summary>
-            <pre>{{ JSON.stringify(codeRunResult.verifier_report || {}, null, 2) }}</pre>
-          </details>
-          <div v-if="codeRunResult.directly_adoptable && codeRunResult.artifact" class="code-result-actions">
-            <el-button size="small" @click="openCodeArtifactReview">审阅 Patch 与证据</el-button>
-            <el-button size="small" @click="downloadCodeArtifact('patch')">下载 Patch</el-button>
-            <el-button size="small" @click="downloadCodeArtifact('verifier')">下载验证报告</el-button>
-            <el-button v-if="codeRunResult.directly_adoptable" size="small" type="primary" @click="acceptCodeArtifact">接受封存工件</el-button>
-          </div>
         </div>
         <div class="chat-body" ref="scrollRef" @scroll.passive="onChatScroll">
           <div v-if="!messages.length && !streaming" class="empty-chat">
@@ -164,8 +130,12 @@
                     >
                       <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
                       <div class="step-body">
-                        <div class="step-title">{{ stepTitle(step) }}</div>
+                        <div class="step-title">
+                          <span>{{ stepTitle(step) }}</span>
+                          <span v-if="stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
+                        </div>
                         <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
+                        <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
                         <div v-if="step.checkpoint_path || step.sql_checkpoint_path" class="step-checkpoints">
                           <button v-if="step.checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.checkpoint_path)">轮次记录</button>
                           <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
@@ -234,13 +204,17 @@
                     <div
                       v-for="(step, si) in liveStepsView.steps"
                       :key="`${step.type}-${step.iteration || si}-${step.action || ''}-${si}`"
-                      v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length]"
+                      v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length, step.snippet?.length]"
                       class="exec-step"
                     >
                       <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
                       <div class="step-body">
-                        <div class="step-title">{{ stepTitle(step) }}</div>
+                        <div class="step-title">
+                          <span>{{ stepTitle(step) }}</span>
+                          <span v-if="stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
+                        </div>
                         <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
+                        <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
                         <div v-if="step.checkpoint_path || step.sql_checkpoint_path" class="step-checkpoints">
                           <button v-if="step.checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.checkpoint_path)">轮次记录</button>
                           <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
@@ -285,16 +259,6 @@
       :agent-id="agentId"
       :session-id="sessionId"
     />
-    <el-dialog v-model="codeReviewVisible" title="Code 工件审阅" width="80%">
-      <div v-if="codeArtifactReview" class="code-review">
-        <h4>工件哈希</h4>
-        <pre>{{ JSON.stringify(codeArtifactReview.hashes, null, 2) }}</pre>
-        <h4>Canonical Patch</h4>
-        <pre>{{ codeArtifactReview.patch || '（无代码变更）' }}</pre>
-        <h4>Verifier 证据</h4>
-        <pre>{{ JSON.stringify(codeArtifactReview.verifier_report, null, 2) }}</pre>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
@@ -317,6 +281,7 @@ import {
   prepareMarkdownForPreview,
 } from '../utils/markdownPreview'
 import WorkplacePanel from '../components/WorkplacePanel.vue'
+import CodeWorkspacePanel from '../components/CodeWorkspacePanel.vue'
 import SessionNoteDialog from '../components/SessionNoteDialog.vue'
 import SessionTickDialog from '../components/SessionTickDialog.vue'
 import ThemeSwitch from '../components/ThemeSwitch.vue'
@@ -327,16 +292,14 @@ const router = useRouter()
 const agentId = route.params.id
 const sessionId = ref(route.query.session || '')
 const agent = ref(null)
-const codeRunResult = ref(null)
 const activeCodeRunId = ref('')
-const codeReviewVisible = ref(false)
-const codeArtifactReview = ref(null)
 const messages = shallowRef([])
 const hydratedSteps = ref({})
 const input = ref('')
 const sending = ref(false)
 const streaming = ref(false)
 const liveSteps = ref([])
+const seenCodeEventKeys = new Set()
 const running = ref(false)
 const liveStatusText = ref('正在处理请求')
 const liveElapsedSeconds = ref(0)
@@ -346,6 +309,7 @@ const noteDlg = ref(null)
 const tickVisible = ref(false)
 const scrollRef = ref(null)
 const wpRef = ref(null)
+const codeWpRef = ref(null)
 const execOpen = ref({})
 const unreadSessions = ref({})
 const inboundNotice = ref(null)
@@ -419,10 +383,6 @@ const isImSession = computed(() => {
 })
 
 const agentSandboxId = computed(() => agent.value?.sandbox || agent.value?.sandbox_id || '')
-const codeResultTagType = computed(() => {
-  const severity = codeRunResult.value?.severity
-  return severity === 'danger' ? 'danger' : severity === 'warning' ? 'warning' : severity === 'success' ? 'success' : 'info'
-})
 
 function projectStatusLabel(availability) {
   const labels = {
@@ -436,55 +396,12 @@ function projectStatusLabel(availability) {
   return labels[availability?.reason] || availability?.reason || '状态未知'
 }
 
-function codeRuntimeLabel(runtime) {
-  if (runtime === 'claude_code') return 'Claude Code'
-  return 'Legacy CodeAgent'
-}
-
-async function loadCodeRunResult() {
-  if (agent.value?.profile !== 'code' || !sessionId.value) return
-  const res = await getCgi('/pages/page_agent_chat.cgi', {
-    action: 'get_code_result',
-    agent_id: agentId,
-    session_id: sessionId.value,
-    code_run_id: activeCodeRunId.value || undefined,
-  })
-  codeRunResult.value = res.data || null
-  if (res.data?.run_id) activeCodeRunId.value = res.data.run_id
-}
-
-async function openCodeArtifactReview() {
-  const artifactId = codeRunResult.value?.artifact?.id
-  if (!artifactId || !codeRunResult.value?.directly_adoptable) return
-  const res = await getCgi('/pages/page_agent_chat.cgi', {
-    action: 'review_code_artifact',
-    artifact_id: artifactId,
-  })
-  codeArtifactReview.value = res.data
-  codeReviewVisible.value = true
-}
-
-function downloadCodeArtifact(kind) {
-  const artifactId = codeRunResult.value?.artifact?.id
-  if (!artifactId || !codeRunResult.value?.directly_adoptable) return
-  const params = new URLSearchParams({
-    action: 'download_code_artifact', artifact_id: artifactId, artifact_kind: kind,
-  })
-  window.location.href = `/pages/page_agent_chat.cgi?${params.toString()}`
-}
-
-async function acceptCodeArtifact() {
-  const artifactId = codeRunResult.value?.artifact?.id
-  if (!artifactId || !codeRunResult.value?.directly_adoptable) return
-  await ElMessageBox.confirm(
-    '接受动作只记录此封存工件及其哈希，不会提交、推送或创建 PR。是否继续？',
-    '接受 Code 工件',
-    { type: 'warning' },
-  )
-  await postCgi('/pages/page_agent_chat.cgi?action=accept_code_artifact', {
-    artifact_id: artifactId,
-  })
-  ElMessage.success('已记录对封存工件的接受')
+function reloadWorkspacePanels() {
+  // CodeAgent edits happen in its run-bound Workspace; the standard panel is
+  // still used by legacy agents. Reload both refs so a completed run is
+  // visible immediately even when the run id itself did not change.
+  codeWpRef.value?.load?.()
+  wpRef.value?.load?.()
 }
 
 function messageSourceLabel(m) {
@@ -748,6 +665,15 @@ function stepTitle(step) {
   return step.title || stepLabel(step)
 }
 
+function stepInlineDetail(step) {
+  // Keep the execution row compact while making completed CodeAgent phases
+  // useful at a glance (for example: "Runtime 结果 · coding done"). Error
+  // details remain in the dedicated block below the row.
+  if (!step || step.status === 'error' || step.action === 'cte_attempt') return ''
+  const detail = stepDetail(step).replace(/\s+/g, ' ').trim()
+  return detail.length > 180 ? `${detail.slice(0, 180)}…` : detail
+}
+
 function stepGlyph(step) {
   if (step.type === 'llm') return '🤖'
   if (step.action === 'skill_loaded' || step.action === 'skill_read_md') return '📘'
@@ -789,6 +715,12 @@ function sanitizeStepDetail(text) {
     .replace(/\n{3,}/g, '\n\n')
     .trim()
   return cleaned
+}
+
+function sanitizeStepSnippet(text) {
+  // Code is literal text; prose cleanup must not remove valid source lines.
+  const cleaned = String(text || '').replace(/\u0000/g, '')
+  return cleaned.length > 3200 ? `${cleaned.slice(0, 3200)}\n…（片段已截断）` : cleaned
 }
 
 function stepErrorDetail(step) {
@@ -1036,6 +968,21 @@ async function loadAgent() {
   syncSessionToUrl()
 }
 
+async function hydrateActiveCodeRun() {
+  if (agent.value?.profile !== 'code' || !sessionId.value || activeCodeRunId.value) return
+  try {
+    const res = await getCgi('/pages/page_agent_chat.cgi', {
+      action: 'get_code_result',
+      agent_id: agentId,
+      session_id: sessionId.value,
+    })
+    const runId = String(res.data?.run_id || '').trim()
+    if (runId) activeCodeRunId.value = runId
+  } catch {
+    // A session without a CodeAgent Run should keep the empty-state panel.
+  }
+}
+
 async function loadHistory({ preserveHydrationFrom = null } = {}) {
   const preserveKey = preserveHydrationFrom ? String(preserveHydrationFrom) : ''
   const preserved = preserveKey ? hydratedSteps.value[preserveKey] : null
@@ -1067,6 +1014,19 @@ async function loadHistory({ preserveHydrationFrom = null } = {}) {
   }
   hydratedSteps.value = next
   scrollBottom()
+  if (agent.value?.profile === 'code') {
+    hydrateLatestCodeHistory().catch(() => {})
+  }
+}
+
+async function hydrateLatestCodeHistory() {
+  await nextTick()
+  const latest = [...displayMessages.value].reverse().find(
+    (item) => item.m?.role === 'assistant' && item.stepCount > 0,
+  )
+  if (!latest) return
+  execOpen.value = { ...execOpen.value, [latest.execKey]: true }
+  await ensureHistorySteps(latest.execKey)
 }
 
 function applyDoneMessage(content, { truncated = false, stepCount = 0 } = {}) {
@@ -1144,7 +1104,6 @@ async function finishRunFromDone(content, { truncated = false } = {}) {
   }
   markRunFinished()
   await loadHistory({ preserveHydrationFrom: tmpKey })
-  await loadCodeRunResult()
 }
 
 async function checkStatus({ forIdlePoll = false } = {}) {
@@ -1171,7 +1130,9 @@ async function checkStatus({ forIdlePoll = false } = {}) {
   }
   if (!next) userRequestedStop = false
   running.value = next
-  if (prev && !next) await loadCodeRunResult()
+  if (prev && !next) {
+    reloadWorkspacePanels()
+  }
   if (forIdlePoll) bumpStatusBackoff(next !== prev)
   return next
 }
@@ -1296,6 +1257,7 @@ function profileEventToStep(data) {
     prepare: '准备运行环境',
     verify_baseline: '捕获验证基线',
     runtime_started: '启动 Claude Code Runtime',
+    runtime_result: 'Claude Code Runtime 结果',
     skill_loaded: '加载 Claude Code Skill',
     mcp_loaded: '加载 Claude Code MCP',
     tool_call: 'Claude Code 工具调用',
@@ -1309,9 +1271,19 @@ function profileEventToStep(data) {
     cleanup: '清理 Sandbox',
     terminate: '结束 Code Run',
   }
-  const status = profile.status === 'failed'
+  const rawStatus = String(profile.status || 'running').toLowerCase()
+  // `runtime_started` is an acknowledgement that startup succeeded, not a
+  // long-running operation. Other terminal aliases are accepted so a runtime
+  // event cannot leave a completed step spinning indefinitely.
+  const terminalStatuses = new Set(['completed', 'done', 'passed', 'success'])
+  const status = rawStatus === 'failed' || rawStatus === 'error'
     ? 'error'
-    : (profile.status === 'completed' ? 'done' : 'running')
+    : (profile.phase === 'runtime_started' && rawStatus === 'started')
+      || (profile.phase === 'prepare' && rawStatus === 'started')
+      || terminalStatuses.has(rawStatus)
+      ? 'done'
+      : 'running'
+  const snippet = sanitizeStepSnippet(profile.snippet || profile.output || '')
   return {
     type: 'info',
     action: `code_${profile.phase || 'profile'}`,
@@ -1319,7 +1291,45 @@ function profileEventToStep(data) {
     status,
     content: profile.reason || profile.summary || profile.skill_name || profile.mcp_name
       || profile.command || profile.path || profile.artifact_id || '',
+    snippet,
   }
+}
+
+function findOpenCodeStepIndex(action) {
+  const steps = liveSteps.value
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index]
+    if (step?.action === action && step.status !== 'done' && step.status !== 'error') {
+      return liveStepsBaseIndex + index
+    }
+  }
+  return null
+}
+
+function applyCodeRuntimeEvent(event) {
+  const profile = event?.profile || event || {}
+  const key = profile.sequence != null
+    ? `${activeCodeRunId.value}:${profile.sequence}`
+    : `${activeCodeRunId.value}:${profile.phase || ''}:${profile.status || ''}:${profile.summary || profile.reason || ''}`
+  if (seenCodeEventKeys.has(key)) return
+  seenCodeEventKeys.add(key)
+  const step = profileEventToStep({ profile })
+  if (!step) return
+  const openIndex = findOpenCodeStepIndex(step.action)
+  applyStepEvent({
+    type: 'step',
+    op: openIndex == null ? 'append' : 'patch',
+    ...(openIndex == null ? {} : { index: openIndex }),
+    step,
+  })
+}
+
+async function loadCodeEvents() {
+  if (agent.value?.profile !== 'code' || !activeCodeRunId.value) return
+  const res = await getCgi('/pages/page_agent_chat.cgi', {
+    action: 'get_code_events', agent_id: agentId, code_run_id: activeCodeRunId.value, since: 0, limit: 200,
+  })
+  for (const event of (res.data?.events || [])) applyCodeRuntimeEvent(event)
 }
 
 function startResumePoll() {
@@ -1329,10 +1339,14 @@ function startResumePoll() {
       // WS already streams steps — only poll history as disconnect fallback
       if (ws && ws.readyState === WebSocket.OPEN) {
         const still = await checkStatus()
+        // The run is queued asynchronously and startup events can precede the
+        // socket subscription. Replay persisted events while it is active so
+        // those early phases are not lost from the conversation view.
+        await loadCodeEvents()
         if (!still) {
           markRunFinished()
           await loadHistory()
-          wpRef.value?.load?.()
+          reloadWorkspacePanels()
         }
         return
       }
@@ -1340,7 +1354,7 @@ function startResumePoll() {
       await loadHistory()
       if (!still) {
         markRunFinished()
-        wpRef.value?.load?.()
+        reloadWorkspacePanels()
       }
     } catch {
       /* keep polling while page alive */
@@ -1425,6 +1439,7 @@ function connectWs() {
   socket.onopen = () => {
     wsRetryMs = 1000
     socket.send(JSON.stringify({ agent_id: agentId, session_id: sessionId.value }))
+    loadCodeEvents().catch(() => {})
     if (wsPingTimer) clearInterval(wsPingTimer)
     wsPingTimer = setInterval(() => {
       if (socket.readyState === WebSocket.OPEN) socket.send('ping')
@@ -1470,11 +1485,8 @@ function connectWs() {
     }
     if (data.type === 'profile') {
       if (userRequestedStop) return
-      const step = profileEventToStep(data)
-      if (step) {
-        startLiveElapsed()
-        applyStepEvent({ type: 'step', op: 'append', step })
-      }
+      startLiveElapsed()
+      applyCodeRuntimeEvent(data)
     }
     if (data.type === 'done') {
       userRequestedStop = false
@@ -1483,7 +1495,7 @@ function connectWs() {
       // Snapshot live steps before clear; migrate hydration onto real message id
       finishRunFromDone(data.content, { truncated }).then(() => {
         checkStatus()
-        wpRef.value?.load?.()
+        reloadWorkspacePanels()
       })
     }
   }
@@ -1525,8 +1537,6 @@ async function send() {
   liveStepsBaseIndex = 0
   execOpen.value = { ...execOpen.value, live: true }
   running.value = true
-  codeRunResult.value = null
-  activeCodeRunId.value = ''
   userPinnedBottom = true
   scrollBottom()
   const submitted = await postCgi('/pages/page_agent_chat.cgi?action=submit_chat', {
@@ -1536,7 +1546,18 @@ async function send() {
     workplace_dir: wpRef.value?.getSelectedFolder?.() || '',
     workplace_files: wpRef.value?.getSelectedFiles?.() || [],
   })
-  activeCodeRunId.value = submitted.data?.code_run_id || ''
+  const nextCodeRunId = String(submitted.data?.code_run_id || '').trim()
+  // A grill/clarification response intentionally has no new Run id. Keep
+  // showing the last run's Workspace instead of replacing it with an empty
+  // "等待 CodeAgent Run" panel. A real new Run always replaces this id.
+  if (nextCodeRunId) {
+    activeCodeRunId.value = nextCodeRunId
+  } else {
+    await hydrateActiveCodeRun()
+  }
+  // The run is enqueued asynchronously; hydrate any startup/profile events
+  // emitted before the WebSocket observed the new Run id.
+  loadCodeEvents().catch(() => {})
   startResumePoll()
 }
 
@@ -1647,9 +1668,11 @@ function switchToInboundSession() {
 watch(() => route.query.session, async (sid) => {
   if (sid && sid !== sessionId.value) {
     sessionId.value = sid
+    activeCodeRunId.value = ''
     clearInboundNotice(sid)
     clearResumePoll()
     await loadHistory()
+    await hydrateActiveCodeRun()
     connectWs()
     await resumeIfRunning()
   }
@@ -1669,7 +1692,7 @@ onMounted(async () => {
   pageAlive = true
   await loadAgent()
   await loadHistory()
-  await loadCodeRunResult()
+  await hydrateActiveCodeRun()
   connectWs()
   await resumeIfRunning()
   resetIdleStatusPoll()
@@ -1745,64 +1768,7 @@ onUnmounted(() => {
 .main-body { display: flex; flex: 1; min-height: 0; }
 .sidebar { width: 340px; flex-shrink: 0; height: 100%; overflow: hidden; }
 .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--gap-chat-body-bg); }
-.code-result-banner {
-  margin: 12px 16px 0;
-  padding: 12px 14px;
-  border: 1px solid var(--gap-card-border);
-  border-radius: 10px;
-  background: var(--gap-chat-bubble-bg);
-  box-shadow: 0 1px 4px var(--gap-shadow);
-  color: var(--gap-text);
-}
 .code-agent-context { margin: 12px 16px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.code-result-banner.is-info { box-shadow: inset 3px 0 0 var(--gap-primary), 0 1px 4px var(--gap-shadow); }
-.code-result-banner.is-success { box-shadow: inset 3px 0 0 var(--gap-accent), 0 1px 4px var(--gap-shadow); }
-.code-result-banner.is-warning { box-shadow: inset 3px 0 0 var(--el-color-warning), 0 1px 4px var(--gap-shadow); }
-.code-result-banner.is-danger { box-shadow: inset 3px 0 0 var(--el-color-danger), 0 1px 4px var(--gap-shadow); }
-.code-result-title { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--gap-text); }
-.code-result-title span {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
-  font-weight: 500;
-}
-.code-result-facts { margin-top: 6px; color: var(--gap-text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
-.code-result-warning { margin-top: 6px; color: var(--el-color-danger); font-weight: 600; }
-.code-result-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.code-result-actions .el-button {
-  color: var(--gap-text);
-  border-color: var(--gap-card-border);
-  background: var(--gap-hover-bg);
-}
-.code-result-actions .el-button--primary {
-  color: #fff;
-  border-color: var(--gap-primary);
-  background: var(--gap-primary);
-}
-.code-verifier-evidence { margin-top: 8px; }
-.code-verifier-evidence summary { cursor: pointer; font-weight: 600; color: var(--gap-text); }
-.code-verifier-evidence pre {
-  max-height: 240px;
-  overflow: auto;
-  margin: 8px 0 0;
-  padding: 8px;
-  border: 1px solid var(--gap-card-border);
-  border-radius: 6px;
-  background: var(--gap-hover-bg);
-  color: var(--gap-text);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.code-review pre {
-  max-height: 360px;
-  overflow: auto;
-  padding: 10px;
-  border-radius: 6px;
-  border: 1px solid var(--gap-card-border);
-  background: var(--gap-hover-bg);
-  color: var(--gap-text);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 .chat-body { flex: 1; overflow: auto; padding: 12px 16px; background: var(--gap-chat-body-bg); }
 .empty-chat { text-align: center; color: var(--gap-text-muted); padding-top: 80px; }
 .empty-chat p { margin-top: 12px; }
@@ -1979,9 +1945,20 @@ onUnmounted(() => {
 .step-title {
   font-size: 13px;
   color: var(--gap-text);
-  word-break: break-word;
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
   line-height: 1.45;
 }
+.step-inline-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gap-text-muted);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.step-title > span:first-child { flex-shrink: 0; }
 .step-content {
   font-size: 12px;
   color: var(--gap-text-muted);
@@ -1989,6 +1966,20 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;
+}
+.step-snippet {
+  box-sizing: border-box;
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--gap-card-border);
+  border-radius: 6px;
+  background: var(--gap-hover-bg);
+  color: var(--gap-text);
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .step-checkpoints {
   display: flex;
@@ -2058,6 +2049,18 @@ onUnmounted(() => {
 .content.md-render.is-empty-fallback {
   color: var(--gap-text-muted);
   font-style: italic;
+}
+.content.md-render details {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--gap-card-border);
+  border-radius: 6px;
+  background: var(--gap-hover-bg);
+}
+.content.md-render summary {
+  cursor: pointer;
+  color: var(--gap-text);
+  font-weight: 600;
 }
 
 .msg-meta {

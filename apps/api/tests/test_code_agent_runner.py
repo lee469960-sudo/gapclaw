@@ -287,6 +287,135 @@ def test_runner_exec_enforces_deadline_and_kills_blocked_container():
     container.kill.assert_called_once_with()
 
 
+def test_runner_exec_streams_output_to_callback():
+    client = MagicMock()
+    client.containers.get.return_value = MagicMock()
+    client.api.exec_create.return_value = {"Id": "exec1"}
+    client.api.exec_start.return_value = iter([b"first\n", (b"second", b"warning")])
+    client.api.exec_inspect.return_value = {"ExitCode": 0}
+    runner = CodeContainerRunner(client)
+    chunks = []
+
+    exit_code, output = runner.exec(
+        "container1",
+        "claude -p test --output-format stream-json",
+        timeout_seconds=30,
+        on_output=chunks.append,
+    )
+
+    assert exit_code == 0
+    assert output == "first\nsecondwarning"
+    assert chunks == ["first\n", "second"]
+    client.api.exec_create.assert_called_once()
+    client.api.exec_start.assert_called_once_with("exec1", stream=True, demux=True)
+
+
+def test_runner_exec_falls_back_when_stream_negotiation_is_unavailable():
+    client = MagicMock()
+    container = client.containers.get.return_value
+    client.api.exec_create.side_effect = RuntimeError("stream unsupported")
+    container.exec_run.return_value = SimpleNamespace(exit_code=0, output=b"fallback")
+    runner = CodeContainerRunner(client)
+
+    exit_code, output = runner.exec(
+        "container1", "claude -p test --output-format stream-json", timeout_seconds=30, on_output=lambda _chunk: None
+    )
+
+    assert (exit_code, output) == (0, "fallback")
+    container.exec_run.assert_called_once()
+
+
+def test_runner_exec_ignores_stream_observer_failure():
+    """A live UI callback must not make an otherwise successful exec fail."""
+    client = MagicMock()
+    client.containers.get.return_value = MagicMock()
+    client.api.exec_create.return_value = {"Id": "exec1"}
+    client.api.exec_start.return_value = iter([b"result\n"])
+    client.api.exec_inspect.return_value = {"ExitCode": 0}
+    runner = CodeContainerRunner(client)
+
+    def observer(_chunk):
+        raise RuntimeError("websocket closed")
+
+    exit_code, output = runner.exec(
+        "container1",
+        "claude -p test --output-format stream-json",
+        timeout_seconds=30,
+        on_output=observer,
+    )
+
+    assert (exit_code, output) == (0, "result\n")
+
+
+def test_runner_exec_handles_transient_null_exit_code():
+    client = MagicMock()
+    client.containers.get.return_value = MagicMock()
+    client.api.exec_create.return_value = {"Id": "exec1"}
+    client.api.exec_start.return_value = iter([b"result\n"])
+    client.api.exec_inspect.side_effect = [{"ExitCode": None}, {"ExitCode": 0}]
+    runner = CodeContainerRunner(client)
+
+    exit_code, output = runner.exec(
+        "container1",
+        "claude -p test --output-format stream-json",
+        timeout_seconds=30,
+        on_output=lambda _chunk: None,
+    )
+
+    assert (exit_code, output) == (0, "result\n")
+
+
+def test_runner_exec_keeps_output_when_docker_stream_closes_after_process_exit():
+    client = MagicMock()
+    client.containers.get.return_value = MagicMock()
+    client.api.exec_create.return_value = {"Id": "exec1"}
+
+    def stream_with_transport_close():
+        yield b"{\"type\":\"result\",\"status\":\"success\"}\n"
+        raise RuntimeError("connection reset by peer")
+
+    client.api.exec_start.return_value = stream_with_transport_close()
+    client.api.exec_inspect.return_value = {"ExitCode": 0}
+    runner = CodeContainerRunner(client)
+
+    exit_code, output = runner.exec(
+        "container1",
+        "claude -p test --output-format stream-json",
+        timeout_seconds=30,
+        on_output=lambda _chunk: None,
+    )
+
+    assert exit_code == 0
+    assert '"status":"success"' in output
+
+
+def test_runner_exec_ignores_stream_close_oserror_after_process_exit():
+    client = MagicMock()
+    client.containers.get.return_value = MagicMock()
+    client.api.exec_create.return_value = {"Id": "exec1"}
+
+    class _Stream:
+        def __iter__(self):
+            yield b"{\"type\":\"result\",\"status\":\"success\"}\n"
+
+        def close(self):
+            raise OSError("socket already closed")
+
+    client.api.exec_start.return_value = _Stream()
+    client.api.exec_inspect.return_value = {"ExitCode": 0}
+    runner = CodeContainerRunner(client)
+
+    exit_code, output = runner.exec(
+        "container1",
+        "claude -p test --output-format stream-json",
+        timeout_seconds=30,
+        on_output=lambda _chunk: None,
+    )
+
+    assert exit_code == 0
+    assert '"status":"success"' in output
+
+
 def test_runner_registers_container_compensation_immediately_after_allocation(tmp_path, monkeypatch):
     runner, client, run, workspace = _runner(tmp_path, monkeypatch)
 

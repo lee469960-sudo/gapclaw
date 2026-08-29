@@ -47,6 +47,43 @@ def openai_chat_completions_url(base_url: str, provider: str = "openai") -> str:
     return f"{base}/chat/completions"
 
 
+def is_anthropic_provider(provider: str = "") -> bool:
+    return (provider or "").strip().lower() in {"anthropic", "cloud_claude"}
+
+
+def anthropic_base_url(base_url: str) -> str:
+    """Normalize an Anthropic resource URL to the SDK-compatible base URL."""
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    for suffix in ("/chat/completions", "/v1/messages", "/messages", "/v1"):
+        if url.lower().endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    return url
+
+
+def anthropic_messages_url(base_url: str) -> str:
+    """Build the native Anthropic Messages endpoint from a resource base URL."""
+    url = anthropic_base_url(base_url)
+    if not url:
+        return ""
+    return f"{url}/v1/messages"
+
+
+def _anthropic_content_text(data: dict) -> str:
+    content = data.get("content") if isinstance(data, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+        )
+    return ""
+
+
 def is_minimax_llm(llm) -> bool:
     """True when the LLM resource points at a MiniMax endpoint (M3 reasoning format)."""
     return "minimax" in (getattr(llm, "base_url", "") or "").lower()
@@ -700,16 +737,33 @@ async def test_llm_chat(
         return "需要 db 会话解析模型组"
 
     api_key = decrypt_secret(llm.api_key_enc)
-    endpoint = openai_chat_completions_url(llm.base_url, llm.provider)
+    anthropic = is_anthropic_provider(llm.provider)
+    endpoint = (
+        anthropic_messages_url(llm.base_url)
+        if anthropic
+        else openai_chat_completions_url(llm.base_url, llm.provider)
+    )
     if not endpoint:
         return "未配置 base_url"
 
     payload_messages = normalize_chat_messages([{"role": "user", "content": message}])
     try:
         async with httpx.AsyncClient(timeout=60) as client:
+            headers = (
+                {
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                }
+                if anthropic
+                else {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
+            )
             resp = await client.post(
                 endpoint,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers=headers,
                 json={
                     "model": llm.model,
                     "messages": payload_messages,
@@ -718,6 +772,8 @@ async def test_llm_chat(
             )
             resp.raise_for_status()
             data = resp.json()
+            if anthropic:
+                return _anthropic_content_text(data)
             return data["choices"][0]["message"]["content"]
     except httpx.HTTPStatusError as e:
         return f"测试失败: {format_llm_http_error(e)}"

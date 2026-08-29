@@ -19,9 +19,9 @@ if [[ -z "${TAG}" ]]; then
   exit 1
 fi
 case "${TAG}" in
-  v[0-9]*.[0-9]*.[0-9]*) ;;
+  [vV][0-9]*.[0-9]*.[0-9]*) ;;
   *)
-    echo "Invalid version '${TAG}'; expected vMAJOR.MINOR.PATCH (e.g. v1.0.0)" >&2
+    echo "Invalid version '${TAG}'; expected vMAJOR.MINOR.PATCH (e.g. v1.0.0 or V0.0.3)" >&2
     exit 1
     ;;
 esac

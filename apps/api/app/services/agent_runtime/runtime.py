@@ -123,6 +123,91 @@ def _effective_fix_list(fix_list: list | None) -> list[str]:
     return [x for x in items if not _is_boilerplate_fix_item(x)]
 
 
+def _persist_code_profile_event(db, run_id: str, payload: dict) -> None:
+    """Persist a redacted Code event so history survives WebSocket reconnects."""
+    if db is None or not run_id:
+        return
+    try:
+        from app.models import CodeAgentRun
+        from app.services.code_agent.output_security import redact_code_output
+
+        run = db.query(CodeAgentRun).filter(CodeAgentRun.id == run_id).first()
+        if not run:
+            return
+        try:
+            facts = json.loads(getattr(run, "runner_facts", "") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            facts = {}
+        if not isinstance(facts, dict):
+            facts = {}
+        events = facts.get("code_profile_events")
+        if not isinstance(events, list):
+            events = []
+        safe_payload = {
+            str(key): redact_code_output(value).text if isinstance(value, str) else value
+            for key, value in payload.items()
+        }
+        try:
+            previous_sequence = int(events[-1].get("sequence", -1)) if events and isinstance(events[-1], dict) else -1
+        except (TypeError, ValueError):
+            previous_sequence = len(events) - 1
+        safe_payload["sequence"] = previous_sequence + 1
+        events.append(safe_payload)
+        facts["code_profile_events"] = events[-500:]
+        run.runner_facts = json.dumps(facts, ensure_ascii=False, sort_keys=True)
+        db.commit()
+    except Exception:
+        # Event persistence must not make the coding run fail; the live hub
+        # remains the best-effort path when the database is unavailable.
+        logger.exception("code profile event persistence failed run=%s", run_id)
+
+
+def _code_profile_steps_for_message(run) -> list[dict]:
+    """Convert persisted Code profile events into compact chat execution steps."""
+    if not run:
+        return []
+    try:
+        facts = json.loads(getattr(run, "runner_facts", "") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    events = facts.get("code_profile_events") if isinstance(facts, dict) else []
+    if not isinstance(events, list):
+        return []
+    steps: list[dict] = []
+    open_indexes: dict[str, int] = {}
+    terminal = {"completed", "done", "passed", "success"}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        phase = str(event.get("phase") or "profile")
+        raw_status = str(event.get("status") or "running").lower()
+        status = "error" if raw_status in {"failed", "error"} else (
+            "done" if raw_status in terminal or (phase in {"prepare", "runtime_started"} and raw_status == "started")
+            else "running"
+        )
+        step = {
+            "type": "info",
+            "action": f"code_{phase}",
+            "title": f"CodeAgent 运行阶段 · {event.get('status') or 'running'}",
+            "status": status,
+        }
+        detail = event.get("reason") or event.get("summary") or event.get("command") or event.get("path") or ""
+        if isinstance(detail, str) and detail.strip():
+            step["content"] = detail[:400]
+        snippet = event.get("snippet") or event.get("output") or ""
+        if isinstance(snippet, str) and snippet.strip():
+            # Keep the persisted chat step bounded; the complete redacted
+            # event remains available through the Code run event endpoint.
+            step["snippet"] = snippet[:3200]
+        current = open_indexes.get(phase)
+        if current is not None and steps[current].get("status") not in {"done", "error"}:
+            steps[current].update(step)
+        else:
+            open_indexes[phase] = len(steps)
+            steps.append(step)
+    return steps
+
+
 class AgentRuntime:
     """Top-level agent runtime orchestrating the LLM-driven ReAct loop.
 
@@ -209,6 +294,7 @@ class AgentRuntime:
             payload["reason"] = reason
         if extra:
             payload.update(extra)
+        _persist_code_profile_event(ctx.db, code_execution.run_id, payload)
         try:
             await hub.publish(ctx.chat_key, {
                 "type": "profile",
@@ -2558,10 +2644,12 @@ async def _publish_pre_context_code_runtime_event(
     session_id: str,
     *,
     event: dict,
+    db=None,
 ) -> None:
     """Publish a normalized Claude Code runtime event before AgentContext exists."""
     from app.services.agent_runtime.hub import hub
 
+    _persist_code_profile_event(db, str(event.get("run_id") or ""), event)
     try:
         await hub.publish(
             f"{agent.id}:{session_id}",
@@ -2662,6 +2750,16 @@ async def _run_agent_impl(
                 status="done",
                 op="patch",
             )
+            # Materialize the Claude SOP before the container is created. A
+            # bind mount is expected to be live, but some Docker backends take
+            # a startup snapshot; pre-populating avoids Claude seeing a
+            # workspace without /workspace/.claude/CLAUDE.md.
+            from app.services.code_agent.claude_code_runtime import (
+                code_run_uses_claude_code,
+                materialize_coding_sop,
+            )
+            if code_run_uses_claude_code(code_run):
+                materialize_coding_sop(workspace.path)
             if not callable(workspace_cleanup) and hasattr(
                 workspace_manager, "retain_after_run"
             ):
@@ -2731,7 +2829,6 @@ async def _run_agent_impl(
             code_run_uses_claude_code,
             materialize_claude_code_skills,
             materialize_claude_code_mcp_config,
-            materialize_coding_sop,
             normalize_claude_code_runtime_event,
             preflight_input_from_run,
             record_claude_code_mcp_injection,
@@ -2744,6 +2841,7 @@ async def _run_agent_impl(
                 await _publish_pre_context_code_runtime_event(
                     agent,
                     session_id,
+                    db=db,
                     event=normalize_claude_code_runtime_event(
                         {
                             "type": "runtime_started",
@@ -2757,11 +2855,11 @@ async def _run_agent_impl(
                     db, code_run, workspace.path
                 )
                 record_claude_code_skill_injection(code_run, skill_injection)
-                materialize_coding_sop(workspace.path)
                 for event in skill_injection.events:
                     await _publish_pre_context_code_runtime_event(
                         agent,
                         session_id,
+                        db=db,
                         event=normalize_claude_code_runtime_event(event, run_id=code_run.id),
                     )
                 mcp_injection = materialize_claude_code_mcp_config(
@@ -2772,6 +2870,7 @@ async def _run_agent_impl(
                     await _publish_pre_context_code_runtime_event(
                         agent,
                         session_id,
+                        db=db,
                         event=normalize_claude_code_runtime_event(event, run_id=code_run.id),
                     )
                 await _publish_pre_context_code_step(
@@ -2953,11 +3052,19 @@ async def _run_code_runtime(
         db.commit()
 
     from app.services.code_agent.verifier import CodeVerifier
+    from app.services.code_agent.workspace import WorkspaceIntegrityGuard
 
     verifier = code_verifier or CodeVerifier(db, run, ctx.tool_executor.runner)
     result = ""
     failure: BaseException | None = None
     outcome = "execution_completed"
+    from app.services.code_agent.claude_code_runtime import code_run_uses_claude_code
+
+    publish_code_done = bool(run and code_run_uses_claude_code(run))
+    if publish_code_done:
+        # The Claude branch bypasses AgentRuntime.run(), so persist the user
+        # turn here as well as the final assistant result below.
+        runtime._save_user_message(ctx)
     try:
         await runtime._publish_code_profile_event(ctx, "verify_baseline", "started")
         baseline = verifier.capture_baseline(workspace_manager)
@@ -2972,7 +3079,6 @@ async def _run_code_runtime(
             archive_openspec_after_seal,
             claude_code_max_verifier_retries,
             claude_code_verifier_feedback,
-            code_run_uses_claude_code,
             normalize_claude_code_runtime_event,
             record_claude_code_openspec_archive,
             record_claude_code_runtime_result,
@@ -2986,10 +3092,49 @@ async def _run_code_runtime(
                 outcome = env_reason
                 result = env_reason
             else:
-                adapter = ClaudeCodeRuntimeAdapter(runner=ctx.tool_executor.runner)
+                event_loop = asyncio.get_running_loop()
+
+                def publish_stream_event(raw_event):
+                    event = normalize_claude_code_runtime_event(raw_event, run_id=run.id)
+                    future = asyncio.run_coroutine_threadsafe(
+                        runtime._publish_code_profile_event(
+                            ctx,
+                            event["phase"],
+                            event["status"],
+                            event.get("reason", ""),
+                            {
+                                key: value
+                                for key, value in event.items()
+                                if key not in {
+                                    "version", "profile", "phase", "status",
+                                    "run_id", "manifest_version", "reason",
+                                }
+                            },
+                        ),
+                        event_loop,
+                    )
+                    try:
+                        future.result(timeout=10)
+                    except Exception:
+                        logger.warning("Claude stream event publish failed", exc_info=True)
+
+                adapter = ClaudeCodeRuntimeAdapter(
+                    runner=ctx.tool_executor.runner,
+                    on_event=publish_stream_event,
+                )
                 max_retries = claude_code_max_verifier_retries(run)
                 retry_attempt = 0
                 while True:
+                    # Keep the shared live execution card active for the full
+                    # Claude CLI call. The adapter streams tool events through
+                    # the bound Runner while this call is still in progress.
+                    await runtime._publish_code_profile_event(
+                        ctx,
+                        "runtime_result",
+                        "started",
+                        "Claude Code Runtime 执行中",
+                        {"retry_attempt": retry_attempt},
+                    )
                     coding_result = await asyncio.wait_for(
                         asyncio.to_thread(
                             adapter.run,
@@ -3005,10 +3150,52 @@ async def _run_code_runtime(
                     )
                     record_claude_code_runtime_result(run, coding_result)
                     db.commit()
+                    for raw_event in coding_result.runtime_events:
+                        if str(raw_event.get("type") or "") == "runtime_started":
+                            continue
+                        event = normalize_claude_code_runtime_event(
+                            raw_event, run_id=run.id
+                        )
+                        await runtime._publish_code_profile_event(
+                            ctx,
+                            event["phase"],
+                            event["status"],
+                            event.get("reason", ""),
+                            {
+                                key: value
+                                for key, value in event.items()
+                                if key not in {
+                                    "version", "profile", "phase", "status",
+                                    "run_id", "manifest_version", "reason",
+                                }
+                            },
+                        )
                     result = coding_result.summary
+                    await runtime._publish_code_profile_event(
+                        ctx,
+                        "runtime_result",
+                        "completed" if coding_result.status == "coding_completed" else "failed",
+                        coding_result.error_summary or coding_result.summary,
+                    )
                     if coding_result.status != "coding_completed":
                         outcome = coding_result.status
                         break
+                    from pathlib import Path
+
+                    control_baseline = Path(run.workspace_path).resolve().parent / "control" / "baseline.json"
+                    runtime_changed = (
+                        WorkspaceIntegrityGuard(run, db).authorize_runtime_changes()
+                        if control_baseline.is_file()
+                        else ()
+                    )
+                    for path in runtime_changed:
+                        await runtime._publish_code_profile_event(
+                            ctx,
+                            "file_changed",
+                            "completed",
+                            path,
+                            {"path": path},
+                        )
                     await runtime._publish_code_profile_event(ctx, "verify", "started")
                     report = verifier.verify()
                     outcome = report.outcome
@@ -3096,6 +3283,11 @@ async def _run_code_runtime(
                             )
                             record_claude_code_openspec_archive(run, archive_result)
                             db.commit()
+                        break
+                    # Integrity/policy failures are terminal safety decisions,
+                    # not coding feedback. Retrying could let the runtime make
+                    # more changes after the Workspace boundary was violated.
+                    if outcome in {"workspace_integrity_error", "policy_rejected"}:
                         break
                     if outcome == "budget_exhausted" or retry_attempt >= max_retries:
                         break
@@ -3186,6 +3378,7 @@ async def _run_code_runtime(
             timeout_seconds=execution.timeout_seconds,
         )
 
+    cleanup_error = None
     try:
         await cleanup_code_resources(
             ctx.chat_key,
@@ -3200,9 +3393,54 @@ async def _run_code_runtime(
             run.failure_reason = "cleanup_failed"
             db.commit()
         await runtime._publish_code_profile_event(ctx, "cleanup", "failed", "cleanup_failed")
-        raise
+        cleanup_error = exc
+    else:
+        await runtime._publish_code_profile_event(ctx, "cleanup", "completed")
+    if publish_code_done:
+        # Claude Code runs bypass AgentRuntime.run(), so they do not emit the
+        # shared modular `done` event. Without this terminal event the web UI
+        # remains in its optimistic streaming state forever, especially when
+        # the runtime fails before producing a patch.
+        from app.services.agent_runtime.hub import hub
+        from app.services.code_agent.results import (
+            format_patch_verification_output,
+            serialize_code_result,
+        )
+        from app.models import CodeArtifact
 
-    await runtime._publish_code_profile_event(ctx, "cleanup", "completed")
+        done_content = result or (str(failure) if failure else outcome)
+        # Every CodeAgent turn ends with the authoritative patch outcome in
+        # the assistant message. This is informational only: accepting or
+        # committing the patch remains a separate explicit follow-up turn.
+        artifact = (
+            db.get(CodeArtifact, run.artifact_id)
+            if run and getattr(run, "artifact_id", "")
+            else None
+        )
+        done_content = "\n\n".join((
+            done_content,
+            format_patch_verification_output(serialize_code_result(run, artifact)),
+        )).strip()
+        runtime._save_assistant_message(
+            ctx,
+            done_content,
+            steps=_code_profile_steps_for_message(run),
+        )
+        try:
+            await hub.publish(ctx.chat_key, {
+                "type": "done",
+                # The terminal CodeAgent result is already redacted and is the
+                # chat's authoritative Markdown output. Send it in full so
+                # the UI does not briefly show an incomplete result card while
+                # history is being rehydrated.
+                "content": done_content,
+                "content_truncated": False,
+                "workplace_changed": bool(run and run.status == "patch_ready"),
+            })
+        except Exception:
+            logger.exception("code runtime done publish failed run=%s", execution.run_id)
+    if cleanup_error:
+        raise cleanup_error
     if failure:
         raise failure
     return result

@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.deps import create_session, delete_session, get_session_user, resolve_user_permissions
-from app.menu_config import APP_VERSION, MENU_GROUPS, PAGE_ROUTE_MAP
+from app.menu_config import MENU_GROUPS, PAGE_ROUTE_MAP
+from app.version import app_version
 from app.models import User
 from app.schemas import ok, fail
 from app.security import verify_password
@@ -92,6 +93,7 @@ async def render_shell(user: User = Depends(get_session_user), db: Session = Dep
     permissions = json.loads(user.permissions or "[]")
 
     site = get_site_config(db)
+    version = app_version()
 
     return ok({
         "username": user.username,
@@ -100,14 +102,15 @@ async def render_shell(user: User = Depends(get_session_user), db: Session = Dep
         "menus": flat_menus,
         "menu_groups": menu_groups,
         "page_codes": page_codes,
-        "version": APP_VERSION,
+        "version": version,
         "site_name": site["site_name"],
         "site_logo": site["site_logo"],
-        "footer": site["footer"],
+        "footer": site["footer_display"],
     })
 
 
 @router.get("/site-brand.cgi")
 async def site_brand(db: Session = Depends(get_db)):
     """Public site branding for login page (no auth required)."""
-    return ok(get_site_config(db))
+    site = get_site_config(db)
+    return ok({**site, "footer": site["footer_display"]})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import fnmatch
 import hashlib
 import json
 import os
@@ -229,7 +230,10 @@ class WorkspaceManager:
         try:
             if not resolved_root.exists():
                 return
-            if getattr(run, "workspace_state", "") == "prepared":
+            # A sealed artifact still needs a read-only source Workspace for
+            # the run-bound preview UI. Retain it under the existing TTL;
+            # purge_expired remains responsible for eventual deletion.
+            if getattr(run, "workspace_state", "") in {"prepared", "sealed"}:
                 self.retain_after_run(run)
                 return
             if getattr(run, "workspace_state", "") == "retained_read_only":
@@ -578,7 +582,7 @@ class WorkspaceIntegrityGuard:
             self._fail("workspace_integrity_metadata_error")
         return {str(item) for item in value if isinstance(item, str)}
 
-    def _validate(self) -> None:
+    def _validate(self, *, check_external: bool = True) -> None:
         try:
             facts = json.loads(self.run.source_facts or "{}")
             baseline_text = (self.control / "baseline.json").read_text(encoding="utf-8")
@@ -608,7 +612,7 @@ class WorkspaceIntegrityGuard:
             path for path in set(baseline) | set(current)
             if baseline.get(path) != current.get(path)
         }
-        if not changed.issubset(self._authorized()):
+        if check_external and not changed.issubset(self._authorized()):
             self._fail("workspace_external_write")
 
     def _check_uncontrolled_checkout(self) -> None:
@@ -658,3 +662,44 @@ class WorkspaceIntegrityGuard:
 
     def check_before_seal(self) -> None:
         self._validate()
+
+    def authorize_runtime_changes(self) -> tuple[str, ...]:
+        """Authorize changes made by the managed Claude Code runtime.
+
+        Claude edits files directly inside the isolated runner Workspace rather
+        than through ``CodeToolExecutor.check_before_write``. Treat only the
+        resulting paths inside the frozen ``allowed_paths`` scope as runtime
+        writes; all identity, baseline, checkout and containment checks still
+        apply, and protected/test-integrity rules remain Verifier gates.
+        """
+        self._validate(check_external=False)
+        current = _workspace_snapshot(self.workspace)
+        baseline = json.loads(
+            (self.control / "baseline.json").read_text(encoding="utf-8")
+        )
+        changed = tuple(sorted(
+            path for path in set(baseline) | set(current)
+            if baseline.get(path) != current.get(path)
+        ))
+        try:
+            policy = json.loads(self.run.effective_policy or "{}")
+        except (TypeError, json.JSONDecodeError):
+            policy = {}
+        rules = policy.get("allowed_paths") if isinstance(policy, dict) else []
+        rules = [str(item).replace("\\", "/").strip().strip("/") for item in (rules or [])]
+        unauthorized = [
+            path for path in changed
+            if not rules
+            or ("." not in rules and not any(
+                path == rule or path.startswith(rule + "/") or fnmatch.fnmatch(path, rule)
+                for rule in rules if rule
+            ))
+        ]
+        if unauthorized:
+            self._fail("workspace_external_write")
+        authorized = self._authorized()
+        authorized.update(changed)
+        self.control.joinpath("authorized_writes.json").write_text(
+            json.dumps(sorted(authorized)), encoding="utf-8"
+        )
+        return changed

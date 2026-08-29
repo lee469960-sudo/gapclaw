@@ -31,7 +31,7 @@
 | 1.1–1.3 | Direct execution entry | complete | Implemented `开始执行:<objective>` direct entry, empty objective rejection, and Standard/legacy compatibility tests |
 | 2.1–2.5 | Claude Code workspace root readiness | complete | Implemented claude-only single-top-level flattening, Git root verification, flatten-aware base diff/reset, and tests |
 | 3.1–3.4 | Runtime terminal results | complete | Implemented public non-patch terminal states, result/failure mapping, and sealer rejection |
-| 4.1–4.3 | LLM binding guidance and readiness UI | pending | Depends on Phase 3 |
+| 4.1–4.3 | LLM binding guidance and readiness UI | complete | Binding repair actions and split readiness facts are surfaced without generic repository-mount wording |
 | 5.1–5.2 | Host validation output | pending | Depends on Phase 3 |
 | 6.1–6.4 | Acceptance and regression | pending | Final validation |
 
@@ -100,6 +100,30 @@
 
 Phase 1, Phase 2, and Phase 3 implementation verification passed.
 
+### Phase 4: LLM binding guidance and readiness UI
+
+- **Status:** complete
+- Added stable repair guidance for Claude Code LLM binding failures and returned it from Agent create/update responses without changing `llm_id`.
+- Added separate runtime readiness facts for workspace files, Git metadata, repository root, container mount, and model preflight; preserved Skill/MCP evidence and legacy preflight display.
+- Verification:
+  - `pytest apps/api/tests/test_code_agent_control_plane_ui.py::test_claude_code_agent_rejects_llm_group_before_save apps/api/tests/test_code_agent_control_plane_ui.py::test_agent_chat_shows_code_context_verifier_evidence_and_only_reviews_patch_ready apps/api/tests/test_code_agent_results.py -q`
+  - Result: `8 passed, 1 warning`.
+
 ## Next Step
 
-Continue with OpenSpec task 4.1 from `openspec/changes/code-agent-claude-run-readiness-v2/tasks.md`.
+Continue with OpenSpec task 5.1 from `openspec/changes/code-agent-claude-run-readiness-v2/tasks.md`.
+
+### Phase 5: Host validation output
+
+- **Status:** complete
+- Successful, directly adoptable Claude Code results now expose a copyable `host_validate` text block only; no `host-validate.sh` file is created or used as verifier evidence.
+- Verification: `pytest apps/api/tests/test_code_agent_results.py apps/api/tests/test_code_agent_control_plane_ui.py::test_agent_chat_shows_code_context_verifier_evidence_and_only_reviews_patch_ready -q` → `8 passed, 1 warning`.
+
+### Phase 6: Acceptance and regression
+
+- **Status:** complete
+- Mock acceptance coverage includes Claude Code patch-ready flows, verifier retry, Skill-bound repository modification, `target_not_found`, and `needs_user_decision`; terminal states remain outside Sealer adoption.
+- Local `dbt-test` acceptance prerequisite: bind one usable (non-group) LLMResource with API key and model, restart the API, then send `开始执行:<objective>`. Real Claude credentials are an operator prerequisite.
+- Verification:
+  - Focused CodeAgent regression suite: `180 passed, 157 warnings`.
+  - `openspec validate code-agent-claude-run-readiness-v2 --strict` → `Change 'code-agent-claude-run-readiness-v2' is valid`.

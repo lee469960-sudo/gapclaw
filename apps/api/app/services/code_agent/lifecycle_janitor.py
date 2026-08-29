@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -139,6 +140,37 @@ class CodeLifecycleJanitor:
         )
         self.db.commit()
 
+    @staticmethod
+    def _append_profile_event(run, *, phase: str, status: str, reason: str = "") -> None:
+        """Persist a terminal profile event when no live runtime is available."""
+        try:
+            facts = json.loads(getattr(run, "runner_facts", "") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            facts = {}
+        if not isinstance(facts, dict):
+            facts = {}
+        events = facts.get("code_profile_events")
+        if not isinstance(events, list):
+            events = []
+        sequence = len(events)
+        if events and isinstance(events[-1], dict):
+            try:
+                sequence = int(events[-1].get("sequence", sequence - 1)) + 1
+            except (TypeError, ValueError):
+                pass
+        events.append({
+            "version": 1,
+            "profile": "code",
+            "phase": phase,
+            "status": status,
+            "reason": reason,
+            "run_id": run.id,
+            "manifest_version": run.manifest_version,
+            "sequence": sequence,
+        })
+        facts["code_profile_events"] = events[-500:]
+        run.runner_facts = json.dumps(facts, ensure_ascii=False, sort_keys=True)
+
     def cleanup_run(
         self,
         run: CodeAgentRun,
@@ -170,6 +202,12 @@ class CodeLifecycleJanitor:
         if recover_active:
             run.status = "infrastructure_error"
             run.failure_reason = "startup_recovery"
+            self._append_profile_event(
+                run,
+                phase="runtime_result",
+                status="failed",
+                reason="CodeAgent 服务重启，运行已终止",
+            )
         run.execution_eligible = False
         run.cleanup_state = "running"
         if run.container_id or run.runner_network_id:
@@ -196,6 +234,13 @@ class CodeLifecycleJanitor:
         run.cleanup_state = "completed"
         run.cleanup_error = ""
         run.cleanup_next_attempt = ""
+        if recover_active:
+            self._append_profile_event(
+                run,
+                phase="cleanup",
+                status="completed",
+                reason="startup_recovery",
+            )
         self.db.commit()
         return LifecycleCleanupResult(run.id, "completed", run.cleanup_attempts)
 

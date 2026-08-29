@@ -15,6 +15,7 @@ from app.services.code_agent.claude_code_runtime import (
     ClaudeCodeRuntimeInput,
     ClaudeCodePreflightInput,
     claude_code_session_name,
+    claude_code_llm_binding_reason,
     classify_claude_code_failure,
     materialize_claude_code_mcp_config,
     materialize_claude_code_skills,
@@ -24,7 +25,9 @@ from app.services.code_agent.claude_code_runtime import (
     record_claude_code_runtime_result,
     run_claude_code_preflight,
     write_claude_code_transcripts,
+    _runtime_summary,
 )
+from app.services.code_agent.claude_code_runtime import _stream_tool_event
 from app.services.code_agent.failures import external_failure
 from app.services.code_agent.results import TERMINAL_PRESENTATION
 
@@ -166,6 +169,24 @@ def test_claude_code_preflight_default_model_probe_requires_cloud_claude_model()
     assert result.reason == "claude_code_model_unavailable"
 
 
+def test_claude_code_binding_rejects_openai_compatible_minimax_resource():
+    class FakeDb:
+        def get(self, _model, _id):
+            return SimpleNamespace(
+                type="llm", provider="openai", model="MiniMax-M3", api_key_enc="",
+            )
+
+    assert claude_code_llm_binding_reason(FakeDb(), "minimax") == "llm_provider_not_supported"
+
+
+@pytest.mark.parametrize("message", [
+    "Failed to authenticate. API Error: 401 API key is invalid.",
+    '[claude-code:unrecognized_model] {"model":"MiniMax-M3"}',
+])
+def test_claude_code_auth_and_model_errors_are_classified_before_coding_failure(message):
+    assert classify_claude_code_failure(message) == "model_unavailable"
+
+
 def _runtime_input(**overrides):
     base = {
         "run_id": "run1",
@@ -225,9 +246,47 @@ def test_claude_code_runtime_adapter_returns_coding_facts_not_patch_ready():
     assert "patch_ready" not in payload.values()
     assert runner.calls == [(
         "container1",
-        "cd /workspace && claude -p 'Follow the coding SOP in /workspace/.claude/CLAUDE.md. Fix the failing test' --output-format json --model claude-sonnet --max-turns 4 --permission-mode acceptEdits --no-chrome --name code-agent-run-run1 --allowedTools Bash Edit Grep Read",
+        "cd /workspace && claude -p 'Follow the coding SOP in /workspace/.claude/CLAUDE.md. Implement and verify the requested patch, but do not run git commit or git push; those actions require an explicit follow-up user request. This sandbox has no network access. Do not install or download dependencies (pip, npm, yarn, pnpm, apt, curl, wget, or git clone). Use tools already available in the image; if a required tool is missing, report the limitation and stop instead of retrying package versions. Fix the failing test' --output-format json --model claude-sonnet --max-turns 4 --permission-mode acceptEdits --no-chrome --name code-agent-run-run1 --allowedTools Bash Edit Grep Read",
         120,
     )]
+
+
+def test_claude_code_runtime_adapter_streams_tool_events_before_result():
+    class StreamingRunner:
+        def __init__(self):
+            self.calls = []
+
+        def exec(self, container_id, command, *, timeout_seconds, environment=None, on_output=None):
+            self.calls.append(command)
+            lines = [
+                json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [{
+                        "type": "tool_use", "id": "tool-1", "name": "Bash",
+                        "input": {"command": "pytest -q"},
+                    }]},
+                }),
+                json.dumps({
+                    "type": "user",
+                    "message": {"content": [{"type": "tool_result", "tool_use_id": "tool-1"}]},
+                }),
+                json.dumps({"type": "result", "status": "success", "result": "stream done"}),
+            ]
+            output = "\n".join(lines) + "\n"
+            if on_output:
+                on_output(output)
+            return 0, output
+
+    events = []
+    runner = StreamingRunner()
+    result = ClaudeCodeRuntimeAdapter(runner=runner, on_event=events.append).run(_runtime_input())
+
+    assert result.status == "coding_completed"
+    assert result.summary == "stream done"
+    assert [event["type"] for event in events] == ["test_run", "test_run"]
+    assert [event["status"] for event in events] == ["started", "completed"]
+    assert "--output-format stream-json" in runner.calls[0]
+    assert "--verbose" in runner.calls[0]
 
 
 @pytest.mark.parametrize(
@@ -304,6 +363,29 @@ def test_claude_code_runtime_reuses_same_run_session_for_retry_only():
     assert "code-agent-run-run1" not in other_runner.calls[0][1]
 
 
+def test_claude_code_runtime_falls_back_to_fresh_retry_when_resume_session_is_missing():
+    class ResumeMissingRunner:
+        def __init__(self):
+            self.calls = []
+
+        def exec(self, container_id, command, *, timeout_seconds, environment=None):
+            self.calls.append(command)
+            if "--resume" in command:
+                return 1, "Error: --resume requires a valid session ID or session title when used with --print."
+            return 0, '{"summary":"retry fixed"}'
+
+    runner = ResumeMissingRunner()
+    result = ClaudeCodeRuntimeAdapter(runner=runner).run(_runtime_input(
+        retry_attempt=1, verifier_feedback="pytest failed",
+    ))
+
+    assert result.status == "coding_completed"
+    assert len(runner.calls) == 2
+    assert "--resume" in runner.calls[0]
+    assert "--resume" not in runner.calls[1]
+    assert "--name code-agent-run-run1" in runner.calls[1]
+
+
 @pytest.mark.parametrize(
     ("reason", "failure_type"),
     [
@@ -363,6 +445,40 @@ def test_claude_code_runtime_events_normalize_to_stable_profile_payloads(event_t
     assert payload["status"] == "completed"
     assert payload["run_id"] == "run1"
     assert secret not in json.dumps(payload, sort_keys=True)
+
+
+def test_claude_code_edit_event_captures_utf8_redacted_code_context():
+    secret = "sk-" + "q" * 20
+    event = _stream_tool_event({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "id": "tool1",
+                "name": "Edit",
+                "input": {
+                    "file_path": "gamestat/dbt_project.yml",
+                    "old_string": "pg_host: 192.168.1.25",
+                    "new_string": f"pg_host: 192.168.0.105  # 中文\npassword={secret}",
+                },
+            }],
+        },
+    })
+
+    assert event is not None
+    assert event["type"] == "file_changed"
+    assert "修改前" in event["snippet"]
+    assert "中文" in event["snippet"]
+    assert secret not in event["snippet"]
+
+
+def test_stream_json_system_init_is_not_used_as_user_facing_summary():
+    output = "\n".join([
+        json.dumps({"type": "system", "subtype": "init", "cwd": "/workspace", "tools": ["Read"]}),
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "已完成代码检查"}]}}),
+    ])
+
+    assert _runtime_summary(0, output) == "已完成代码检查"
 
 
 def test_claude_code_transcript_redaction_keeps_user_visible_copy_safe(tmp_path):
@@ -427,6 +543,7 @@ def test_materializes_only_frozen_authorized_skills_and_records_visible_facts(
     from app.database import Base
     from app.models import CodeAgentRun, Skill
     from app.services import skill_runtime
+    from app.services import skill_runtime
 
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -467,6 +584,28 @@ def test_materializes_only_frozen_authorized_skills_and_records_visible_facts(
     assert facts["skills"][0]["version"] == "v1"
     assert len(facts["skills"][0]["content_hash"]) == 64
     assert "Use this skill" not in run.runner_facts
+
+
+def test_materialize_claude_code_skills_rewrites_legacy_workplace_path(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database import Base
+    from app.models import CodeAgentRun, Skill
+    from app.services import skill_runtime
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    skill = Skill(id="skill-a", name="dbt-clickhouse-gamestat")
+    db.add(skill)
+    run = CodeAgentRun(id="run1", agent_id="agent1", project_id="project1", manifest_id="manifest1", manifest_version=1, task_contract=json.dumps({"allowed_skills": ["skill-a"]}), runner_facts="{}")
+    db.add(run)
+    db.commit()
+    monkeypatch.setattr(skill_runtime, "read_md", lambda _skill: "Search /workplace for profiles.yml")
+    materialize_claude_code_skills(db, run, str(tmp_path))
+    text = (tmp_path / ".claude/skills/dbt-clickhouse-gamestat/SKILL.md").read_text()
+    assert "/workspace" in text
+    assert "/workplace" not in text
 
 
 def test_materializes_authorized_skill_resources_but_not_unbound_or_symlinks(

@@ -91,6 +91,12 @@ def test_startup_recovery_revokes_crashed_run_and_is_idempotent(tmp_path):
     assert run.cleanup_state == "completed"
     assert run.container_id == ""
     assert run.workspace_state == "retained_read_only"
+    events = json.loads(run.runner_facts).get("code_profile_events", [])
+    assert events[-2]["phase"] == "runtime_result"
+    assert events[-2]["status"] == "failed"
+    assert events[-2]["reason"] == "CodeAgent 服务重启，运行已终止"
+    assert events[-1]["phase"] == "cleanup"
+    assert events[-1]["status"] == "completed"
     assert workspace.exists()
     assert workspace.stat().st_mode & 0o222 == 0
     assert (other_root / "keep.txt").read_text(encoding="utf-8") == "keep\n"

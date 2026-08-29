@@ -52,6 +52,7 @@ build_arch() {
   docker build --pull=false --platform "${platform}" \
     --build-arg PYTHON_IMAGE="${PYTHON_IMAGE}" \
     --build-arg PIP_INDEX="${PIP_INDEX:-https://mirrors.aliyun.com/pypi/simple/}" \
+    --build-arg GAP_VERSION="${GAP_VERSION}" \
     -t "gap-api-${arch}:${GAP_VERSION}" \
     -f "${ROOT}/apps/api/Dockerfile" \
     "${ROOT}" || return 1

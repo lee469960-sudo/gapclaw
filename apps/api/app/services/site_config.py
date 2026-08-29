@@ -3,6 +3,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models import SiteConfig
+from app.version import app_version, format_footer
 
 DEFAULT_SITE_NAME = "GAP — 智能工作台"
 
@@ -32,10 +33,14 @@ def _resolve_site_logo(raw: str) -> str:
 
 def get_site_config(db: Session) -> dict:
     configs = {c.key: c.value for c in db.query(SiteConfig).all()}
+    version = app_version()
+    footer = configs.get("footer") or ""
     return {
         "site_name": configs.get("site_name") or DEFAULT_SITE_NAME,
         "site_logo": _resolve_site_logo(configs.get("site_logo") or ""),
-        "footer": configs.get("footer") or "",
+        "footer": footer,
+        "footer_display": format_footer(footer, version),
+        "version": version,
         "feature_flags": configs.get("feature_flags") or "{}",
     }
 

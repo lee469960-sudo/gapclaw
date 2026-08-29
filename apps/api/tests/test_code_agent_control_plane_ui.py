@@ -42,7 +42,7 @@ from app.routers.code_project import (
     code_project_post,
 )
 from app.routers.agent import AgentBody, agent_get, agent_post
-from app.routers.agent_chat import ChatBody, chat_post
+from app.routers.agent_chat import ChatBody, chat_get, chat_post
 from app.routers.system_role import BUILTIN_ROLES
 from app.security import encrypt_secret
 import app.services.code_agent.control_plane as control_plane
@@ -51,6 +51,7 @@ from app.services.code_agent.control_plane import (
     create_code_run,
     project_availability,
 )
+from app.services.code_agent.results import serialize_code_result
 from app.services.code_agent.secret_store import DeployTokenSecretStore
 
 
@@ -1096,7 +1097,346 @@ def test_agent_chat_renders_code_profile_events_as_visible_steps():
     assert "data.type === 'profile'" in component
     assert "profileEventToStep" in component
     assert "CodeAgent 运行阶段" in component
+    assert "runtime_result: 'Claude Code Runtime 结果'" in component
+    assert "codeRuntimeHistorySteps" not in component
+    assert "class=\"exec-card\"" in component
     assert "startsWith('code_')" in component
+
+
+def test_existing_llm_ui_exposes_anthropic_claude_configuration_for_codeagent():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "Llms.vue").read_text(encoding="utf-8")
+    assert "applyAnthropicPreset" in component
+    assert "form.provider = 'anthropic'" in component
+    assert "form.base_url = 'https://api.anthropic.com'" in component
+    assert "Claude Code 使用 Anthropic API" in component
+
+
+def test_agent_chat_exposes_run_bound_code_workspace_metadata():
+    router = (Path(__file__).resolve().parents[1] / "app" / "routers" / "agent_chat.py").read_text(encoding="utf-8")
+    assert 'action == "get_code_workspace"' in router
+    assert 'workspace_not_prepared' in router
+    assert 'workspace_expired' in router
+    assert 'workspace_mount_invalid' in router
+    assert 'workspace_path' in router
+    assert '"/workplace"' not in router[router.index('action == "get_code_workspace"'):router.index('if action in {"review_code_artifact"')]
+
+
+def test_agent_chat_exposes_redacted_code_runtime_events():
+    router = (Path(__file__).resolve().parents[1] / "app" / "routers" / "agent_chat.py").read_text(encoding="utf-8")
+    assert 'action == "get_code_events"' in router
+    assert "claude_code_runtime_history" in router
+    assert "has_more" in router
+    assert "redact_code_output" in router
+    assert "next_since" in router
+    assert "since: int = Query(0)" in router
+
+
+def test_agent_chat_uses_code_workspace_panel_only_for_code_profile():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    assert "CodeWorkspacePanel" in component
+    assert 'agent?.profile === "code"' in component or "agent?.profile === 'code'" in component
+    assert '<CodeWorkspacePanel' in component
+    assert 'v-if="agent?.profile === \'code\'"' in component
+    assert ':agent-id="agentId"' in component
+    assert "code-run-id=\"activeCodeRunId\"" in component
+    assert 'ref="codeWpRef"' in component
+    assert "function reloadWorkspacePanels()" in component
+    assert "WorkplacePanel v-else" in component
+
+
+def test_agent_chat_keeps_last_workspace_when_clarification_has_no_new_run():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    assert "async function hydrateActiveCodeRun()" in component
+    assert "const nextCodeRunId = String(submitted.data?.code_run_id || '').trim()" in component
+    assert "if (nextCodeRunId)" in component
+    assert "await hydrateActiveCodeRun()" in component
+    assert "activeCodeRunId.value = ''" in component
+    assert 'class="workspace-panel-empty">等待 CodeAgent Run</div>' in (
+        Path(__file__).resolve().parents[2] / "web" / "src" / "components" / "CodeWorkspacePanel.vue"
+    ).read_text(encoding="utf-8")
+
+
+def test_code_workspace_panel_sends_agent_id_with_every_run_bound_request():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "components" / "CodeWorkspacePanel.vue").read_text(encoding="utf-8")
+    assert "agentId: { type: String, default: '' }" in component
+    assert "agent_id: props.agentId" in component
+    assert "agent_id: props.agentId, code_run_id: props.codeRunId" in component
+
+
+def test_code_workspace_panel_renders_distinct_preview_states():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "components" / "CodeWorkspacePanel.vue").read_text(encoding="utf-8")
+    assert "Workspace 文件树为空" in component
+    assert "Workspace 已过期或已清理" in component
+    assert "Workspace 挂载无效" in component
+    assert "Workspace 正在准备，等待仓库挂载" in component
+    assert "workspace_unsupported" in component
+    assert "请升级服务端或查看对话结果" in component
+    assert "meta.msg || meta.data?.state" not in component
+    assert "git_metadata_missing" in component
+    assert "Git metadata unavailable" in component
+    assert "Git {{ git.branch" in component
+    assert "workspaceErrorLabel" in component
+    assert "visibleEntries" in component
+    assert "toggleDirectory" in component
+    assert "workspace-entry-changed" in component
+    assert "已修改" in component
+
+
+def test_retained_workspace_without_git_keeps_file_preview_and_reports_git_metadata_separately(tmp_path):
+    db = _db()
+    project = _project(db)
+    db.add(Agent(id="code-retained", name="Code", profile="code", code_project_id=project.id))
+    workspace = tmp_path / "run" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "model.sql").write_text("select 1\n", encoding="utf-8")
+    run = CodeAgentRun(
+        id="run-retained", agent_id="code-retained", session_id="session-retained",
+        project_id=project.id, manifest_id="manifest-retained", manifest_version=1,
+        workspace_path=str(workspace), workspace_state="retained_read_only",
+    )
+    db.add(run)
+    db.commit()
+    user = _user()
+    common = dict(
+        request=SimpleNamespace(headers={}), agent_id="code-retained", session_id="session-retained",
+        path="", code_run_id="run-retained", artifact_id=None, artifact_kind=None,
+        message_id=None, limit=50, since=0, user=user, db=db,
+    )
+
+    tree = asyncio.run(chat_get(action="list_code_workspace", **common))
+    git = asyncio.run(chat_get(action="get_code_workspace_git", **common))
+
+    assert tree["data"]["entries"][0]["path"] == "model.sql"
+    assert git["data"] == {
+        "available": False, "reason": "git_metadata_missing", "branch": "",
+        "changed_files": [], "clean": None,
+    }
+
+
+def test_legacy_agent_chat_workspace_flow_remains_the_standard_agent_fallback():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    router = (Path(__file__).resolve().parents[1] / "app" / "routers" / "agent_chat.py").read_text(encoding="utf-8")
+    assert "WorkplacePanel v-else" in component
+    assert "agentSandboxId" in component
+    assert 'action == "list_workplace"' in router
+
+
+def test_agent_chat_rehydrates_and_deduplicates_code_runtime_events():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    assert "seenCodeEventKeys" in component
+    assert "loadCodeEvents" in component
+    assert "get_code_events" in component
+    assert "applyCodeRuntimeEvent" in component
+    assert "findOpenCodeStepIndex" in component
+    assert "op: openIndex == null ? 'append' : 'patch'" in component
+    assert "applyCodeRuntimeEvent(event)" in component
+    assert "historyOnly: true" not in component
+    assert "profile.phase === 'runtime_started' && rawStatus === 'started'" in component
+
+
+def test_agent_chat_auto_reopens_latest_code_execution_after_refresh():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    assert "async function hydrateLatestCodeHistory()" in component
+    assert "hydrateLatestCodeHistory().catch(() => {})" in component
+    assert "execOpen.value = { ...execOpen.value, [latest.execKey]: true }" in component
+    assert "await ensureHistorySteps(latest.execKey)" in component
+
+
+def test_claude_code_runtime_emits_terminal_done_event_after_cleanup():
+    runtime = (Path(__file__).resolve().parents[1] / "app" / "services" / "agent_runtime" / "runtime.py").read_text(encoding="utf-8")
+    assert "publish_code_done = bool(run and code_run_uses_claude_code(run))" in runtime
+    assert '"type": "done"' in runtime[runtime.index("publish_code_done = bool"):]
+    assert "_code_profile_steps_for_message(run)" in runtime
+
+
+def test_agent_chat_renders_code_result_in_chat_markdown_without_standalone_card():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    assert "renderMessage(item.m)" in component
+    assert "code-result-banner" not in component
+    assert "codeRunResult" not in component
+    assert "codeArtifactReview" not in component
+
+
+def test_agent_chat_shows_code_stage_detail_inline():
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    assert "stepInlineDetail(step)" in component
+    assert "step-inline-detail" in component
+    assert "Claude Code Runtime 结果" in component
+
+
+def test_code_workspace_and_events_endpoints_require_run_bound_reviewer():
+    router = (Path(__file__).resolve().parents[1] / "app" / "routers" / "agent_chat.py").read_text(encoding="utf-8")
+    for action in ("get_code_workspace", "get_code_events", "list_code_workspace", "read_code_workspace_file", "get_code_workspace_git"):
+        start = router.index(f'action == "{action}"') if action in {"get_code_workspace", "get_code_events"} else router.index(f'"{action}"')
+        assert "CodeAgentRun" in router[start:start + 1000]
+        assert "require_project_reviewer" in router[start:start + 1400]
+    assert "Path(run.workspace_path).resolve(strict=True)" in router
+
+
+def test_concurrent_standard_and_code_sessions_keep_workspace_and_event_streams_isolated(tmp_path):
+    db = _db()
+    project = _project(db)
+    db.add_all([
+        Agent(id="code-concurrent", name="Code", profile="code", code_project_id=project.id),
+        Agent(id="standard-concurrent", name="Standard", profile="standard"),
+    ])
+    workspace_a = tmp_path / "run-a" / "workspace"
+    workspace_b = tmp_path / "run-b" / "workspace"
+    for workspace, filename, content in (
+        (workspace_a, "a.sql", "select 'a'\n"),
+        (workspace_b, "b.sql", "select 'b'\n"),
+    ):
+        (workspace / ".git").mkdir(parents=True)
+        (workspace / filename).write_text(content, encoding="utf-8")
+    db.add_all([
+        CodeAgentRun(
+            id="run-a", agent_id="code-concurrent", session_id="code-session-a",
+            project_id=project.id, manifest_id="manifest-a", manifest_version=1,
+            workspace_path=str(workspace_a), workspace_state="prepared",
+            runner_facts=json.dumps({"claude_code_runtime_history": [{"phase": "read", "summary": "a"}]}),
+        ),
+        CodeAgentRun(
+            id="run-b", agent_id="code-concurrent", session_id="code-session-b",
+            project_id=project.id, manifest_id="manifest-b", manifest_version=1,
+            workspace_path=str(workspace_b), workspace_state="prepared",
+            runner_facts=json.dumps({"claude_code_runtime_history": [{"phase": "test", "summary": "b"}]}),
+        ),
+    ])
+    db.commit()
+    user = _user()
+
+    events_a = asyncio.run(chat_get(
+        None, action="get_code_events", agent_id="code-concurrent", code_run_id="run-a",
+        limit=50, since=0, user=user, db=db,
+    ))
+    events_b = asyncio.run(chat_get(
+        None, action="get_code_events", agent_id="code-concurrent", code_run_id="run-b",
+        limit=50, since=0, user=user, db=db,
+    ))
+    tree_a = asyncio.run(chat_get(
+        None, action="list_code_workspace", agent_id="code-concurrent", code_run_id="run-a",
+        path="", limit=500, user=user, db=db,
+    ))
+    tree_b = asyncio.run(chat_get(
+        None, action="list_code_workspace", agent_id="code-concurrent", code_run_id="run-b",
+        path="", limit=500, user=user, db=db,
+    ))
+
+    assert events_a["data"]["run_id"] == "run-a"
+    assert [event["summary"] for event in events_a["data"]["events"]] == ["a"]
+    assert events_b["data"]["run_id"] == "run-b"
+    assert [event["summary"] for event in events_b["data"]["events"]] == ["b"]
+    assert {entry["path"] for entry in tree_a["data"]["entries"]} == {"a.sql"}
+    assert {entry["path"] for entry in tree_b["data"]["entries"]} == {"b.sql"}
+
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    assert '<CodeWorkspacePanel' in component
+    assert 'v-if="agent?.profile === \'code\'"' in component
+    assert "WorkplacePanel v-else" in component
+    assert "if (agent.value?.profile !== 'code' || !activeCodeRunId.value) return" in component
+
+
+def test_code_agent_workspace_conversation_mock_acceptance_covers_preview_progress_and_terminal_results(tmp_path):
+    db = _db()
+    project = _project(db)
+    db.add(Agent(id="code-acceptance", name="Code", profile="code", code_project_id=project.id))
+    workspace = tmp_path / "run" / "workspace"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(workspace), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.name", "Acceptance"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "user.email", "acceptance@example.test"], check=True)
+    (workspace / "models").mkdir()
+    (workspace / "models" / "model.sql").write_text("select 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace), "add", "models/model.sql"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "base"], check=True)
+    run = CodeAgentRun(
+        id="run-acceptance", agent_id="code-acceptance", session_id="session-acceptance",
+        project_id=project.id, manifest_id="manifest-acceptance", manifest_version=1,
+        repository="http://git.example.test/repo.git", base_commit="a" * 40,
+        resolved_commit="b" * 40, workspace_path=str(workspace), workspace_state="prepared",
+        runner_facts=json.dumps({"claude_code_runtime_history": [
+            {"phase": "workspace", "status": "completed", "summary": "Workspace ready"},
+            {"phase": "test", "status": "completed", "summary": "Tests passed"},
+        ]}),
+        status="patch_ready", verifier_report=json.dumps({"passed": True}),
+    )
+    db.add(run)
+    db.commit()
+    user = _user()
+    common = dict(
+        request=SimpleNamespace(headers={}), agent_id="code-acceptance",
+        session_id="session-acceptance", path="", code_run_id="run-acceptance",
+        artifact_id=None, artifact_kind=None, message_id=None, limit=50, since=0,
+        user=user, db=db,
+    )
+
+    metadata = asyncio.run(chat_get(action="get_code_workspace", **common))
+    tree = asyncio.run(chat_get(action="list_code_workspace", **common))
+    progress = asyncio.run(chat_get(action="get_code_events", **common))
+    git = asyncio.run(chat_get(action="get_code_workspace_git", **common))
+    ready = serialize_code_result(run, SimpleNamespace(
+        id="artifact-acceptance", status="sealed", base_commit="a" * 40,
+        diff_hash="c" * 64, policy_hash="d" * 64, verifier_report_hash="e" * 64,
+        image="internal/code", image_id="sha256:image",
+    ))
+    blocked_run = SimpleNamespace(
+        id="run-acceptance", project_id=project.id, status="target_not_found",
+        failure_reason="target_not_found", manifest_id="manifest-acceptance",
+        manifest_version=1, verifier_report=json.dumps({"passed": False}),
+        budget_usage="{}", task_contract="{}", effective_policy="{}", runner_facts="{}",
+    )
+    blocked = serialize_code_result(blocked_run)
+
+    assert metadata["data"]["state"] == "ready"
+    assert metadata["data"]["repository"].endswith("repo.git")
+    assert {entry["path"] for entry in tree["data"]["entries"]} == {"models"}
+    assert [event["phase"] for event in progress["data"]["events"]] == ["workspace", "test"]
+    assert git["data"]["clean"] is True
+    assert ready["status"] == "patch_ready" and ready["directly_adoptable"] is True
+    assert blocked["status"] == "target_not_found" and blocked["directly_adoptable"] is False
+
+
+def test_sealed_run_without_retained_workspace_reports_expired_not_mount_invalid(tmp_path):
+    db = _db()
+    project = _project(db)
+    db.add(Agent(id="code-sealed-missing", name="Code", profile="code", code_project_id=project.id))
+    run = CodeAgentRun(
+        id="run-sealed-missing", agent_id="code-sealed-missing", session_id="session-sealed-missing",
+        project_id=project.id, manifest_id="manifest-sealed-missing", manifest_version=1,
+        workspace_path=str(tmp_path / "gone" / "workspace"), workspace_state="sealed", status="patch_ready",
+    )
+    db.add(run)
+    db.commit()
+
+    result = asyncio.run(chat_get(
+        action="get_code_workspace", request=SimpleNamespace(headers={}),
+        agent_id="code-sealed-missing", session_id="session-sealed-missing",
+        path="", code_run_id=run.id, artifact_id=None, artifact_kind=None,
+        message_id=None, limit=50, since=0, user=_user(), db=db,
+    ))
+
+    assert result["data"]["state"] == "workspace_expired"
+
+
+def test_code_agent_workspace_usage_documentation_defines_run_flow_and_root_boundaries():
+    documentation = (Path(__file__).resolve().parents[3] / "docs" / "code-agent-workspace.md").read_text(encoding="utf-8")
+    for phrase in (
+        "profile=code",
+        "code_run_id",
+        "/workspace",
+        "/workplace",
+        "Verifier",
+        "Sealed Artifact",
+        "target_not_found",
+        "不会回退到通用 `/workplace`",
+    ):
+        assert phrase in documentation
+
+
+def test_code_result_exposes_terminal_result_card():
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "code_agent" / "results.py").read_text(encoding="utf-8")
+    assert '"result_card"' in source
+    assert '"directly_adoptable": directly_adoptable' in source
 
 
 def test_agent_refs_list_and_detail_expose_only_authorized_project_readiness(monkeypatch):
@@ -1238,6 +1578,8 @@ def test_claude_code_agent_rejects_llm_group_before_save(monkeypatch):
 
     assert response["code"] != 0
     assert response["msg"] == "llm_group_not_supported"
+    assert response["data"]["reason"] == "llm_group_not_supported"
+    assert response["data"]["repair_action"] == "select_single_llm_resource"
     assert db.query(Agent).filter(Agent.name == "Code").first() is None
 
 
@@ -1305,7 +1647,7 @@ def test_agent_cards_and_editor_show_code_project_manifest_status_and_repair_lin
     assert "form.code_project_availability" in component
 
 
-def test_agent_chat_shows_code_context_verifier_evidence_and_only_reviews_patch_ready():
+def test_agent_chat_shows_code_context_and_moves_result_evidence_into_markdown():
     component = (
         Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue"
     ).read_text(encoding="utf-8")
@@ -1313,17 +1655,11 @@ def test_agent_chat_shows_code_context_verifier_evidence_and_only_reviews_patch_
     assert "agent.code_project_name || '项目不可访问'" in component
     assert "agent.code_project_availability?.ready" in component
     assert "管理 Code Projects" in component
-    assert "codeRunResult.manifest_version" in component
-    assert "codeRuntimeLabel(codeRunResult.runtime?.coding_runtime)" in component
-    assert "Claude Code Runtime 证据" in component
-    assert "codeRunResult.runtime?.preflight?.passed" in component
-    assert "codeRunResult.runtime?.skills?.length" in component
-    assert "codeRunResult.runtime?.mcp_servers?.length" in component
-    assert "codeRunResult.verifier_report" in component
-    assert "Verifier 证据" in component
-    assert "codeRunResult.failure.reason" in component
-    assert "codeRunResult.failure.stage" in component
-    assert "codeRunResult.failure.detail" in component
+    assert "renderMessage(item.m)" in component
+    assert "code-result-banner" not in component
+    assert "codeRunResult" not in component
+    assert "codeArtifactReview" not in component
+    assert "仓库未挂载" not in component
     assert "raw_output" not in component
     assert "runtime_started: '启动 Claude Code Runtime'" in component
     assert "skill_loaded: '加载 Claude Code Skill'" in component
@@ -1334,8 +1670,6 @@ def test_agent_chat_shows_code_context_verifier_evidence_and_only_reviews_patch_
     assert "verifier_failed_retrying: 'Verifier 失败，继续 Claude Code 修复'" in component
     assert "verifier_passed: 'Verifier 已通过'" in component
     assert "artifact_sealed: '封存工件已生成'" in component
-    assert 'v-if="codeRunResult.directly_adoptable && codeRunResult.artifact"' in component
-    assert "!artifactId || !codeRunResult.value?.directly_adoptable" in component
     assert "请先管理 Code Project" in component
 
 
