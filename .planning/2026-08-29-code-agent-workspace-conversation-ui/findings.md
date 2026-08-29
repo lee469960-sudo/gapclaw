@@ -60,3 +60,7 @@
 - 实际出现的长 JSON 是 Claude `stream-json` 的 `system/init` 协议事件；当没有可识别的最终 result 时，旧 `_runtime_summary` 将原始 JSON 当作摘要。现过滤 system/stream/user 协议记录，仅保留 assistant 文本或显式 result/error，并在历史 Code profile steps 中保留 snippet/output。
 - 为兼容已持久化的旧消息，前端 `extractFinalDisplayContent` 额外过滤完整的 `system/init` JSON 行；普通 JSON 和代码块不受影响。
 - 旧摘要可能已被 1000 字限制截断、不是合法 JSON；前端兼容按 `type=system/subtype=init` 前缀识别并过滤这类残片。
+- CodeAgent Claude 路由原先把无前缀消息送入 grill，只有“开始执行:”或“开始实现”才创建 Run；现改为所有 Claude CodeAgent 消息直接创建 Code Run，前缀仅保留为兼容别名。
+- 左侧 Code Workspace 预览原先用纯文本 `<pre>` 展示文件；现改为复用 Markdown 预览管线渲染文件内容，同时保留原文代码块和安全转义。
+- 左侧预览的代码复制按钮由 Markdown 工具栏生成，但原组件没有事件委托；现接入点击处理并增加 Clipboard API 失败时的 `execCommand` 回退。
+- 刷新后执行过程退化成「CodeAgent 运行阶段 · started/completed」：`_code_profile_steps_for_message` 用通用标题，且 `_slim_steps_for_meta` / `get_message_steps` 丢掉 snippet；历史卡片读的是这份精简数据，而不是实时用的 `get_code_events`。已改为刷新时按 profile 事件回放，并让新消息落库保留阶段标题与 snippet。

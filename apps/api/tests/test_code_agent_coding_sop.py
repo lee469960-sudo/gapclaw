@@ -269,7 +269,7 @@ def _claude_project(db, monkeypatch, *, enabled=True):
     monkeypatch.setattr(control_plane, "get_settings", lambda: ReadySettings())
 
 
-def test_claude_code_first_message_does_not_create_run(monkeypatch):
+def test_claude_code_first_message_creates_run_without_prefix(monkeypatch):
     db = _db()
     _claude_project(db, monkeypatch, enabled=True)
     tasks = BackgroundTasks()
@@ -281,9 +281,11 @@ def test_claude_code_first_message_does_not_create_run(monkeypatch):
         db=db,
     ))
     assert response["code"] == 0
-    assert response["data"]["status"] == "grilling"
-    assert db.query(CodeAgentRun).count() == 0
+    assert response["data"]["status"] == "pending"
+    assert db.query(CodeAgentRun).count() == 1
     assert tasks.tasks[0].func.__name__ == "_enqueue_code_chat"
+    run = db.get(CodeAgentRun, response["data"]["code_run_id"])
+    assert json.loads(run.task_contract)["objective"] == "把 IP 改了"
 
 
 def test_claude_code_direct_execute_creates_run_without_confirmation(monkeypatch):
@@ -325,22 +327,14 @@ def test_claude_code_direct_execute_rejects_empty_objective(monkeypatch):
     ))
 
     assert response["code"] == 1
-    assert response["msg"] == "缺少任务目标，请使用「开始执行:<objective>」"
+    assert response["msg"] == "缺少任务目标"
     assert db.query(CodeAgentRun).count() == 0
     assert tasks.tasks == []
 
 
-def test_claude_code_confirmation_creates_run_from_grill_history(monkeypatch):
+def test_claude_code_confirmation_text_is_treated_as_normal_objective(monkeypatch):
     db = _db()
     _claude_project(db, monkeypatch, enabled=True)
-    db.add(ChatMessage(
-        agent_id="agent1",
-        session_id="s1",
-        role="user",
-        content="把 profiles 的 host 改成 127.0.0.100",
-        created_at="t1",
-    ))
-    db.commit()
     response = asyncio.run(chat_post(
         ChatBody(action="submit_chat", agent_id="agent1", session_id="s1", message="开始实现"),
         BackgroundTasks(),
@@ -352,7 +346,7 @@ def test_claude_code_confirmation_creates_run_from_grill_history(monkeypatch):
     assert response["data"]["status"] == "pending"
     run = db.get(CodeAgentRun, response["data"]["code_run_id"])
     contract = json.loads(run.task_contract)
-    assert "127.0.0.100" in contract["objective"]
+    assert contract["objective"] == "开始实现"
     assert contract["coding_runtime"] == "claude_code"
 
 

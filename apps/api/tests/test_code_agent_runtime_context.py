@@ -1297,3 +1297,27 @@ def test_startup_cleanup_failure_is_persisted_and_not_silent(tmp_path):
     run = db.get(CodeAgentRun, "run1")
     assert run.status == "infrastructure_error"
     assert run.failure_reason == "cleanup_failed"
+
+
+def test_code_profile_steps_keep_phase_labels_and_snippets():
+    from types import SimpleNamespace
+
+    from app.services.agent_runtime.runtime import _code_profile_steps_for_message
+
+    run = SimpleNamespace(runner_facts=json.dumps({
+        "code_profile_events": [
+            {"profile": "code", "phase": "prepare", "status": "started"},
+            {"profile": "code", "phase": "tool_call", "status": "completed", "command": "ls models", "snippet": "models/a.sql"},
+            {"profile": "code", "phase": "tool_call", "status": "completed", "command": "cat models/a.sql", "snippet": "select 1"},
+        ]
+    }))
+    steps = _code_profile_steps_for_message(run)
+    titles = [item["title"] for item in steps]
+    assert titles[0].startswith("准备运行环境")
+    assert all(not title.startswith("CodeAgent 运行阶段") for title in titles)
+    assert [item["title"] for item in steps if item["action"] == "code_tool_call"] == [
+        "Claude Code 工具调用 · completed",
+        "Claude Code 工具调用 · completed",
+    ]
+    assert steps[-1]["content"] == "cat models/a.sql"
+    assert steps[-1]["snippet"] == "select 1"

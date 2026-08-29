@@ -160,6 +160,16 @@
 - 修复 Claude `stream-json` 的 `system/init` 原始 JSON 泄漏到用户消息：摘要解析过滤协议事件，历史执行步骤保留阶段片段且继续脱敏/限长。验证：Claude Runtime、结果与控制面 **123 passed**，compileall、`git diff --check` 和前端构建均通过。
 - 增加历史消息兼容过滤：前端隐藏已落库的 Claude `system/init` 协议 JSON，避免旧消息继续显示原始初始化对象。前端构建成功。
 - 兼容被旧摘要长度限制截断的 `system/init` JSON 残片；前端构建成功。
+- CodeAgent 对话现在默认直接使用 Claude Code 引擎创建 Run，不再要求输入“开始执行:”；旧前缀仍可选兼容。左侧 Workspace 文件预览改为 Markdown 美化显示。验证：相关后端回归 **139 passed**，compileall、`git diff --check` 和前端构建均通过。
+- 修复左侧 Markdown 预览代码块复制按钮：添加事件委托、剪贴板权限失败回退和成功/失败提示。前端构建成功。
+- 新建并验证 OpenSpec change `code-agent-workspace-markdown-direct-runtime`：proposal/specs/design/tasks 完整，8/8 tasks 已完成；`openspec validate --strict` 通过。基于实现、回归测试和构建结果完成 verify，未发现阻断性问题。
+- 已将 `code-agent-workspace-markdown-direct-runtime` 的 delta specs 同步至主规格并完成严格校验，随后归档至 `openspec/changes/archive/2026-08-30-code-agent-workspace-markdown-direct-runtime/`。
+- 已创建 OpenSpec change `code-agent-claude-run-v2`，完成 proposal、6 份 spec delta、design 与 tasks；严格校验通过，尚未执行 implementation。
+
+### Post-archive refresh execution-history fix
+
+- 刷新后「执行过程」只显示 `CodeAgent 运行阶段 · started/completed`：历史卡片读的是落库精简 steps（通用标题且丢掉 snippet）。现改为优先用 `get_code_events` 按与实时相同的阶段标签回放；新消息落库也使用阶段标题并保留 code snippet。
+- Verification: 新增步骤标题测试与刷新回放断言通过；`test_code_agent_control_plane_ui.py` 相关用例 **60 passed**。4 个失败是沙箱内 `git init` 无权限，与本次改动无关。
 
 ## OpenSpec Task Status
 

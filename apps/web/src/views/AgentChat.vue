@@ -70,7 +70,7 @@
           <div
             v-for="item in displayMessages"
             :key="item.key"
-            v-memo="[item.key, item.m.content, item.stepCount, isExecOpen(item.execKey), item.stepsLoading, item.steps.length]"
+            v-memo="[item.key, item.m.content, item.stepCount, isExecOpen(item.execKey), item.stepsLoading, item.steps.length, item.steps[0]?.title, item.steps[item.steps.length - 1]?.title]"
             :class="['msg-row', item.m.role === 'user' ? 'user-row' : 'assistant-row']"
           >
             <div v-if="item.m.role !== 'user'" class="agent-avatar">
@@ -1019,6 +1019,50 @@ async function loadHistory({ preserveHydrationFrom = null } = {}) {
   }
 }
 
+function stepsFromCodeEvents(events) {
+  const steps = []
+  const openByAction = {}
+  const seen = new Set()
+  for (const event of events || []) {
+    const profile = event?.profile && event.profile.profile ? event.profile : event
+    const key = profile.sequence != null
+      ? `seq:${profile.sequence}`
+      : `${profile.phase || ''}:${profile.status || ''}:${profile.summary || profile.reason || ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const step = profileEventToStep({ profile })
+    if (!step) continue
+    const openIndex = openByAction[step.action]
+    if (openIndex != null && steps[openIndex]?.status !== 'done' && steps[openIndex]?.status !== 'error') {
+      steps[openIndex] = { ...steps[openIndex], ...step }
+    } else {
+      openByAction[step.action] = steps.length
+      steps.push(step)
+    }
+  }
+  return collapseLlmSteps(steps.filter((s) => !isHiddenStep(s)))
+}
+
+async function fetchCodeEventSteps() {
+  if (agent.value?.profile !== 'code' || !activeCodeRunId.value) return []
+  const events = []
+  let since = 0
+  for (let page = 0; page < 5; page += 1) {
+    const res = await getCgi('/pages/page_agent_chat.cgi', {
+      action: 'get_code_events',
+      agent_id: agentId,
+      code_run_id: activeCodeRunId.value,
+      since,
+      limit: 200,
+    })
+    const batch = res.data?.events || []
+    events.push(...batch)
+    if (!res.data?.has_more || !batch.length) break
+    since = Number(res.data.next_since) || events.length
+  }
+  return stepsFromCodeEvents(events)
+}
+
 async function hydrateLatestCodeHistory() {
   await nextTick()
   const latest = [...displayMessages.value].reverse().find(
@@ -1026,6 +1070,24 @@ async function hydrateLatestCodeHistory() {
   )
   if (!latest) return
   execOpen.value = { ...execOpen.value, [latest.execKey]: true }
+  if (!activeCodeRunId.value) await hydrateActiveCodeRun()
+  try {
+    const eventSteps = await fetchCodeEventSteps()
+    if (eventSteps.length) {
+      hydratedSteps.value = {
+        ...hydratedSteps.value,
+        [latest.execKey]: {
+          steps: eventSteps,
+          older: 0,
+          step_count: Math.max(eventSteps.length, latest.stepCount, 1),
+          loading: false,
+        },
+      }
+      return
+    }
+  } catch {
+    // Fall back to persisted message steps when the event endpoint is unavailable.
+  }
   await ensureHistorySteps(latest.execKey)
 }
 

@@ -162,6 +162,26 @@ def _persist_code_profile_event(db, run_id: str, payload: dict) -> None:
         logger.exception("code profile event persistence failed run=%s", run_id)
 
 
+_CODE_PHASE_LABELS = {
+    "prepare": "准备运行环境",
+    "verify_baseline": "捕获验证基线",
+    "runtime_started": "启动 Claude Code Runtime",
+    "runtime_result": "Claude Code Runtime 结果",
+    "skill_loaded": "加载 Claude Code Skill",
+    "mcp_loaded": "加载 Claude Code MCP",
+    "tool_call": "Claude Code 工具调用",
+    "file_changed": "Claude Code 文件变化",
+    "test_run": "Claude Code 测试执行",
+    "verifier_failed_retrying": "Verifier 失败，继续 Claude Code 修复",
+    "verifier_passed": "Verifier 已通过",
+    "artifact_sealed": "封存工件已生成",
+    "verify": "执行验证",
+    "seal": "封装可采用补丁",
+    "cleanup": "清理 Sandbox",
+    "terminate": "结束 Code Run",
+}
+
+
 def _code_profile_steps_for_message(run) -> list[dict]:
     """Convert persisted Code profile events into compact chat execution steps."""
     if not run:
@@ -185,13 +205,23 @@ def _code_profile_steps_for_message(run) -> list[dict]:
             "done" if raw_status in terminal or (phase in {"prepare", "runtime_started"} and raw_status == "started")
             else "running"
         )
+        label = _CODE_PHASE_LABELS.get(phase, "CodeAgent 运行阶段")
         step = {
             "type": "info",
             "action": f"code_{phase}",
-            "title": f"CodeAgent 运行阶段 · {event.get('status') or 'running'}",
+            "title": f"{label} · {event.get('status') or 'running'}",
             "status": status,
         }
-        detail = event.get("reason") or event.get("summary") or event.get("command") or event.get("path") or ""
+        detail = (
+            event.get("reason")
+            or event.get("summary")
+            or event.get("skill_name")
+            or event.get("mcp_name")
+            or event.get("command")
+            or event.get("path")
+            or event.get("artifact_id")
+            or ""
+        )
         if isinstance(detail, str) and detail.strip():
             step["content"] = detail[:400]
         snippet = event.get("snippet") or event.get("output") or ""
@@ -388,12 +418,18 @@ class AgentRuntime:
                 cleaned_preview = AgentRuntime._sanitize_step_text(preview)
                 if cleaned_preview:
                     item["preview"] = cleaned_preview[:300]
-            if s.get("status") == "error":
-                content = s.get("content")
-                if isinstance(content, str) and content.strip():
-                    cleaned_content = AgentRuntime._sanitize_step_text(content)
-                    if cleaned_content:
-                        item["content"] = cleaned_content[:400]
+            content = s.get("content")
+            if isinstance(content, str) and content.strip():
+                cleaned_content = AgentRuntime._sanitize_step_text(content)
+                if cleaned_content:
+                    limit = 400 if s.get("status") == "error" or str(s.get("action") or "").startswith("code_") else 0
+                    if limit:
+                        item["content"] = cleaned_content[:limit]
+            snippet = s.get("snippet")
+            if str(s.get("action") or "").startswith("code_") and isinstance(snippet, str) and snippet.strip():
+                cleaned_snippet = AgentRuntime._sanitize_step_text(snippet)
+                if cleaned_snippet:
+                    item["snippet"] = cleaned_snippet[:1200]
             out.append(item)
         return out
 
@@ -928,14 +964,6 @@ class AgentRuntime:
         system_prompt = sp_builder.build_system_base(
             ctx.agent, summary_text=_load_session_summary(ctx),
         )
-        if (getattr(ctx, "profile", "") or "") == "code" and not getattr(ctx, "code_execution", None):
-            from app.services.code_agent.claude_code_runtime import GRILL_CONFIRMATION
-
-            system_prompt += (
-                "\n\n【CodeAgent 开箱前 grill】在启动沙箱前，用提问把需求、范围、风险和验收问清楚。"
-                "不要调用编码工具，不要声称已经改了代码。"
-                f"问完后明确告诉用户：若同意按当前理解实现，请原样回复「{GRILL_CONFIRMATION}」。"
-            )
         if (ctx.note_content or "").strip():
             system_prompt += (
                 "\n\n【会话备注·约束】以下备注用于补充默认口径、时区和文件规则，"

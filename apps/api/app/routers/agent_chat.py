@@ -24,7 +24,6 @@ from app.services.code_agent.control_plane import (
     agent_would_use_claude_code,
     create_code_run,
 )
-from app.services.code_agent.claude_code_runtime import GRILL_CONFIRMATION
 from app.services.code_agent.results import serialize_code_result
 from app.services.code_agent.output_security import redact_code_output
 from app.services.code_agent.kill_switch import CodeKillSwitchError
@@ -131,8 +130,13 @@ def _steps_tail_for_message(raw: str | None, limit: int | None = None) -> dict:
         if isinstance(preview, str) and preview.strip():
             item["preview"] = preview[:300]
         content = s.get("content")
-        if isinstance(content, str) and content.strip() and s.get("status") == "error":
+        if isinstance(content, str) and content.strip() and (
+            s.get("status") == "error" or str(s.get("action") or "").startswith("code_")
+        ):
             item["content"] = content[:400]
+        snippet = s.get("snippet")
+        if str(s.get("action") or "").startswith("code_") and isinstance(snippet, str) and snippet.strip():
+            item["snippet"] = snippet[:1200]
         slim.append(item)
     try:
         stored = int(meta.get("step_count") or 0)
@@ -189,21 +193,6 @@ def _run_chat_bg(
     finally:
         stop_chat(agent_id or "", session_id or "")
         db.close()
-
-
-def _grill_objective(db: Session, agent_id: str, session_id: str) -> str:
-    msgs = db.query(ChatMessage).filter(
-        ChatMessage.agent_id == agent_id,
-        ChatMessage.session_id == session_id,
-    ).order_by(ChatMessage.id).all()
-    parts: list[str] = []
-    for message in msgs:
-        text = str(message.content or "").strip()
-        if not text or text == GRILL_CONFIRMATION:
-            continue
-        role = str(message.role or "").strip() or "user"
-        parts.append(f"{role}: {text}")
-    return "\n\n".join(parts).strip()
 
 
 def _direct_execute_objective(message: str | None) -> tuple[bool, str]:
@@ -499,27 +488,13 @@ async def chat_post(
                 if agent_would_use_claude_code(db, agent):
                     message = (body.message or "").strip()
                     is_direct_execute, direct_objective = _direct_execute_objective(message)
-                    if is_direct_execute:
-                        if not direct_objective:
-                            return fail("缺少任务目标，请使用「开始执行:<objective>」")
-                        objective = direct_objective
-                        trigger_text = message
-                    else:
-                        if message != GRILL_CONFIRMATION:
-                            background_tasks.add_task(
-                                _enqueue_code_chat,
-                                body.agent_id,
-                                body.session_id,
-                                body.message or "",
-                                "",
-                                None,
-                            )
-                            return ok({"status": "grilling", "code_run_id": ""}, "请先确认需求")
-                        objective = _grill_objective(
-                            db, body.agent_id or "", body.session_id or "",
-                        )
-                        if not objective:
-                            return fail("请先描述要改什么，确认后再回复「开始实现」")
+                    # Claude Code is the engine for every CodeAgent turn. The
+                    # historical "开始执行:" prefix remains an optional
+                    # compatibility alias, never a required trigger.
+                    objective = direct_objective if is_direct_execute else message
+                    if not objective:
+                        return fail("缺少任务目标")
+                    trigger_text = message if is_direct_execute else ""
                 else:
                     objective = body.message or ""
                 run = create_code_run(

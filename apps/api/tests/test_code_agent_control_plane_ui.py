@@ -1239,7 +1239,10 @@ def test_agent_chat_auto_reopens_latest_code_execution_after_refresh():
     assert "async function hydrateLatestCodeHistory()" in component
     assert "hydrateLatestCodeHistory().catch(() => {})" in component
     assert "execOpen.value = { ...execOpen.value, [latest.execKey]: true }" in component
+    assert "await fetchCodeEventSteps()" in component
+    assert "function stepsFromCodeEvents(events)" in component
     assert "await ensureHistorySteps(latest.execKey)" in component
+    assert "item.steps[0]?.title" in component
 
 
 def test_claude_code_runtime_emits_terminal_done_event_after_cleanup():
@@ -1247,6 +1250,8 @@ def test_claude_code_runtime_emits_terminal_done_event_after_cleanup():
     assert "publish_code_done = bool(run and code_run_uses_claude_code(run))" in runtime
     assert '"type": "done"' in runtime[runtime.index("publish_code_done = bool"):]
     assert "_code_profile_steps_for_message(run)" in runtime
+    assert "_CODE_PHASE_LABELS" in runtime
+    assert '"title": f"{label} · {event.get(\'status\') or \'running\'}"' in runtime
 
 
 def test_agent_chat_renders_code_result_in_chat_markdown_without_standalone_card():
