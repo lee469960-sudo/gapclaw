@@ -308,6 +308,55 @@ def test_claude_code_runtime_adapter_streams_tool_events_before_result():
     assert "--verbose" in runner.calls[0]
 
 
+def test_claude_code_runtime_allows_verifier_when_stream_changed_file_but_cli_exits_one():
+    class StreamingEditRunner:
+        def exec(self, container_id, command, *, timeout_seconds, environment=None, on_output=None):
+            lines = [
+                json.dumps({
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "我先探查仓库结构,了解项目布局,然后按照 SOP 执行。",
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "tool-1",
+                                "name": "Edit",
+                                "input": {
+                                    "file_path": "/workspace/gamestat/dbt_project.yml",
+                                    "old_string": 'pg_host: "old"',
+                                    "new_string": 'pg_host: "new"',
+                                },
+                            },
+                        ]
+                    },
+                }),
+                json.dumps({
+                    "type": "user",
+                    "message": {"content": [{"type": "tool_result", "tool_use_id": "tool-1"}]},
+                }),
+            ]
+            output = "\n".join(lines) + "\n"
+            if on_output:
+                on_output(output)
+            return 1, output
+
+    events = []
+    result = ClaudeCodeRuntimeAdapter(
+        runner=StreamingEditRunner(),
+        on_event=events.append,
+    ).run(_runtime_input())
+
+    assert result.status == "coding_completed"
+    assert result.exit_code == 1
+    assert result.changed_files == ("/workspace/gamestat/dbt_project.yml",)
+    assert result.error_type == ""
+    assert result.error_summary == ""
+    assert [event["type"] for event in events] == ["file_changed", "file_changed"]
+
+
 @pytest.mark.parametrize(
     ("status", "summary"),
     [
@@ -350,6 +399,31 @@ def test_claude_code_runtime_adapter_failure_stays_in_coding_stage():
     assert result.error_type == "coding_failed"
     assert result.error_summary == "model error"
     assert "patch_ready" not in result.to_dict()
+
+
+def test_claude_code_runtime_failure_prefers_terminal_reason_over_assistant_text():
+    output = "\n".join([
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "我将按照 SOP 执行这个任务。"}]},
+        }),
+        json.dumps({
+            "type": "result",
+            "is_error": True,
+            "result": "我将按照 SOP 执行这个任务。",
+            "terminal_reason": "max_turns",
+            "stop_reason": "stop_sequence",
+        }),
+    ])
+    runner = FakeClaudeRunner(exit_code=1, output=output)
+    adapter = ClaudeCodeRuntimeAdapter(runner=runner)
+
+    result = adapter.run(_runtime_input())
+
+    assert result.status == "budget_exhausted"
+    assert result.error_type == "budget_exhausted"
+    assert result.error_summary == "terminal_reason=max_turns; stop_reason=stop_sequence"
+    assert "我将按照 SOP" not in result.error_summary
 
 
 def test_claude_code_runtime_adapter_classifies_timeout_as_stable_failure():

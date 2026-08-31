@@ -645,6 +645,14 @@ def _runtime_summary(exit_code: int, output: str) -> str:
         return ""
     parsed = _runtime_payload(raw)
     if isinstance(parsed, dict):
+        if exit_code != 0:
+            failure_parts = []
+            for key in ("error", "terminal_reason", "stop_reason"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    failure_parts.append(f"{key}={value.strip()}")
+            if failure_parts:
+                return "; ".join(failure_parts)[:1000]
         for key in ("summary", "result", "text", "message"):
             value = parsed.get(key)
             if isinstance(value, str) and value.strip():
@@ -699,6 +707,8 @@ def classify_claude_code_failure(reason: str, *, exit_code: int = 1) -> str:
         or "401" in lowered
     ):
         return "model_unavailable"
+    if "max_turns" in lowered or "max turns" in lowered or "turn limit" in lowered:
+        return "budget_exhausted"
     if exit_code == 124 or "timeout" in lowered or "timed out" in lowered:
         return "coding_timeout"
     return "coding_failed"
@@ -983,6 +993,7 @@ class ClaudeCodeRuntimeAdapter:
         self.on_event = on_event
         self._stream_buffer = ""
         self._stream_tools: dict[str, str] = {}
+        self._stream_changed_files: list[str] = []
 
     def _consume_stream_output(self, chunk: str) -> None:
         if not self.on_event:
@@ -1005,10 +1016,17 @@ class ClaudeCodeRuntimeAdapter:
                 self._stream_tools[tool_id] = str(event.get("type") or "tool_call")
             elif event.get("status") == "completed" and tool_id:
                 event["type"] = self._stream_tools.pop(tool_id, "tool_call")
+            if event.get("status") == "started" and event.get("type") == "file_changed":
+                path = str(event.get("path") or "").strip()
+                if path and path not in self._stream_changed_files:
+                    self._stream_changed_files.append(path)
             self.on_event(event)
 
     def run(self, runtime_input: ClaudeCodeRuntimeInput) -> ClaudeCodeRuntimeResult:
         streaming = self.on_event is not None
+        self._stream_buffer = ""
+        self._stream_tools = {}
+        self._stream_changed_files = []
         command = _build_claude_code_command(runtime_input, stream=streaming)
         exit_code, output = _runner_exec(
             self.runner,
@@ -1042,9 +1060,16 @@ class ClaudeCodeRuntimeAdapter:
         payload = _runtime_payload(output)
         summary = redact_code_output(_runtime_summary(exit_code, output)).text
         requested_status = str(payload.get("status") or "").strip()
+        changed_files = _string_tuple(payload.get("changed_files"))
+        if not changed_files:
+            changed_files = tuple(self._stream_changed_files)
         error_type = "" if exit_code == 0 else classify_claude_code_failure(summary, exit_code=exit_code)
         if exit_code == 0 and requested_status in CLAUDE_CODE_NON_PATCH_TERMINAL_RESULTS:
             status = requested_status
+        elif exit_code != 0 and error_type == "coding_failed" and changed_files:
+            status = "coding_completed"
+            error_type = ""
+            summary = summary or "Claude Code exited non-zero after editing files; continuing to verifier."
         else:
             status = "coding_completed" if exit_code == 0 else error_type
         budget_usage = _redact_value(payload.get("budget_usage", {}))
@@ -1054,7 +1079,7 @@ class ClaudeCodeRuntimeAdapter:
             status=status,
             exit_code=exit_code,
             summary=summary,
-            changed_files=_string_tuple(payload.get("changed_files")),
+            changed_files=changed_files,
             budget_usage=budget_usage,
             tool_audit=_dict_tuple(payload.get("tool_audit")),
             transcript_path=redact_code_output(str(payload.get("transcript_path") or "")).text,
@@ -1071,7 +1096,7 @@ class ClaudeCodeRuntimeAdapter:
                 },
             ),
             error_type=error_type,
-            error_summary="" if exit_code == 0 else summary,
+            error_summary="" if status == "coding_completed" else summary,
         )
 
 

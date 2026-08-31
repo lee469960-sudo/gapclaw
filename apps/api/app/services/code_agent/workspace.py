@@ -507,6 +507,8 @@ def _refresh_persistent_workspace_baseline(run, *, resolved_commit: str) -> None
         "repository": str(getattr(run, "repository", "") or ""),
         "requested_commit": str(getattr(run, "requested_ref", "") or ""),
         "resolved_commit": resolved_commit,
+        "snapshot_id": str(getattr(run, "snapshot_id", "") or ""),
+        "snapshot_hash": str(getattr(run, "snapshot_hash", "") or ""),
         "baseline_digest": hashlib.sha256(baseline_json.encode()).hexdigest(),
         "preparation_mode": "persistent_git_sync",
         "repo_root_mode": "sandbox_git_synced",

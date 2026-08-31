@@ -94,9 +94,13 @@ def test_persistent_workspace_syncs_git_inside_bound_sandbox_without_snapshot(tm
         source_facts=json.dumps({
             "path": str(workspace),
             "repository": "http://g.testskydata.com/system/dbt-gamestat-ck.git",
+            "snapshot_id": "stale-snapshot",
+            "snapshot_hash": "stale-hash",
             "workspace_mode": "persistent_sandbox",
         }),
         task_contract=json.dumps({"requested_ref": "dev"}),
+        status="pending",
+        failure_reason="",
     )
     commit = "a" * 40
     calls = []
@@ -110,6 +114,7 @@ def test_persistent_workspace_syncs_git_inside_bound_sandbox_without_snapshot(tm
             calls.append((command, environment or {}))
             if command == "git --version":
                 return 0, "git version 2.39.0"
+            (workspace / ".git" / "HEAD").write_text(f"{commit}\n", encoding="utf-8")
             return 0, f"HEAD is now at {commit}\n{commit}\n"
 
     facts = SimpleNamespace(
@@ -126,7 +131,11 @@ def test_persistent_workspace_syncs_git_inside_bound_sandbox_without_snapshot(tm
     assert run.snapshot_id == ""
     assert run.source_scan_report_id == ""
     assert "git fetch --tags --prune origin dev" in calls[1][0]
-    assert json.loads(run.source_facts)["repo_root_mode"] == "sandbox_git_synced"
+    source_facts = json.loads(run.source_facts)
+    assert source_facts["repo_root_mode"] == "sandbox_git_synced"
+    assert source_facts["snapshot_id"] == ""
+    assert source_facts["snapshot_hash"] == ""
+    WorkspaceIntegrityGuard(run).check_before_seal()
 
 
 def test_persistent_workspace_reads_head_when_sync_output_lacks_commit(tmp_path):
