@@ -2710,6 +2710,7 @@ async def _run_agent_impl(
 
     profile = getattr(agent, "profile", None) or "standard"
     code_execution = None
+    sandbox = None
     allowed = json.loads(agent.allowed_actions or "[]")
     skill_ids = json.loads(agent.skills or "[]")
     mcp_ids = json.loads(agent.mcps or "[]")
@@ -2739,24 +2740,25 @@ async def _run_agent_impl(
                 raise ValueError("code_run_unavailable")
             if code_run.status != "pending":
                 raise ValueError("code_run_not_pending")
-            from app.services.code_agent.scanner import (
-                SourceScanValidationError,
-                validate_source_scan_report,
-            )
-            try:
-                validate_source_scan_report(db, code_run)
-            except SourceScanValidationError as exc:
-                code_run.status = "policy_rejected"
-                code_run.failure_reason = exc.reason
-                db.commit()
-                raise
             chat_key = f"{agent.id}:{session_id}"
             from app.services.code_agent.lifecycle import bind_code_run, register_code_cleanup
+            sandbox = db.query(Sandbox).filter(Sandbox.id == agent.sandbox_id).first()
             if workspace_manager is None:
                 from app.services.code_agent.workspace import WorkspaceManager
                 workspace_manager = WorkspaceManager()
             workspace_cleanup = getattr(
                 workspace_manager, "cleanup_allocated_workspace", None
+            )
+            await _publish_pre_context_code_step(
+                agent,
+                session_id,
+                action="code_workspace_prepare",
+                title="准备 Code Workspace",
+                status="running",
+            )
+            workspace = workspace_manager.prepare(
+                code_run,
+                sandbox_id=str(getattr(agent, "sandbox_id", "") or ""),
             )
             if callable(workspace_cleanup):
                 register_code_cleanup(
@@ -2767,27 +2769,9 @@ async def _run_agent_impl(
                 session_id,
                 action="code_workspace_prepare",
                 title="准备 Code Workspace",
-                status="running",
-            )
-            workspace = workspace_manager.prepare(code_run)
-            await _publish_pre_context_code_step(
-                agent,
-                session_id,
-                action="code_workspace_prepare",
-                title="准备 Code Workspace",
                 status="done",
                 op="patch",
             )
-            # Materialize the Claude SOP before the container is created. A
-            # bind mount is expected to be live, but some Docker backends take
-            # a startup snapshot; pre-populating avoids Claude seeing a
-            # workspace without /workspace/.claude/CLAUDE.md.
-            from app.services.code_agent.claude_code_runtime import (
-                code_run_uses_claude_code,
-                materialize_coding_sop,
-            )
-            if code_run_uses_claude_code(code_run):
-                materialize_coding_sop(workspace.path)
             if not callable(workspace_cleanup) and hasattr(
                 workspace_manager, "retain_after_run"
             ):
@@ -2805,7 +2789,7 @@ async def _run_agent_impl(
                     title="启动 Code Sandbox",
                     status="running",
                 )
-                runner_facts = code_runner.start(code_run, workspace)
+                runner_facts = code_runner.start(code_run, workspace, sandbox=sandbox)
             except Exception as exc:
                 from app.services.code_agent.failures import record_code_failure
 
@@ -2829,7 +2813,7 @@ async def _run_agent_impl(
                         details={
                             "operation": "runner:start",
                             "image": code_run.image,
-                            "image_digest": code_run.image_digest,
+                            "sandbox_id": getattr(sandbox, "id", "") if sandbox else "",
                             "error_type": type(exc).__name__,
                             "error_summary": (
                                 getattr(exc, "detail", "")
@@ -2853,17 +2837,82 @@ async def _run_agent_impl(
             code_run.runner_state = "active"
             code_run.runner_network_id = ""
             code_run.cleanup_state = "pending"
+            from app.services.code_agent.workspace import (
+                WorkspaceGitSyncError,
+                sync_repository_in_sandbox,
+            )
+
+            try:
+                await _publish_pre_context_code_step(
+                    agent,
+                    session_id,
+                    action="code_repository_sync",
+                    title="同步 Git 仓库",
+                    status="running",
+                )
+                git_sync = sync_repository_in_sandbox(
+                    db, code_run, code_runner, runner_facts
+                )
+                await _publish_pre_context_code_step(
+                    agent,
+                    session_id,
+                    action="code_repository_sync",
+                    title="同步 Git 仓库",
+                    status="done",
+                    content=git_sync.get("resolved_commit", ""),
+                    op="patch",
+                )
+            except WorkspaceGitSyncError as exc:
+                from app.services.code_agent.failures import record_code_failure
+
+                code_run.status = "infrastructure_error"
+                code_run.failure_reason = exc.reason
+                db.commit()
+                await _publish_pre_context_code_step(
+                    agent,
+                    session_id,
+                    action="code_repository_sync",
+                    title="同步 Git 仓库失败",
+                    status="error",
+                    content=exc.reason,
+                    op="patch",
+                )
+                try:
+                    record_code_failure(
+                        db,
+                        actor=getattr(agent, "name", "") or getattr(agent, "id", "") or "agent",
+                        reason=exc.reason,
+                        project_id=code_run.project_id,
+                        run_id=code_run.id,
+                        policy_hash=code_run.effective_policy_hash,
+                        details={
+                            "operation": "repository:sync",
+                            "error_type": type(exc).__name__,
+                            "error_summary": exc.detail[:300],
+                        },
+                    )
+                except Exception:
+                    logger.exception("Failed to record CodeAgent repository sync failure")
+                raise
+            # Materialize the Claude SOP after repository sync so repo-local
+            # instructions and the bound Sandbox see the same Workspace tree.
             from app.services.code_agent.claude_code_runtime import (
-            code_run_uses_claude_code,
-            materialize_claude_code_skills,
-            materialize_claude_code_mcp_config,
-            normalize_claude_code_runtime_event,
-            preflight_input_from_run,
-            record_claude_code_mcp_injection,
-            record_claude_code_skill_injection,
-            record_claude_code_preflight,
-            run_claude_code_preflight,
-        )
+                code_run_uses_claude_code,
+                materialize_coding_sop,
+            )
+            if code_run_uses_claude_code(code_run):
+                materialize_coding_sop(workspace.path)
+            from app.services.code_agent.claude_code_runtime import (
+                code_run_uses_claude_code,
+                materialize_claude_code_skills,
+                materialize_claude_code_mcp_config,
+                normalize_claude_code_runtime_event,
+                preflight_input_from_run,
+                record_claude_code_mcp_injection,
+                record_claude_code_skill_injection,
+                record_claude_code_preflight,
+                run_claude_code_preflight,
+            )
 
             if code_run_uses_claude_code(code_run):
                 await _publish_pre_context_code_runtime_event(
@@ -2964,7 +3013,8 @@ async def _run_agent_impl(
         raise ValueError("code_run_not_allowed_for_standard_profile")
 
     llm = db.query(LLMResource).filter(LLMResource.id == agent.llm_id).first()
-    sandbox = db.query(Sandbox).filter(Sandbox.id == agent.sandbox_id).first()
+    if sandbox is None:
+        sandbox = db.query(Sandbox).filter(Sandbox.id == agent.sandbox_id).first()
 
     tool_executor = None
     if code_execution:
@@ -3104,11 +3154,9 @@ async def _run_code_runtime(
         )
         from app.services.code_agent.claude_code_runtime import (
             ClaudeCodeRuntimeAdapter,
-            archive_openspec_after_seal,
             claude_code_max_verifier_retries,
             claude_code_verifier_feedback,
             normalize_claude_code_runtime_event,
-            record_claude_code_openspec_archive,
             record_claude_code_runtime_result,
             resolve_claude_code_exec_env,
             runtime_input_from_execution,
@@ -3262,6 +3310,22 @@ async def _run_code_runtime(
                                 }
                             },
                         )
+                        if not (
+                            str(getattr(run, "snapshot_id", "") or "").strip()
+                            and str(getattr(run, "snapshot_hash", "") or "").strip()
+                            and str(getattr(run, "source_scan_report_id", "") or "").strip()
+                        ):
+                            outcome = "patch_ready"
+                            run.status = "patch_ready"
+                            run.failure_reason = "patch_ready"
+                            db.commit()
+                            await runtime._publish_code_profile_event(
+                                ctx,
+                                "seal",
+                                "completed",
+                                "sealed artifact not required for sandbox git workspace",
+                            )
+                            break
                         from app.services.code_agent.artifacts import CodeArtifactSealer
 
                         sealer = code_artifact_sealer or CodeArtifactSealer(
@@ -3306,11 +3370,6 @@ async def _run_code_runtime(
                                     }
                                 },
                             )
-                            archive_result = archive_openspec_after_seal(
-                                ctx.tool_executor.runner, run
-                            )
-                            record_claude_code_openspec_archive(run, archive_result)
-                            db.commit()
                         break
                     # Integrity/policy failures are terminal safety decisions,
                     # not coding feedback. Retrying could let the runtime make
@@ -3353,6 +3412,7 @@ async def _run_code_runtime(
                     )
         else:
             result = await asyncio.wait_for(runtime.run(ctx), timeout=execution.timeout_seconds)
+        # 发布/部署请求也按普通 Claude Code 任务处理；平台不追加 local_publish 专用阶段。
         reason = code_termination_reason(execution.run_id)
         if reason:
             outcome = reason
@@ -3372,20 +3432,37 @@ async def _run_code_runtime(
                 report.reason,
             )
             if report.passed:
-                from app.services.code_agent.artifacts import CodeArtifactSealer
+                has_seal_evidence = (
+                    str(getattr(run, "snapshot_id", "") or "").strip()
+                    and str(getattr(run, "snapshot_hash", "") or "").strip()
+                    and str(getattr(run, "source_scan_report_id", "") or "").strip()
+                )
+                if not has_seal_evidence:
+                    outcome = "patch_ready"
+                    run.status = "patch_ready"
+                    run.failure_reason = "patch_ready"
+                    db.commit()
+                    await runtime._publish_code_profile_event(
+                        ctx,
+                        "seal",
+                        "completed",
+                        "sealed artifact not required for sandbox git workspace",
+                    )
+                else:
+                    from app.services.code_agent.artifacts import CodeArtifactSealer
 
-                sealer = code_artifact_sealer or CodeArtifactSealer(
-                    db, run, ctx.tool_executor.runner
-                )
-                await runtime._publish_code_profile_event(ctx, "seal", "started")
-                sealing = sealer.seal()
-                outcome = sealing.outcome
-                await runtime._publish_code_profile_event(
-                    ctx,
-                    "seal",
-                    "completed" if sealing.sealed else "failed",
-                    sealing.reason,
-                )
+                    sealer = code_artifact_sealer or CodeArtifactSealer(
+                        db, run, ctx.tool_executor.runner
+                    )
+                    await runtime._publish_code_profile_event(ctx, "seal", "started")
+                    sealing = sealer.seal()
+                    outcome = sealing.outcome
+                    await runtime._publish_code_profile_event(
+                        ctx,
+                        "seal",
+                        "completed" if sealing.sealed else "failed",
+                        sealing.reason,
+                    )
     except asyncio.TimeoutError as exc:
         request_code_termination(ctx.chat_key, "timed_out")
         _running[ctx.chat_key] = False
@@ -3393,7 +3470,18 @@ async def _run_code_runtime(
         failure = exc
     except BaseException as exc:
         _running[ctx.chat_key] = False
-        outcome = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+        if isinstance(exc, asyncio.CancelledError):
+            outcome = "cancelled"
+        elif run and str(getattr(run, "status", "") or "") in {
+            "budget_exhausted", "coding_failed", "coding_timeout",
+            "infrastructure_error", "model_unavailable", "mcp_config_failed",
+            "no_progress", "policy_rejected", "runtime_unavailable",
+            "skill_load_failed", "target_not_found", "verification_failed",
+            "verification_inconclusive", "workspace_integrity_error",
+        }:
+            outcome = str(getattr(run, "status") or "")
+        else:
+            outcome = "failed"
         failure = exc
 
     if run:
@@ -3408,12 +3496,19 @@ async def _run_code_runtime(
 
     cleanup_error = None
     try:
+        terminal_failure_reason = ""
+        if outcome != "execution_completed":
+            terminal_failure_reason = (
+                str(getattr(run, "failure_reason", "") or "")
+                if run is not None
+                else ""
+            ) or outcome
         await cleanup_code_resources(
             ctx.chat_key,
             execution.run_id,
             db=db,
             terminal_status=outcome,
-            failure_reason="" if outcome == "execution_completed" else outcome,
+            failure_reason=terminal_failure_reason,
         )
     except CodeCleanupError as exc:
         if run:

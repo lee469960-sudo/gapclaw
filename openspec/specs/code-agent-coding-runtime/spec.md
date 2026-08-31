@@ -8,20 +8,22 @@
 
 ### Requirement: CodeAgent 必须通过显式 Coding Runtime 运行编码循环
 
-系统 SHALL 支持在 CodeAgent run 的冻结契约中显式选择 `coding_runtime=claude_code`。未显式选择该 runtime 时，系统 SHALL 保持现有 CodeAgent runtime 行为。选择 Claude Code 后，CodeAgent SHALL 只把代码理解、编辑、测试、调试和测试修复循环委托给 Claude Code；Task、Repository、Workspace、Sandbox、Manifest、Skill、MCP、Verifier、Sealer、状态与结果管理仍由现有 CodeAgent 控制。
+系统 SHALL 支持 CodeAgent run 选择 `coding_runtime=claude_code`。选择 Claude Code 后，系统 SHALL 在编辑页已绑定且运行中的持久 Sandbox 的项目 Workspace 中启动 Claude Code；模型、Skill、MCP、策略和资源配置 SHALL 来自 CodeAgent 编辑页已有资源配置。系统 MUST NOT 创建独立 runner、发布流程或第二套资源配置。
 
 #### Scenario: 默认 runtime 保持兼容
-
-- **WHEN** CodeAgent run 未显式选择 `coding_runtime=claude_code`
+- **WHEN** CodeAgent run 未选择 `coding_runtime=claude_code`
 - **THEN** 系统使用现有 CodeAgent runtime
-- **AND** 不启动 Claude Code，不生成 Claude Code 专属配置，也不改变现有 run 终态语义
+- **AND** 不启动 Claude Code
 
 #### Scenario: 显式选择 Claude Code runtime
+- **WHEN** CodeAgent 选择 Claude Code runtime 且绑定 Sandbox 正在运行
+- **THEN** Claude Code 在该 Sandbox 的挂载 Workspace 中读取、编辑、测试和执行命令
+- **AND** 用户可从同一 Sandbox 终端继续该开发环境
 
-- **WHEN** CodeAgent run 的冻结契约选择 `coding_runtime=claude_code`
-- **THEN** 系统在现有 run、Workspace、Sandbox 与 Manifest 边界内启动 Claude Code coding loop
-- **AND** CodeAgent 不再对该 run 执行细粒度 coding planner/replanner/executor
-- **AND** 最终任务成功仍不得由 Claude Code 文本声明决定
+#### Scenario: Sandbox 未运行
+- **WHEN** CodeAgent 发起 Claude Code 任务而绑定 Sandbox 未运行
+- **THEN** 系统返回稳定的 Sandbox 未运行提示
+- **AND** 不创建临时 runner 或自动启动 Sandbox
 
 ### Requirement: Coding Runtime Adapter 必须提供冻结输入与受限输出
 
@@ -127,3 +129,19 @@
 - **AND** 任务目标值不存在于允许范围
 - **THEN** 平台验收可记录 runtime 链路已正常工作
 - **AND** 该业务 run 的用户可见终态仍为 `target_not_found`
+
+### Requirement: Claude Code 必须可在持久 Sandbox 内自行安装依赖
+
+当 Claude Code 在 local 发布或其他仓库任务中识别到缺失的系统或应用依赖时，Claude Code SHALL 在已绑定的持久 Sandbox 权限允许时自行安装并继续执行。系统 MUST NOT 为此提供平台 lockfile 安装桥或一次性 runner 的 root 引导阶段。Claude Code MUST NOT 获得 Docker socket、宿主机访问或 privileged 容器。
+
+#### Scenario: 缺少发布所需工具
+
+- **WHEN** Claude Code 确定任务缺少可安装工具且 Sandbox 权限允许安装
+- **THEN** Claude Code 可在该 Sandbox 内安装最小依赖并继续任务
+- **AND** 安装不得写入业务 Git 交付物
+
+#### Scenario: 依赖安装失败
+
+- **WHEN** Sandbox 权限、网络策略或仓库事实导致无法安装所需工具
+- **THEN** Claude Code 报告确切阻断原因并停止
+- **AND** Run 不得将安装失败显示为发布成功

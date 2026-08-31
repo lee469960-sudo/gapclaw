@@ -28,12 +28,13 @@ chmod +x start.sh scripts/*.sh
 ### 手动启动
 
 ```bash
-# Backend
+# Backend（本地开发最终从 app 目录启动，避免 --reload 监视 data/ 下的 Workspace）
 cd apps/api
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn app.main:app --reload --port 8000
+cd app
+uvicorn app.main:app --app-dir .. --env-file ../.env --reload --reload-dir . --port 8000
 
 # Frontend
 cd apps/web
@@ -122,7 +123,7 @@ chmod +x build-local.sh
 2. 按当前 CPU 架构构建并打 tag（`gap-api-{arm|amd}:V0.0.1`、`gap-web-{arm|amd}:V0.0.1`）
 3. `docker compose up -d --no-build` 启动
 
-版本号在 `deploy/gap.version`（当前 `V0.0.1`）。构建双架构：
+版本号在 `deploy/gap.version`（当前 `V1.0.6`）。构建双架构：
 
 ```bash
 cd deploy

@@ -39,7 +39,9 @@
           v-if="agent?.profile === 'code'"
           ref="codeWpRef"
           :agent-id="agentId"
+          :session-id="sessionId"
           :code-run-id="activeCodeRunId"
+          :sandbox-id="agentSandboxId"
         />
         <WorkplacePanel v-else
           ref="wpRef"
@@ -977,7 +979,9 @@ async function hydrateActiveCodeRun() {
       session_id: sessionId.value,
     })
     const runId = String(res.data?.run_id || '').trim()
-    if (runId) activeCodeRunId.value = runId
+    const terminal = res.data?.terminal === true
+    const workspaceAvailable = res.data?.workspace?.available === true
+    if (runId && (!terminal || workspaceAvailable)) activeCodeRunId.value = runId
   } catch {
     // A session without a CodeAgent Run should keep the empty-state panel.
   }
@@ -1327,10 +1331,11 @@ function profileEventToStep(data) {
     test_run: 'Claude Code 测试执行',
     verifier_failed_retrying: 'Verifier 失败，继续 Claude Code 修复',
     verifier_passed: 'Verifier 已通过',
-    artifact_sealed: '封存工件已生成',
+    artifact_sealed: '结果工件已生成',
     verify: '执行验证',
-    seal: '封装可采用补丁',
+    seal: '整理任务结果',
     cleanup: '清理 Sandbox',
+    publish: '执行运行步骤',
     terminate: '结束 Code Run',
   }
   const rawStatus = String(profile.status || 'running').toLowerCase()
@@ -1352,7 +1357,8 @@ function profileEventToStep(data) {
     title: `${phaseLabels[profile.phase] || 'CodeAgent 运行阶段'} · ${profile.status || 'running'}`,
     status,
     content: profile.reason || profile.summary || profile.skill_name || profile.mcp_name
-      || profile.command || profile.path || profile.artifact_id || '',
+      || profile.command || profile.path || profile.artifact_id || profile.release_id
+      || (profile.exit_code != null ? `exit_code=${profile.exit_code}` : ''),
     snippet,
   }
 }

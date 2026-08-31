@@ -3,7 +3,7 @@
     <div class="header">
       <div>
         <h2>Code Projects</h2>
-        <p>管理 CodeAgent 项目、Manifest 草稿和不可变发布版本。</p>
+        <p>管理 CodeAgent 项目和 Git 仓库配置。</p>
       </div>
       <el-button type="primary" @click="openProject()">新建项目</el-button>
     </div>
@@ -80,30 +80,14 @@
         :closable="false"
         class="block"
       />
-      <el-alert
-        v-if="manifestOptions.security_config && !manifestOptions.security_config.ready"
-        title="CodeAgent 安全配置尚未就绪；可保存草稿，但发布与运行将保持禁用。"
-        type="warning"
-        show-icon
-        :closable="false"
-        class="block"
-      />
-      <el-alert
-        v-if="draft?.security_validation"
-        :title="securityValidationLabel(draft.security_validation)"
-        :type="draft.security_validation.ready ? 'success' : 'warning'"
-        show-icon
-        :closable="false"
-        class="block"
-      />
-
       <div v-if="!draft && history.length" class="toolbar">
         <el-button type="primary" plain @click="startRevision">基于当前版本创建修订</el-button>
       </div>
 
       <el-form label-position="top" class="manifest-form">
         <section>
-          <h3>仓库与基线</h3>
+          <h3>Git 仓库</h3>
+          <div class="section-hint">Manifest 只保存 Git 连接信息。Sandbox、模型、Skill、MCP 和策略在 CodeAgent 编辑页配置。</div>
           <el-form-item label="来源类型" :error="fieldError('source_type')">
             <el-select v-model="manifestForm.source_type" clearable style="width:100%">
               <el-option
@@ -117,7 +101,7 @@
           <el-form-item label="仓库位置" :error="fieldError('source_locator')">
             <el-input
               v-model="manifestForm.source_locator"
-              placeholder="仅允许管理员批准的精确来源或本地只读目录"
+              placeholder="Git 仓库地址，例如 http://g.example.com/group/repo.git"
             />
             <div class="form-hint">{{ sourcePolicyHint }}</div>
           </el-form-item>
@@ -159,54 +143,6 @@
           </el-form-item>
         </section>
 
-        <section>
-          <h3>路径与验证</h3>
-          <el-form-item label="允许路径（每行一项）" :error="fieldError('allowed_paths')">
-            <el-input v-model="manifestForm.allowed_paths" type="textarea" :rows="4" />
-          </el-form-item>
-          <el-form-item label="验证计划（JSON 数组）" :error="fieldError('validation_plan')">
-            <el-input v-model="manifestForm.validation_plan" type="textarea" :rows="5" @input="clearJsonError('validation_plan')" />
-          </el-form-item>
-        </section>
-
-        <section>
-          <h3>执行镜像与工具</h3>
-          <el-form-item label="Coding Runtime" :error="fieldError('coding_runtime')">
-            <el-select v-model="manifestForm.coding_runtime" style="width:100%">
-              <el-option
-                v-for="runtime in codingRuntimeOptions"
-                :key="runtime"
-                :label="runtime === 'claude_code' ? 'Claude Code' : 'Legacy CodeAgent'"
-                :value="runtime"
-              />
-            </el-select>
-            <div class="form-hint">默认 legacy；选择 Claude Code 后仍使用当前 CodeAgent Workspace、Sandbox、Verifier 和 Sealer。</div>
-          </el-form-item>
-          <el-form-item label="可信镜像 digest" :error="fieldError('image_digest')">
-            <el-select v-model="manifestForm.image_digest" clearable filterable style="width:100%">
-              <el-option
-                v-for="digest in manifestOptions.trusted_image_digests"
-                :key="digest"
-                :label="digest"
-                :value="digest"
-              />
-            </el-select>
-            <div class="form-hint">可信镜像由环境变量管理；生产请使用 registry image@sha256 的 multi-arch manifest-list digest。</div>
-          </el-form-item>
-          <el-form-item label="允许工具（每行一项）" :error="fieldError('allowed_tools')">
-            <el-input v-model="manifestForm.allowed_tools" type="textarea" :rows="4" />
-          </el-form-item>
-        </section>
-
-        <section>
-          <h3>策略与预算</h3>
-          <el-form-item label="策略（JSON 对象）" :error="fieldError('policy')">
-            <el-input v-model="manifestForm.policy" type="textarea" :rows="4" @input="clearJsonError('policy')" />
-          </el-form-item>
-          <el-form-item label="预算（JSON 对象）" :error="fieldError('budgets')">
-            <el-input v-model="manifestForm.budgets" type="textarea" :rows="4" @input="clearJsonError('budgets')" />
-          </el-form-item>
-        </section>
       </el-form>
 
       <div class="toolbar">
@@ -216,14 +152,35 @@
           :disabled="!draft || hasValidationErrors"
           :loading="publishing"
           @click="publishDraft"
-        >发布 Manifest</el-button>
+        >发布 Git 配置</el-button>
       </div>
 
       <el-divider>已发布历史</el-divider>
       <el-collapse v-if="history.length">
         <el-collapse-item v-for="item in history" :key="item.id" :name="item.id">
           <template #title>v{{ item.version }} · {{ item.published_at || '已发布' }}</template>
-          <pre>{{ JSON.stringify(item, null, 2) }}</pre>
+          <div class="manifest-summary">
+            <div>
+              <span>来源类型</span>
+              <code>{{ item.source_type || '-' }}</code>
+            </div>
+            <div>
+              <span>仓库地址</span>
+              <code>{{ item.source_locator || item.repository || '-' }}</code>
+            </div>
+            <div>
+              <span>凭据引用</span>
+              <code>{{ item.credential_ref || '无' }}</code>
+            </div>
+            <div>
+              <span>请求 ref</span>
+              <code>{{ item.requested_ref || '-' }}</code>
+            </div>
+            <div>
+              <span>发布时间</span>
+              <code>{{ item.published_at || '-' }}</code>
+            </div>
+          </div>
         </el-collapse-item>
       </el-collapse>
       <el-empty v-else description="暂无已发布版本" />
@@ -248,8 +205,7 @@ const draft = ref(null)
 const history = ref([])
 const manifestOptions = ref({
   source_types: [], remote_origins: [], local_roots: [],
-  credential_references: [], trusted_image_digests: [], coding_runtimes: [],
-  security_config: null,
+  credential_references: [],
 })
 
 const projectForm = reactive({
@@ -259,22 +215,13 @@ const projectForm = reactive({
 const manifestForm = reactive({
   source_type: '', source_locator: '', credential_ref: '', requested_ref: '',
   credential_label: '', credential_username: '', credential_password: '',
-  allowed_paths: '', validation_plan: '[]', image_digest: '', allowed_tools: '',
-  coding_runtime: 'legacy',
-  policy: '{\n  "network": false,\n  "secret_policy": {\n    "source": "block",\n    "source_unscannable": "block",\n    "patch": "block",\n    "output": "redact"\n  }\n}', budgets: '{}',
 })
-const jsonErrors = reactive({ validation_plan: '', policy: '', budgets: '' })
+const jsonErrors = reactive({})
 const selectionErrors = reactive({})
 
 const hasValidationErrors = computed(() =>
   Object.keys(draft.value?.validation_errors || {}).length > 0
   || Object.values(jsonErrors).some(Boolean)
-)
-
-const codingRuntimeOptions = computed(() =>
-  manifestOptions.value.coding_runtimes?.length
-    ? manifestOptions.value.coding_runtimes
-    : ['legacy', 'claude_code']
 )
 
 const sourcePolicyHint = computed(() => {
@@ -302,37 +249,12 @@ function fieldError(field) {
     || draft.value?.validation_errors?.[field] || ''
 }
 
-function securityValidationLabel(value) {
-  if (value?.status === 'validated') return '安全输入已验证并冻结'
-  if (value?.ready) return '草稿字段完整，等待发布时执行安全导入验证'
-  return '安全输入尚不完整，请修正标记字段'
-}
-
 function lines(value) {
   return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
 }
 
-function clearJsonError(field) {
-  jsonErrors[field] = ''
-}
-
-function parseJsonField(field, value, expectedType) {
-  clearJsonError(field)
-  try {
-    const parsed = JSON.parse(value || '')
-    const valid = expectedType === 'array'
-      ? Array.isArray(parsed)
-      : parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-    if (!valid) throw new TypeError('JSON type mismatch')
-    return parsed
-  } catch {
-    jsonErrors[field] = expectedType === 'array' ? '请输入有效的 JSON 数组' : '请输入有效的 JSON 对象'
-    return undefined
-  }
-}
-
 function fillManifest(value = {}) {
-  Object.keys(jsonErrors).forEach(clearJsonError)
+  Object.keys(jsonErrors).forEach((key) => delete jsonErrors[key])
   Object.keys(selectionErrors).forEach((key) => delete selectionErrors[key])
   Object.assign(manifestForm, {
     source_type: value.source_type || '',
@@ -342,21 +264,6 @@ function fillManifest(value = {}) {
     credential_username: '',
     credential_password: '',
     requested_ref: value.requested_ref || value.base_commit || '',
-    allowed_paths: (value.allowed_paths || []).join('\n'),
-    validation_plan: JSON.stringify(value.validation_plan || [], null, 2),
-    image_digest: value.image_digest || value.trusted_image || '',
-    allowed_tools: (value.allowed_tools || []).join('\n'),
-    coding_runtime: value.coding_runtime || value.policy?.coding_runtime || 'legacy',
-    policy: JSON.stringify(value.policy || {
-      network: false,
-      secret_policy: {
-        source: 'block',
-        source_unscannable: 'block',
-        patch: 'block',
-        output: 'redact',
-      },
-    }, null, 2),
-    budgets: JSON.stringify(value.budgets || {}, null, 2),
   })
 }
 
@@ -426,11 +333,6 @@ function startRevision() {
 }
 
 function manifestPayload() {
-  const validationPlan = parseJsonField('validation_plan', manifestForm.validation_plan, 'array')
-  const policy = parseJsonField('policy', manifestForm.policy, 'object')
-  const budgets = parseJsonField('budgets', manifestForm.budgets, 'object')
-  if (validationPlan === undefined || policy === undefined || budgets === undefined) return null
-  policy.coding_runtime = manifestForm.coding_runtime || 'legacy'
   const payload = {
     action: 'save_draft', project_id: selectedProject.value.id,
     manifest_id: draft.value?.id || undefined,
@@ -438,12 +340,6 @@ function manifestPayload() {
     source_locator: manifestForm.source_locator,
     credential_ref: manifestForm.credential_ref,
     requested_ref: manifestForm.requested_ref,
-    allowed_paths: lines(manifestForm.allowed_paths),
-    validation_plan: validationPlan,
-    image_digest: manifestForm.image_digest,
-    allowed_tools: lines(manifestForm.allowed_tools),
-    coding_runtime: manifestForm.coding_runtime || 'legacy',
-    policy, budgets,
   }
   if (
     manifestForm.credential_label.trim()
@@ -480,13 +376,13 @@ async function saveDraft() {
 }
 
 async function publishDraft() {
-  await ElMessageBox.confirm('发布后该版本不可修改，确认继续？', '发布 Manifest')
+  await ElMessageBox.confirm('发布后该 Git 配置版本不可修改，确认继续？', '发布 Git 配置')
   publishing.value = true
   try {
     await postCgi('/pages/page_code_project.cgi', {
       action: 'publish', project_id: selectedProject.value.id, manifest_id: draft.value.id,
     })
-    ElMessage.success('Manifest 已发布')
+    ElMessage.success('Git 配置已发布')
     manifestVisible.value = false
     await loadProjects()
   } finally { publishing.value = false }
@@ -503,7 +399,11 @@ onMounted(loadProjects)
 .block { margin-bottom: 16px; }
 .manifest-form section { border: 1px solid var(--gap-border); border-radius: 8px; padding: 4px 16px 12px; margin-bottom: 16px; }
 .manifest-form h3 { margin-bottom: 10px; }
+.section-hint { margin: -4px 0 14px; color: var(--gap-text-muted); font-size: 13px; }
 .toolbar { display: flex; gap: 10px; margin: 14px 0; }
 .form-hint { margin-top: 6px; color: var(--gap-text-muted); font-size: 12px; word-break: break-all; }
-pre { white-space: pre-wrap; word-break: break-all; background: var(--gap-bg); padding: 12px; border-radius: 6px; }
+.manifest-summary { display: grid; gap: 10px; padding: 4px 0 8px; }
+.manifest-summary div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; align-items: start; }
+.manifest-summary span { color: var(--gap-text-muted); }
+.manifest-summary code { white-space: pre-wrap; word-break: break-all; }
 </style>

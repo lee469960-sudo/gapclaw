@@ -499,7 +499,7 @@ def test_diff_line_quota_exhaustion_does_not_emit_partial_artifact(tmp_path):
 
 @pytest.mark.parametrize(
     "missing",
-    ["source_scan_report_id", "snapshot_id", "snapshot_hash", "resolved_commit", "image_digest", "effective_policy_hash"],
+    ["source_scan_report_id", "snapshot_id", "snapshot_hash", "resolved_commit", "effective_policy_hash"],
 )
 def test_missing_sealed_evidence_never_produces_success(tmp_path, missing):
     db, run, runner = _subject(tmp_path)

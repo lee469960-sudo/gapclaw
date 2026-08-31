@@ -347,6 +347,10 @@ class CodeScanReport(Base):
     truncated_count: Mapped[int] = mapped_column(Integer, default=0)
     findings: Mapped[str] = mapped_column(Text, default="[]")
     failure_reason: Mapped[str] = mapped_column(String(64), default="")
+    publish_state: Mapped[str] = mapped_column(String(32), default="not_requested")
+    publish_preflight: Mapped[str] = mapped_column(Text, default="{}")
+    publish_confirmation: Mapped[str] = mapped_column(String(64), default="")
+    publish_result: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[str] = mapped_column(String(32), default="")
 
 
@@ -469,6 +473,13 @@ class CodeProjectManifest(Base):
     allowed_tools: Mapped[str] = mapped_column(Text, default="[]")
     policy: Mapped[str] = mapped_column(Text, default="{}")
     budgets: Mapped[str] = mapped_column(Text, default="{}")
+    local_publish_command_id: Mapped[str] = mapped_column(String(128), default="")
+    local_publish_target: Mapped[str] = mapped_column(String(16), default="")
+    local_publish_dependencies: Mapped[str] = mapped_column(Text, default="[]")
+    local_publish_network_targets: Mapped[str] = mapped_column(Text, default="[]")
+    local_publish_secret_ref: Mapped[str] = mapped_column(String(128), default="")
+    local_publish_verification_plan: Mapped[str] = mapped_column(Text, default="[]")
+    local_publish_lock_key: Mapped[str] = mapped_column(String(255), default="")
     published_at: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[str] = mapped_column(String(32), default="")
 
@@ -530,9 +541,28 @@ class CodeAgentRun(Base):
     verification_baseline: Mapped[str] = mapped_column(Text, default="{}")
     verifier_report: Mapped[str] = mapped_column(Text, default="{}")
     artifact_id: Mapped[str] = mapped_column(String(16), default="")
+    publish_state: Mapped[str] = mapped_column(String(32), default="not_requested")
+    publish_preflight: Mapped[str] = mapped_column(Text, default="{}")
+    publish_confirmation: Mapped[str] = mapped_column(String(64), default="")
+    publish_result: Mapped[str] = mapped_column(Text, default="{}")
     status: Mapped[str] = mapped_column(String(32), default="pending")
     failure_reason: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class CodePublishLock(Base):
+    __tablename__ = "code_publish_locks"
+    __table_args__ = (
+        UniqueConstraint("project_id", "environment", "lock_key", name="uq_code_publish_lock_scope"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(16), index=True)
+    environment: Mapped[str] = mapped_column(String(16), default="local")
+    lock_key: Mapped[str] = mapped_column(String(255))
+    run_id: Mapped[str] = mapped_column(String(16), index=True)
+    acquired_at: Mapped[str] = mapped_column(String(32), default="")
+    released_at: Mapped[str] = mapped_column(String(32), default="")
 
 
 class CodeArtifact(Base):

@@ -32,6 +32,7 @@ TERMINAL_PRESENTATION = {
     "cancelled": ("已取消", "info"),
     "timed_out": ("已超时", "warning"),
     "failed": ("执行失败", "danger"),
+    "unknown": ("状态未知", "warning"),
 }
 
 
@@ -48,19 +49,25 @@ def _redact_runtime_value(value):
     return value
 
 
+def _runtime_event_records(runtime: dict) -> list[dict]:
+    """Return runtime events from both raw Claude result and persisted profile stream."""
+    records: list[dict] = []
+    runtime_result = runtime.get("runtime_result")
+    if isinstance(runtime_result, dict):
+        events = runtime_result.get("runtime_events")
+        if isinstance(events, list):
+            records.extend(item for item in events if isinstance(item, dict))
+    profile_events = runtime.get("code_profile_events")
+    if isinstance(profile_events, list):
+        records.extend(item for item in profile_events if isinstance(item, dict))
+    return records
+
+
 def _runtime_code_snippets(runtime: dict) -> list[dict[str, str]]:
     """Collect bounded, redacted code contexts from Claude runtime events."""
-    runtime_result = runtime.get("runtime_result")
-    if not isinstance(runtime_result, dict):
-        return []
-    events = runtime_result.get("runtime_events")
-    if not isinstance(events, list):
-        return []
     snippets: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
-    for event in events:
-        if not isinstance(event, dict):
-            continue
+    for event in _runtime_event_records(runtime):
         phase = str(event.get("type") or event.get("phase") or "").strip()
         if phase not in {"file_changed", "tool_call", "test_run"}:
             continue
@@ -85,6 +92,47 @@ def _runtime_code_snippets(runtime: dict) -> list[dict[str, str]]:
         if len(snippets) >= 12:
             break
     return snippets
+
+
+def _normalize_changed_path(path: str, *, workspace_path: str = "", workspace_mount: str = "") -> str:
+    normalized = str(path or "").replace("\\", "/").strip()
+    if not normalized:
+        return ""
+    for root in (workspace_mount, workspace_path):
+        root = str(root or "").replace("\\", "/").rstrip("/")
+        if root and normalized == root:
+            return ""
+        if root and normalized.startswith(root + "/"):
+            return normalized[len(root) + 1:]
+    return normalized.strip("/")
+
+
+def _runtime_changed_paths(runtime: dict, *, workspace_path: str = "", workspace_mount: str = "") -> list[str]:
+    """Derive changed paths from persisted Claude evidence when verifier report is missing."""
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw_path: str) -> None:
+        path = _normalize_changed_path(
+            raw_path,
+            workspace_path=workspace_path,
+            workspace_mount=workspace_mount,
+        )
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+
+    runtime_result = runtime.get("runtime_result")
+    if isinstance(runtime_result, dict):
+        changed_files = runtime_result.get("changed_files")
+        if isinstance(changed_files, list):
+            for item in changed_files:
+                add(str(item or ""))
+    for event in _runtime_event_records(runtime):
+        phase = str(event.get("type") or event.get("phase") or "").strip()
+        if phase == "file_changed":
+            add(str(event.get("path") or ""))
+    return paths
 
 
 def serialize_code_result(run, artifact=None) -> dict:
@@ -134,6 +182,7 @@ def serialize_code_result(run, artifact=None) -> dict:
         "skills": (runner_facts.get("claude_code_skills") or {}).get("skills", []),
         "mcp_servers": (runner_facts.get("claude_code_mcp") or {}).get("servers", []),
         "runtime_result": runner_facts.get("claude_code_runtime") or {},
+        "code_profile_events": runner_facts.get("code_profile_events") or [],
         "readiness": {
             "workspace_files": {"status": "passed" if getattr(run, "workspace_path", "") or source_facts.get("path") else "failed", "reason": "" if getattr(run, "workspace_path", "") or source_facts.get("path") else "workspace_not_materialized"},
             "git_metadata": {"status": "passed" if source_facts.get("repo_root_ready") is True else "failed", "reason": source_facts.get("repo_root_reason", "git_metadata_unverified")},
@@ -142,31 +191,68 @@ def serialize_code_result(run, artifact=None) -> dict:
             "model_preflight": {"status": "passed" if preflight.get("passed") is True else "failed", "reason": model_reason if preflight.get("passed") is not True else "", "repair_action": preflight.get("repair_action", "") or model_guidance.get("repair_action", ""), "repair_label": preflight.get("repair_label", "") or model_guidance.get("repair_label", "")},
         },
     })
+    if not (report.get("changed_paths") or report.get("changed_files")):
+        fallback_paths = _runtime_changed_paths(
+            runtime_summary,
+            workspace_path=str(getattr(run, "workspace_path", "") or ""),
+            workspace_mount=str(runner_facts.get("workspace_mount") or ""),
+        )
+        if fallback_paths:
+            report = {**report, "changed_paths": fallback_paths}
     verified = report.get("passed") is True
     sealed = bool(artifact and artifact.status == "sealed")
+    raw_failure_reason = str(getattr(run, "failure_reason", "") or "")
     status = run.status
-    if status == "patch_ready" and not (verified and sealed):
-        status = "infrastructure_error"
+    runtime_result = runtime_summary.get("runtime_result")
+    runtime_completed = (
+        isinstance(runtime_result, dict)
+        and runtime_result.get("status") == "coding_completed"
+    )
+    if status == "failed" and raw_failure_reason in {"", "failed"} and runtime_completed:
+        status = "verification_inconclusive"
+        if not report.get("reason"):
+            report = {**report, "reason": "verification_not_completed_after_coding"}
+    if status == "patch_ready" and not verified:
+        status = "verification_inconclusive"
     label, severity = TERMINAL_PRESENTATION.get(
         status,
         ("运行中" if status in {"pending", "running"} else "未知结果", "info"),
     )
-    directly_adoptable = status == "patch_ready" and verified and sealed
+    directly_adoptable = status == "patch_ready" and verified
     host_validate = ""
     if directly_adoptable and str(coding_runtime) == "claude_code":
         host_validate = "#!/usr/bin/env bash\nset -euo pipefail\ngit diff --check\ngit status --short\n"
     terminal = status not in {"pending", "running"}
+    workspace_state = str(getattr(run, "workspace_state", "") or "")
+    workspace_available = bool(getattr(run, "workspace_path", "") or "") and workspace_state not in {
+        "expired",
+        "deleted",
+    }
+    if (
+        source_facts.get("preparation_mode") == "persistent_git_sync"
+        and source_facts.get("repo_root_mode") != "sandbox_git_synced"
+    ):
+        workspace_available = False
     warning = ""
     if terminal and not directly_adoptable:
         warning = "该结果未形成完整的已验证 patch，不可直接采用。"
-    raw_failure_reason = str(getattr(run, "failure_reason", "") or "")
+    suppress_generic_failure = (
+        status == "verification_inconclusive"
+        and raw_failure_reason in {"", "failed"}
+        and runtime_completed
+    )
     # Successful Code runs historically persist ``failure_reason=patch_ready``
     # as their terminal marker. Do not reinterpret that marker as an unknown
     # internal failure in the user-facing result.
     failure = (
         {}
-        if status in {"patch_ready", "no_change_justified"}
-        and raw_failure_reason in {"", status, "patch_ready"}
+        if (
+            (
+                status in {"patch_ready", "no_change_justified"}
+                and raw_failure_reason in {"", status, "patch_ready"}
+            )
+            or suppress_generic_failure
+        )
         else external_failure(raw_failure_reason)
     )
     return {
@@ -184,6 +270,10 @@ def serialize_code_result(run, artifact=None) -> dict:
         "failure": failure,
         "manifest_id": getattr(run, "manifest_id", ""),
         "manifest_version": getattr(run, "manifest_version", 0),
+        "workspace": {
+            "state": workspace_state,
+            "available": workspace_available,
+        },
         "verifier_report": report,
         "budget_usage": budget_usage,
         "runtime": runtime_summary,
@@ -270,7 +360,7 @@ def format_patch_verification_output(result: dict) -> str:
     if code_snippets:
         lines.extend(["### 阶段代码片段", "> 以下内容来自 Claude Code 的 READ/EDIT/TEST 阶段，已脱敏并限制长度。"])
         for item in code_snippets:
-            phase_label = {"file_changed": "EDIT", "tool_call": "READ/TOOL", "test_run": "TEST"}.get(item["phase"], item["phase"])
+            phase_label = {"file_changed": "编辑", "tool_call": "读取/工具", "test_run": "测试"}.get(item["phase"], item["phase"])
             target = item["path"] or item["command"] or "运行上下文"
             fence = "````" if "```" in item["snippet"] else "```"
             lines.extend([
@@ -285,13 +375,13 @@ def format_patch_verification_output(result: dict) -> str:
             ])
         lines.append("")
     lines.extend([
-        "## Patch 验证结果",
-        f"- Code run：`{safe(result.get('run_id'), 120) or '-'}`",
-        f"- Manifest：v{result.get('manifest_version') or '-'}（{safe(result.get('manifest_id'), 120) or '-'}）",
-        f"- Runtime：{coding_runtime}",
+        "## 补丁验证结果",
+        f"- 代码运行：`{safe(result.get('run_id'), 120) or '-'}`",
+        f"- 运行清单：v{result.get('manifest_version') or '-'}（{safe(result.get('manifest_id'), 120) or '-'}）",
+        f"- 编码运行时：{coding_runtime}",
         f"- 执行状态：{label}（{status}）",
-        f"- Verifier：{verifier}",
-        f"- Sealed artifact：{'已生成' if result.get('sealed') else '不可用'}",
+        f"- 验证器：{verifier}",
+            f"- 封存工件：{'已生成' if result.get('sealed') else '未生成（不影响已验证结果）'}",
         f"- 可直接采用：{adoptable}",
         "- Git 提交/推送：未执行（如需执行，请在下一条消息明确要求）",
     ])
@@ -318,10 +408,10 @@ def format_patch_verification_output(result: dict) -> str:
     ):
         lines.extend([
             "",
-            "### Claude Code Runtime",
-            f"- Preflight：{'通过' if preflight.get('passed') is True else '未通过或不可用'}",
-            f"- Skills：{len(skills)}" + (f"（{', '.join(skill_names)}）" if skill_names else ""),
-            f"- MCP：{len(mcp_servers)}" + (f"（{', '.join(mcp_names)}）" if mcp_names else ""),
+            "### Claude Code 运行时",
+            f"- 运行前检查：{'通过' if preflight.get('passed') is True else '未通过或不可用'}",
+            f"- 技能：{len(skills)}" + (f"（{', '.join(skill_names)}）" if skill_names else ""),
+            f"- MCP 服务：{len(mcp_servers)}" + (f"（{', '.join(mcp_names)}）" if mcp_names else ""),
         ])
         for key, title in (
             ("workspace_files", "Workspace 文件"),
@@ -335,22 +425,22 @@ def format_patch_verification_output(result: dict) -> str:
                 state = "通过" if fact.get("status") == "passed" else "失败"
                 detail = safe(fact.get("reason") or fact.get("mode") or "", 300)
                 lines.append(f"- {title}：{state}" + (f"（{detail}）" if detail else ""))
-        lines.extend(["", "<details>", "<summary>Runtime 证据</summary>", "", "```json", json_block(runtime), "```", "", "</details>"])
+        lines.extend(["", "<details>", "<summary>运行时证据</summary>", "", "```json", json_block(runtime), "```", "", "</details>"])
     if artifact:
         lines.extend([
             "",
-            "### Sealed artifact",
-            f"- Base：`{safe(artifact.get('base_commit'), 120) or '-'}`",
-            f"- Diff：`{safe(artifact.get('diff_hash'), 120) or '-'}`",
-            f"- Policy：`{safe(artifact.get('policy_hash'), 120) or '-'}`",
-            f"- Verifier report hash：`{safe(artifact.get('verifier_report_hash'), 120) or '-'}`",
+            "### 封存工件",
+            f"- 基线提交：`{safe(artifact.get('base_commit'), 120) or '-'}`",
+            f"- 差异哈希：`{safe(artifact.get('diff_hash'), 120) or '-'}`",
+            f"- 策略哈希：`{safe(artifact.get('policy_hash'), 120) or '-'}`",
+            f"- 验证报告哈希：`{safe(artifact.get('verifier_report_hash'), 120) or '-'}`",
         ])
     # Verifier reports may contain scanner excerpts; redact strings before
     # copying them into a conversational channel.
-    lines.extend(["", "<details>", "<summary>Verifier 证据</summary>", "", "```json", json_block(_redact_runtime_value(report)), "```", "", "</details>"])
+    lines.extend(["", "<details>", "<summary>验证器证据</summary>", "", "```json", json_block(_redact_runtime_value(report)), "```", "", "</details>"])
     host_validate = str(result.get("host_validate") or "").strip()
     if host_validate:
-        lines.extend(["", "### Host 验证命令", "```bash", host_validate, "```"])
+        lines.extend(["", "### 主机验证命令", "```bash", host_validate, "```"])
     if result.get("warning"):
         lines.extend(["", f"> {safe(result.get('warning'), 500)}"])
     return "\n".join(lines)

@@ -16,6 +16,7 @@ from app.services.code_agent.workspace import (
     WorkspaceIntegrityError,
     WorkspaceIntegrityGuard,
     WorkspaceManager,
+    sync_repository_in_sandbox,
 )
 
 
@@ -74,6 +75,113 @@ def test_workspace_materializes_sealed_snapshot_without_running_hooks(tmp_path):
     assert json.loads(run.source_facts)["preparation_mode"] == "snapshot_materialize"
 
 
+def test_persistent_workspace_syncs_git_inside_bound_sandbox_without_snapshot(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    run = SimpleNamespace(
+        id="run1",
+        manifest_id="manifest1",
+        project_id="project1",
+        repository="http://g.testskydata.com/system/dbt-gamestat-ck.git",
+        requested_ref="dev",
+        base_commit="dev",
+        resolved_commit="",
+        snapshot_id="",
+        snapshot_hash="",
+        source_scan_report_id="",
+        workspace_path=str(workspace),
+        source_facts=json.dumps({
+            "path": str(workspace),
+            "repository": "http://g.testskydata.com/system/dbt-gamestat-ck.git",
+            "workspace_mode": "persistent_sandbox",
+        }),
+        task_contract=json.dumps({"requested_ref": "dev"}),
+    )
+    commit = "a" * 40
+    calls = []
+
+    class _Db:
+        def get(self, *_args):
+            return None
+
+    class _Runner:
+        def exec(self, _container_id, command, *, timeout_seconds, environment=None):
+            calls.append((command, environment or {}))
+            if command == "git --version":
+                return 0, "git version 2.39.0"
+            return 0, f"HEAD is now at {commit}\n{commit}\n"
+
+    facts = SimpleNamespace(
+        container_id="container1",
+        workspace_mount="/workplace/code/project1/workspace",
+    )
+    run.container_id = facts.container_id
+
+    result = sync_repository_in_sandbox(_Db(), run, _Runner(), facts)
+
+    assert result["resolved_commit"] == commit
+    assert run.resolved_commit == commit
+    assert run.base_commit == commit
+    assert run.snapshot_id == ""
+    assert run.source_scan_report_id == ""
+    assert "git fetch --tags --prune origin dev" in calls[1][0]
+    assert json.loads(run.source_facts)["repo_root_mode"] == "sandbox_git_synced"
+
+
+def test_persistent_workspace_reads_head_when_sync_output_lacks_commit(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    run = SimpleNamespace(
+        id="run1",
+        manifest_id="manifest1",
+        project_id="project1",
+        repository="http://g.testskydata.com/system/dbt-gamestat-ck.git",
+        requested_ref="HEAD",
+        base_commit="",
+        resolved_commit="",
+        snapshot_id="old-snapshot",
+        snapshot_hash="old-hash",
+        source_scan_report_id="old-scan",
+        workspace_path=str(workspace),
+        source_facts=json.dumps({
+            "path": str(workspace),
+            "repository": "http://g.testskydata.com/system/dbt-gamestat-ck.git",
+            "workspace_mode": "persistent_sandbox",
+        }),
+        task_contract=json.dumps({"requested_ref": "HEAD"}),
+    )
+    commit = "b" * 40
+    calls = []
+
+    class _Db:
+        def get(self, *_args):
+            return None
+
+    class _Runner:
+        def exec(self, _container_id, command, *, timeout_seconds, environment=None):
+            calls.append(command)
+            if command == "git --version":
+                return 0, "git version 2.39.0"
+            if command.endswith("git rev-parse HEAD"):
+                return 0, f"{commit}\n"
+            return 0, "HEAD is now at a9787bc Merge branch 'dev' into 'main'\n"
+
+    facts = SimpleNamespace(
+        container_id="container1",
+        workspace_mount="/workplace/code/project1/workspace",
+    )
+    run.container_id = facts.container_id
+
+    result = sync_repository_in_sandbox(_Db(), run, _Runner(), facts)
+
+    assert result["resolved_commit"] == commit
+    assert run.resolved_commit == commit
+    assert run.base_commit == commit
+    assert any(command.endswith("git rev-parse HEAD") for command in calls)
+
+
 def test_concurrent_runs_never_share_writable_workspace(tmp_path):
     repo, commit = _repo(tmp_path)
     store, sealed = _seal(tmp_path, repo, commit)
@@ -117,6 +225,22 @@ def test_integrity_guard_authorizes_managed_runtime_changes_within_allowed_paths
 
     assert WorkspaceIntegrityGuard(run).authorize_runtime_changes() == ("models/model.sql",)
     assert json.loads((Path(run.workspace_path).parent / "control" / "authorized_writes.json").read_text()) == ["models/model.sql"]
+
+
+def test_integrity_guard_treats_dot_allowed_path_as_workspace_root(tmp_path):
+    repo, commit = _repo(tmp_path)
+    store, sealed = _seal(tmp_path, repo, commit)
+    run = _run(
+        repo, commit, sealed, status="pending", failure_reason="",
+        effective_policy=json.dumps({"allowed_paths": ["."]}),
+    )
+    WorkspaceManager(tmp_path / "runs").prepare(run, snapshot_store=store)
+    nested = Path(run.workspace_path) / "gamestat"
+    nested.mkdir()
+    (nested / "dbt_project.yml").write_text("pg_host: 192.168.0.105:5432\n", encoding="utf-8")
+
+    assert WorkspaceIntegrityGuard(run).authorize_runtime_changes() == ("gamestat/dbt_project.yml",)
+    assert json.loads((Path(run.workspace_path).parent / "control" / "authorized_writes.json").read_text()) == ["gamestat/dbt_project.yml"]
 
 
 def test_integrity_guard_rejects_frozen_baseline_drift(tmp_path):

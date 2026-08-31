@@ -10,11 +10,11 @@ OpenSpec `tasks.md` 是唯一正式任务来源：`openspec/changes/code-agent-c
 
 ## Current Phase
 
-Phase 0: Planning initialization（complete）
+Phase 2: Sandbox 与工具链（in_progress）
 
 ## Next Step
 
-开始执行 Phase 1；每个 OpenSpec task 均须先完成代码/测试或交付物并验证，再更新 `progress.md`，最后勾选 `tasks.md`。
+所有 OpenSpec tasks 已完成并验证；下一步可运行 `opsx:verify code-agent-claude-run-v2`，确认后再归档。
 
 ## Phases
 
@@ -27,31 +27,31 @@ Phase 0: Planning initialization（complete）
 
 - OpenSpec task mapping: 1.1–1.4
 - Depends on: Phase 0
-- Status: pending
+- Status: complete
 
 ### Phase 2: Sandbox 与工具链
 
 - OpenSpec task mapping: 2.1–2.4
 - Depends on: Phase 1
-- Status: pending
+- Status: complete
 
 ### Phase 3: 发布执行与证据
 
 - OpenSpec task mapping: 3.1–3.4
 - Depends on: Phase 2
-- Status: pending
+- Status: complete
 
 ### Phase 4: Verifier 与用户界面
 
 - OpenSpec task mapping: 4.1–4.4
 - Depends on: Phase 3
-- Status: pending
+- Status: complete
 
 ### Phase 5: 集成验收与回滚
 
 - OpenSpec task mapping: 5.1–5.4
 - Depends on: Phase 4
-- Status: pending
+- Status: complete
 
 ## Boundaries
 

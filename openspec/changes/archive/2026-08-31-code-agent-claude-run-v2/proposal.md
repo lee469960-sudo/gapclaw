@@ -5,7 +5,7 @@ CodeAgent 目前能够在 Sandbox 中完成代码任务，但缺少受控执行 
 ## What Changes
 
 - 增加按 Manifest 登记的 `local_publish_command_id`，只允许执行已批准的 canonical 发布命令。
-- 在现有 CodeAgent runner 中提供发布所需的固定版本工具链（仅包含命令实际依赖），并支持 `amd64`/`arm64` 双架构 digest 固定镜像。
+- 在现有 CodeAgent runner 中提供发布所需的固定基础工具链，并支持 `amd64`/`arm64` 双架构 digest 固定镜像；dbt、jq、clickhouse-client 等业务工具不是运行环境必备项。
 - 为发布 run 增加非 root、禁止提权、受限文件路径和最小网络访问策略；禁止 Docker Socket 与宿主机路径暴露。
 - 通过现有 Secret 管理运行时注入 local 发布凭证，禁止秘密进入仓库、命令参数、日志和模型上下文。
 - 增加发布前 preflight/dry-run 与一次性人工确认；强制 local target，不允许切换到其他环境。

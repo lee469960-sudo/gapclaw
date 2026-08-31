@@ -1,4 +1,4 @@
-"""Coding SOP: baked skills, grill gate, credentials, and archive-after-seal."""
+"""Coding SOP: baked skills, grill gate, and credentials."""
 
 from __future__ import annotations
 
@@ -26,9 +26,7 @@ from app.routers.agent_chat import ChatBody, chat_post
 from app.security import encrypt_secret
 from app.services.code_agent.claude_code_runtime import (
     ClaudeCodeRuntimeAdapter,
-    archive_openspec_after_seal,
     materialize_coding_sop,
-    record_claude_code_openspec_archive,
     resolve_claude_code_exec_env,
 )
 import app.services.code_agent.control_plane as control_plane
@@ -137,58 +135,6 @@ def test_resolve_claude_code_exec_env_uses_bound_llm():
     assert env["PIP_DEFAULT_TIMEOUT"] == "15"
     assert env["PIP_RETRIES"] == "0"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
-
-
-class _ArchiveRunner:
-    def __init__(self):
-        self.commands: list[str] = []
-
-    def start_stopped(self, container_id: str) -> None:
-        return None
-
-    def freeze(self, container_id: str) -> None:
-        return None
-
-    def exec(self, container_id: str, command: str, *, timeout_seconds: int, environment=None):
-        self.commands.append(command)
-        if command == "openspec list --json":
-            return 0, json.dumps({
-                "changes": [
-                    {"name": "fix-profiles", "status": "in-progress"},
-                    {"name": "done-one", "status": "complete"},
-                ]
-            })
-        return 0, "{}"
-
-
-def test_archive_openspec_after_seal_archives_incomplete_changes_only():
-    runner = _ArchiveRunner()
-    run = SimpleNamespace(container_id="container1")
-    result = archive_openspec_after_seal(runner, run)
-    assert result["archived"] == ["fix-profiles"]
-    assert any(cmd.startswith("openspec archive") for cmd in runner.commands)
-    assert all("done-one" not in cmd for cmd in runner.commands if cmd.startswith("openspec archive"))
-
-
-def test_archive_openspec_after_seal_noop_without_container():
-    runner = _ArchiveRunner()
-    result = archive_openspec_after_seal(runner, SimpleNamespace(container_id=""))
-    assert result["archived"] == []
-    assert runner.commands == []
-
-
-def test_record_claude_code_openspec_archive_persists_sanitized_runner_fact():
-    secret = "sk-" + "e" * 20
-    run = SimpleNamespace(runner_facts="{}")
-    record_claude_code_openspec_archive(
-        run,
-        {"archived": ["fix-profiles"], "reason": f"token={secret}"},
-    )
-
-    facts = json.loads(run.runner_facts)
-    assert facts["claude_code_openspec_archive"]["archived"] == ["fix-profiles"]
-    assert secret not in run.runner_facts
-    assert "[REDACTED:SECRET]" in run.runner_facts
 
 
 def _db():

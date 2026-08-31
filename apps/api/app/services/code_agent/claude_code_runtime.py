@@ -680,7 +680,7 @@ def _runtime_summary(exit_code: int, output: str) -> str:
     if stream_text:
         return redact_code_output(stream_text[-1]).text[:1000]
     if saw_json_record:
-        return "Claude Code 未返回可显示的摘要（请查看执行过程）"
+        return "Claude Code 已完成工具调用，但未返回最终文字摘要；请查看上述执行过程和验证结果。"
     return raw[:1000]
 
 
@@ -930,17 +930,21 @@ def _build_claude_code_command(
         "Implement and verify the requested patch, but do not run git commit or git push; "
         "those actions require an explicit follow-up user request. "
     )
-    network_guard = ""
-    if not bool(runtime_input.effective_policy.get("network")):
-        network_guard = (
-            "This sandbox has no network access. Do not install or download dependencies "
-            "(pip, npm, yarn, pnpm, apt, curl, wget, or git clone). Use tools already "
-            "available in the image; if a required tool is missing, report the limitation "
-            "and stop instead of retrying package versions. "
-        )
+    dependency_guard = (
+        "You are running inside the Agent's bound persistent sandbox. When the repository "
+        "task requires missing project tools, inspect the repository first and install the "
+        "minimum required system or application dependencies inside this sandbox if the "
+        "sandbox permissions allow it. If installation is blocked by sandbox permissions or "
+        "network policy, report the exact blocker and stop. "
+    )
+    user_language_guard = (
+        "Write all user-facing task summaries, clarifications, final results, and failure "
+        "explanations in Simplified Chinese. Keep commands, file paths, error identifiers, "
+        "status values, code, and tool output unchanged. "
+    )
     prompt = (
-        "Follow the coding SOP in /workspace/.claude/CLAUDE.md. "
-        f"{publish_guard}{network_guard}{prompt}"
+        f"Follow the coding SOP in {runtime_input.repository_cwd}/.claude/CLAUDE.md. "
+        f"{user_language_guard}{publish_guard}{dependency_guard}{prompt}"
     )
     parts = [
         "cd",
@@ -1187,6 +1191,13 @@ def runtime_input_from_execution(
     budgets = policy.get("budgets") if isinstance(policy, dict) else {}
     allowed_tools = policy.get("allowed_tools") if isinstance(policy, dict) else []
     validation_plan = contract.get("validation_plan") if isinstance(contract, dict) else []
+    try:
+        runner_facts = json.loads(getattr(execution, "runner_facts_json", "") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        runner_facts = {}
+    if not isinstance(runner_facts, dict):
+        runner_facts = {}
+    repository_cwd = str(runner_facts.get("workspace_mount") or "/workspace")
     return ClaudeCodeRuntimeInput(
         run_id=str(getattr(run, "id", "") or getattr(execution, "run_id", "") or ""),
         container_id=str(getattr(execution, "container_id", "") or getattr(run, "container_id", "") or ""),
@@ -1194,7 +1205,8 @@ def runtime_input_from_execution(
         task_contract=contract if isinstance(contract, dict) else {},
         effective_policy=policy if isinstance(policy, dict) else {},
         model_config=model_config,
-        repository_cwd="/workspace",
+        repository_cwd=repository_cwd,
+        runtime_config_dir=f"{repository_cwd.rstrip('/')}/.claude",
         allowed_tools=tuple(str(tool) for tool in (allowed_tools or []) if isinstance(tool, str)),
         validation_plan=tuple(item for item in (validation_plan or []) if isinstance(item, dict)),
         timeout_seconds=int(getattr(execution, "timeout_seconds", 1800) or 1800),
@@ -1256,69 +1268,6 @@ def _runner_exec(
         suffix = f" ({detail[:120]})" if detail else ""
         return 1, f"{type(exc).__name__}: {exc}{suffix}"
     return int(exit_code), str(output or "")
-
-
-def archive_openspec_after_seal(runner, run) -> dict[str, Any]:
-    """Archive OpenSpec changes in the workspace after a successful seal."""
-    container_id = str(getattr(run, "container_id", "") or "")
-    archived: list[str] = []
-    if not container_id:
-        return {"archived": archived, "reason": "runner_unavailable"}
-    start = getattr(runner, "start_stopped", None)
-    if callable(start):
-        try:
-            start(container_id)
-        except Exception:
-            return {"archived": archived, "reason": "runner_unavailable"}
-    exit_code, output = _runner_exec(
-        runner, container_id, "openspec list --json", 60,
-    )
-    if exit_code != 0:
-        return {"archived": archived, "reason": "openspec_list_failed"}
-    try:
-        payload = json.loads(output or "{}")
-    except json.JSONDecodeError:
-        return {"archived": archived, "reason": "openspec_list_invalid"}
-    changes = payload.get("changes") if isinstance(payload, dict) else []
-    if not isinstance(changes, list):
-        return {"archived": archived, "reason": "openspec_list_invalid"}
-    for item in changes:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        status = str(item.get("status") or "").strip()
-        if not name or status == "complete":
-            continue
-        code, _out = _runner_exec(
-            runner,
-            container_id,
-            f"openspec archive {shlex.quote(name)} -y --json",
-            120,
-        )
-        if code == 0:
-            archived.append(name)
-    freeze = getattr(runner, "freeze", None)
-    if callable(freeze):
-        try:
-            freeze(container_id)
-        except Exception:
-            pass
-    return {"archived": archived, "reason": ""}
-
-
-def record_claude_code_openspec_archive(run, result: Mapping[str, Any]) -> None:
-    """Persist sanitized OpenSpec archive evidence on the run."""
-    try:
-        runner_facts = json.loads(getattr(run, "runner_facts", "") or "{}")
-    except (TypeError, json.JSONDecodeError):
-        runner_facts = {}
-    if not isinstance(runner_facts, dict):
-        runner_facts = {}
-    runner_facts["claude_code_openspec_archive"] = _redact_value({
-        "archived": result.get("archived", []) if isinstance(result, Mapping) else [],
-        "reason": result.get("reason", "") if isinstance(result, Mapping) else "",
-    })
-    run.runner_facts = json.dumps(runner_facts, sort_keys=True)
 
 
 def _parse_mcp_config(raw: str) -> tuple[bool, str]:

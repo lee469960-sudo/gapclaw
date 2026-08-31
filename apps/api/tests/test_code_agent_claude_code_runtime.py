@@ -244,11 +244,30 @@ def test_claude_code_runtime_adapter_returns_coding_facts_not_patch_ready():
     assert result.summary == "coding done"
     assert "patch_ready" not in payload
     assert "patch_ready" not in payload.values()
-    assert runner.calls == [(
-        "container1",
-        "cd /workspace && claude -p 'Follow the coding SOP in /workspace/.claude/CLAUDE.md. Implement and verify the requested patch, but do not run git commit or git push; those actions require an explicit follow-up user request. This sandbox has no network access. Do not install or download dependencies (pip, npm, yarn, pnpm, apt, curl, wget, or git clone). Use tools already available in the image; if a required tool is missing, report the limitation and stop instead of retrying package versions. Fix the failing test' --output-format json --model claude-sonnet --max-turns 4 --permission-mode acceptEdits --no-chrome --name code-agent-run-run1 --allowedTools Bash Edit Grep Read",
-        120,
-    )]
+    assert len(runner.calls) == 1
+    container_id, command, timeout_seconds = runner.calls[0]
+    assert container_id == "container1"
+    assert timeout_seconds == 120
+    assert command.startswith("cd /workspace && claude -p 'Follow the coding SOP")
+    assert "Write all user-facing task summaries, clarifications, final results, and failure explanations in Simplified Chinese." in command
+    assert "Keep commands, file paths, error identifiers, status values, code, and tool output unchanged." in command
+    assert "platform-controlled local publish stage" not in command
+    assert "Do not execute repository deploy, publish, release" not in command
+    assert "install the minimum required system or application dependencies" in command
+    assert "--output-format json --model claude-sonnet" in command
+    assert "--name code-agent-run-run1 --allowedTools Bash Edit Grep Read" in command
+
+
+def test_local_publish_enters_claude_code_without_platform_publish_guard():
+    runner = FakeClaudeRunner()
+    ClaudeCodeRuntimeAdapter(runner=runner).run(
+        _runtime_input(objective="使用 CI 中的发布命令执行 local 环境发布")
+    )
+    command = runner.calls[0][1]
+    assert "platform-controlled local publish stage" not in command
+    assert "Do not execute repository deploy, publish, release" not in command
+    assert "install the minimum required system or application dependencies" in command
+    assert "If installation is blocked by sandbox permissions or network policy" in command
 
 
 def test_claude_code_runtime_adapter_streams_tool_events_before_result():

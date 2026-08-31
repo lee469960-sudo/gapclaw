@@ -161,9 +161,6 @@ class ManifestOptionsResponse(BaseModel):
     remote_origins: list[str] = Field(default_factory=list)
     local_roots: list[str] = Field(default_factory=list)
     credential_references: list[CredentialReferenceResponse] = Field(default_factory=list)
-    trusted_image_digests: list[str] = Field(default_factory=list)
-    coding_runtimes: list[str] = Field(default_factory=list)
-    security_config: dict[str, Any] = Field(default_factory=dict)
 
 
 def _has_page_permission(user: User, db: Session) -> bool:
@@ -209,7 +206,6 @@ def _manifest_validation_errors(manifest: CodeProjectManifest) -> dict[str, str]
         or manifest.source_type
         or manifest.credential_ref
         or manifest.requested_ref
-        or manifest.image_digest
     )
     if secure_source:
         if not manifest.source_type.strip():
@@ -220,8 +216,6 @@ def _manifest_validation_errors(manifest: CodeProjectManifest) -> dict[str, str]
             errors["source_locator"] = "manifest_source_not_validated"
         if not manifest.requested_ref.strip():
             errors["requested_ref"] = "manifest_missing_requested_ref"
-        if not manifest.image_digest.strip():
-            errors["image_digest"] = "manifest_missing_image_digest"
         if manifest.status == "draft":
             settings = get_settings()
             try:
@@ -239,26 +233,11 @@ def _manifest_validation_errors(manifest: CodeProjectManifest) -> dict[str, str]
                         raise RepositorySourcePolicyError()
             except (RepositorySourcePolicyError, LocalRepositoryPolicyError):
                 errors["source_locator"] = "repository_source_not_allowed"
-            if manifest.image_digest.strip() and manifest.image_digest not in set(
-                _settings_list(settings.code_trusted_image_digests)
-            ):
-                errors["image_digest"] = "image_digest_not_allowed"
     else:
         if not manifest.repository.strip():
             errors["repository"] = "manifest_missing_repository"
         if not manifest.base_commit.strip():
             errors["base_commit"] = "manifest_missing_base_commit"
-    if not _decode_json(manifest.allowed_paths, []):
-        errors["allowed_paths"] = "manifest_missing_allowed_paths"
-    if not _decode_json(manifest.validation_plan, []):
-        errors["validation_plan"] = "manifest_missing_validation_plan"
-    if not secure_source and not manifest.trusted_image.strip():
-        errors["trusted_image"] = "manifest_missing_trusted_image"
-    if not _decode_json(manifest.allowed_tools, []):
-        errors["allowed_tools"] = "manifest_missing_allowed_tools"
-    budgets = _decode_json(manifest.budgets, {})
-    if not budgets or not all(isinstance(value, int) and value > 0 for value in budgets.values()):
-        errors["budgets"] = "manifest_invalid_budgets"
     return errors
 
 
@@ -324,9 +303,6 @@ def _manifest_options(db: Session, user: User, project: CodeProject) -> dict[str
     local_roots = _settings_list(settings.code_local_repository_roots)
     if "local_repository_roots" in readiness["errors"]:
         local_roots = []
-    image_digests = _settings_list(settings.code_trusted_image_digests)
-    if "trusted_image_digests" in readiness["errors"]:
-        image_digests = []
     credentials = [
         item.to_dict()
         for item in DeployTokenSecretStore(db).project_metadata(actor=user, project=project)
@@ -339,9 +315,6 @@ def _manifest_options(db: Session, user: User, project: CodeProject) -> dict[str
         "remote_origins": origins,
         "local_roots": local_roots,
         "credential_references": credentials,
-        "trusted_image_digests": sorted(image_digests),
-        "coding_runtimes": ["legacy", "claude_code"],
-        "security_config": readiness,
     }).model_dump()
 
 
@@ -381,11 +354,6 @@ def _secure_draft_values(
                 else (manifest.requested_ref or manifest.base_commit or "").strip()
             )
         ),
-        "image_digest": (
-            body.image_digest.strip()
-            if body.image_digest is not None
-            else (manifest.image_digest or "").strip()
-        ),
     }
     errors: dict[str, str] = {}
     settings = get_settings()
@@ -423,15 +391,6 @@ def _secure_draft_values(
         if values["credential_ref"] not in visible_references:
             errors["credential_ref"] = "repository_credential_not_allowed"
     return values, errors
-
-
-def _trusted_image_from_digest_selection(image_digest: str, current: str = "") -> str:
-    selected = (image_digest or "").strip()
-    if "@" in selected:
-        image, _digest = selected.split("@", 1)
-        if image:
-            return image
-    return (current or "").strip() or selected
 
 
 def _inline_credential_requested(body: CodeProjectBody) -> bool:
@@ -690,7 +649,6 @@ async def code_project_post(
             "source_locator",
             "credential_ref",
             "requested_ref",
-            "image_digest",
         }
         inline_credential = _inline_credential_requested(body)
         structured_input = bool(secure_fields & body.model_fields_set) or inline_credential
@@ -735,24 +693,10 @@ async def code_project_post(
                     )
         if manifest not in db:
             db.add(manifest)
-        for attr in ("repository", "base_commit", "trusted_image"):
+        for attr in ("repository", "base_commit"):
             value = getattr(body, attr)
             if value is not None:
                 setattr(manifest, attr, value.strip())
-        for attr in ("allowed_paths", "validation_plan", "allowed_tools", "policy", "budgets"):
-            value = getattr(body, attr)
-            if value is not None:
-                setattr(manifest, attr, json.dumps(value, sort_keys=True))
-        if body.coding_runtime is not None:
-            runtime = body.coding_runtime.strip()
-            if runtime not in {"legacy", "claude_code"}:
-                return fail(
-                    "manifest_security_selection_invalid",
-                    data={"field_errors": {"coding_runtime": "manifest_invalid_coding_runtime"}},
-                )
-            policy = _decode_json(manifest.policy, {})
-            policy["coding_runtime"] = runtime
-            manifest.policy = json.dumps(policy, sort_keys=True)
         if structured_input:
             timestamp = now_str()
             source_type = secure_values["source_type"]
@@ -762,11 +706,6 @@ async def code_project_post(
             manifest.credential_ref = secure_values["credential_ref"]
             manifest.requested_ref = secure_values["requested_ref"]
             manifest.base_commit = secure_values["requested_ref"]
-            manifest.image_digest = secure_values["image_digest"]
-            manifest.trusted_image = _trusted_image_from_digest_selection(
-                secure_values["image_digest"],
-                manifest.trusted_image,
-            )
             manifest.security_schema_version = max(
                 manifest.security_schema_version or 0,
                 1,

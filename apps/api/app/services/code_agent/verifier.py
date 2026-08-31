@@ -63,8 +63,6 @@ class CodeVerifier:
             if not command:
                 raise ValueError("verification_plan_invalid")
             plan.append((index, command))
-        if not plan:
-            raise ValueError("verification_plan_invalid")
         return plan
 
     def capture_baseline(self, workspace_manager) -> dict:
@@ -72,7 +70,10 @@ class CodeVerifier:
         tests: list[dict] = []
         baseline = {"status": "unavailable", "reason": "baseline_unavailable", "tests": tests}
         try:
-            for index, command in self._validation_plan():
+            plan = self._validation_plan()
+            if not plan:
+                baseline = {"status": "skipped", "reason": "validation_plan_not_configured", "tests": tests}
+            for index, command in plan:
                 exit_code, output = self.runner.exec(
                     self.run.container_id,
                     command,
@@ -84,11 +85,12 @@ class CodeVerifier:
                     "exit_code": exit_code,
                     "output": redact_code_output(output).text,
                 })
-            baseline = {
-                "status": "broken" if any(item["exit_code"] != 0 for item in tests) else "passed",
-                "reason": "pre_existing_failure" if any(item["exit_code"] != 0 for item in tests) else "",
-                "tests": tests,
-            }
+            if plan:
+                baseline = {
+                    "status": "broken" if any(item["exit_code"] != 0 for item in tests) else "passed",
+                    "reason": "pre_existing_failure" if any(item["exit_code"] != 0 for item in tests) else "",
+                    "tests": tests,
+                }
         except RunnerCommandTimeout:
             raise
         except Exception:
@@ -177,53 +179,56 @@ class CodeVerifier:
             except json.JSONDecodeError:
                 baseline, baseline_tests = {}, None
             plan = self._validation_plan()
-            if (
-                not isinstance(baseline_tests, list)
-                or len(baseline_tests) != len(plan)
-                or baseline.get("status") not in {"passed", "broken"}
-            ):
-                return self._report(
-                    passed=False, outcome="verification_inconclusive",
-                    reason="verification_baseline_unavailable", changed=changed,
-                    checks=checks, tests=tests,
-                )
-            new_failure = False
-            pre_existing_failure = False
-            for index, command in plan:
-                exit_code, output = self.runner.exec(
-                    self.run.container_id,
-                    command,
-                    timeout_seconds=int((self.policy.get("budgets") or {}).get("timeout_seconds") or 1800),
-                )
-                safe_output = redact_code_output(output).text
-                baseline_test = baseline_tests[index]
-                baseline_exit = int(baseline_test.get("exit_code", 1))
-                classification = "passed"
-                if exit_code != 0:
-                    if baseline_exit == 0:
-                        classification = "new_failure"
-                        new_failure = True
-                    else:
-                        classification = "pre_existing_failure"
-                        pre_existing_failure = True
-                tests.append({
-                    "test_index": index,
-                    "command": command,
-                    "exit_code": exit_code,
-                    "output": safe_output,
-                    "failure_classification": classification,
-                })
-            checks.append("validation_plan")
-            if new_failure:
-                return self._report(
-                    passed=False, outcome="verification_failed", reason="new_validation_failure",
-                    changed=changed, checks=checks, tests=tests,
-                )
-            if pre_existing_failure:
-                return self._report(
-                    passed=False, outcome="baseline_broken", reason="pre_existing_failure",
-                    changed=changed, checks=checks, tests=tests,
-                )
+            if plan:
+                if (
+                    not isinstance(baseline_tests, list)
+                    or len(baseline_tests) != len(plan)
+                    or baseline.get("status") not in {"passed", "broken"}
+                ):
+                    return self._report(
+                        passed=False, outcome="verification_inconclusive",
+                        reason="verification_baseline_unavailable", changed=changed,
+                        checks=checks, tests=tests,
+                    )
+                new_failure = False
+                pre_existing_failure = False
+                for index, command in plan:
+                    exit_code, output = self.runner.exec(
+                        self.run.container_id,
+                        command,
+                        timeout_seconds=int((self.policy.get("budgets") or {}).get("timeout_seconds") or 1800),
+                    )
+                    safe_output = redact_code_output(output).text
+                    baseline_test = baseline_tests[index]
+                    baseline_exit = int(baseline_test.get("exit_code", 1))
+                    classification = "passed"
+                    if exit_code != 0:
+                        if baseline_exit == 0:
+                            classification = "new_failure"
+                            new_failure = True
+                        else:
+                            classification = "pre_existing_failure"
+                            pre_existing_failure = True
+                    tests.append({
+                        "test_index": index,
+                        "command": command,
+                        "exit_code": exit_code,
+                        "output": safe_output,
+                        "failure_classification": classification,
+                    })
+                checks.append("validation_plan")
+                if new_failure:
+                    return self._report(
+                        passed=False, outcome="verification_failed", reason="new_validation_failure",
+                        changed=changed, checks=checks, tests=tests,
+                    )
+                if pre_existing_failure:
+                    return self._report(
+                        passed=False, outcome="baseline_broken", reason="pre_existing_failure",
+                        changed=changed, checks=checks, tests=tests,
+                    )
+            else:
+                checks.append("validation_plan_skipped")
             WorkspaceIntegrityGuard(self.run, self.db).check_before_seal()
             changed = self._changed_paths()
             update_budget_usage(

@@ -6,39 +6,6 @@
 
 ## Requirements
 
-### Requirement: 所有 Code Tools 必须在每 run 专用容器内执行
-
-`read`、`search`、`edit`、`git`、`shell` 和 `test` 能力 SHALL 仅在绑定该 Code run 的专用 runner 容器内执行。API 进程 SHALL 只执行鉴权、策略计算、调度、审计和工件协调，MUST NOT 直接读取、搜索、修改或执行 Workspace 内容；runner 不可用时系统 MUST fail closed，不得回退宿主执行。
-
-#### Scenario: 执行读取到测试的工具序列
-
-- **WHEN** CodeAgent 在有效 run 中调用任一允许的 Code Tool
-- **THEN** 调用在该 run 的同一专用 runner 边界和冻结 Workspace 内执行
-- **AND** 审计事实记录 run、容器、工具、策略版本和结果
-
-#### Scenario: runner 启动失败
-
-- **WHEN** runner 镜像不可用、digest 不匹配或容器无法安全启动
-- **THEN** 系统以稳定的基础设施或策略原因终止准备
-- **AND** 不在 API 进程或其他容器中重试该 Code Tool
-
-### Requirement: Claude Code 必须运行在现有 run 专用 Sandbox 内
-
-当 CodeAgent 选择 `coding_runtime=claude_code` 时，系统 SHALL 在该 run 的现有专用 runner 容器内启动 Claude Code。系统 MUST NOT 为 Claude Code 创建独立 Sandbox、MUST NOT 在 API 进程或宿主机执行 Claude Code，也 MUST NOT 绕过现有 Workspace bind path、runner image digest、网络、filesystem、shell 和资源限制。
-
-#### Scenario: 在现有 runner 中启动 Claude Code
-
-- **WHEN** 有效 CodeAgent run 使用 `claude_code` runtime
-- **THEN** Claude Code 进程在该 run 现有专用 runner 容器内启动
-- **AND** working directory 指向该 run 已准备好的 repository Workspace
-- **AND** API 进程只负责调度、策略、审计和工件协调
-
-#### Scenario: 禁止创建第二套 Sandbox
-
-- **WHEN** runtime adapter 准备启动 Claude Code
-- **THEN** 系统不得创建与当前 run runner 并行的第二个可写 Sandbox
-- **AND** 不得从宿主机用户目录或 API 文件系统暴露未授权文件给 Claude Code
-
 ### Requirement: Claude Code runner image 必须固定版本并通过 preflight
 
 支持 Claude Code runtime 的 runner image SHALL 预装 Claude Code CLI，并由平台批准的 image digest 固定。每次 run 启动前 SHALL 验证 CLI 版本、配置目录、repository cwd、MCP 配置、模型连接和预算 watchdog；失败时 fail closed，不得动态安装或回退宿主执行。
@@ -73,32 +40,38 @@
 
 ### Requirement: runner 必须使用不可绕过的隔离配置
 
-runner SHALL 使用管理员批准且按 digest 固定的镜像、非特权身份、只读 root filesystem、全部 capability drop、`no-new-privileges` 和默认无网络配置。仅该 run 的 Workspace 可写；Docker socket、Secret Store、API 文件系统、其他 run Workspace 和未批准宿主路径 MUST NOT 被挂载或暴露。任何网络例外 SHALL 同时获得平台和已发布 Manifest 明确授权。
+CodeAgent SHALL 在 Agent 已绑定的持久 Sandbox 内执行 Claude Code，而不是为此创建一次性独立 runner。`CodeContainerRunner` SHALL 拒绝 privileged、额外挂载和 Docker socket。Docker socket、Secret Store、API 文件系统、其他 run Workspace 和未批准宿主路径 MUST NOT 被挂载进该 Sandbox。
 
-当冻结契约为 `coding_runtime=claude_code` 时，平台授权的网络例外 SHALL 为 Docker `bridge`（容器可访问公网）。该例外 MUST NOT 被描述为域名 allowlist。`coding_runtime=legacy` 或未选择 Claude Code 时，runner MUST 保持 `network_mode=none`。`host` 及其他非 `none`/`bridge` 模式 MUST 被拒绝。
+当冻结契约为 `coding_runtime=claude_code` 时，平台授权的网络例外 SHALL 为 Docker `bridge`。该例外 MUST NOT 被描述为域名 allowlist。`coding_runtime=legacy` 或未选择 Claude Code 时，适配器记录的网络模式 MUST 为 `none`。`host` 及其他非 `none`/`bridge` 模式 MUST 被拒绝。
 
 #### Scenario: 默认启动隔离 runner
 
-- **WHEN** 有效 Code run 启动且未声明获批网络例外
-- **THEN** runner 以固定镜像 digest、只读 rootfs、无额外 capabilities、禁止提权和无网络方式运行
-- **AND** 除当前 Workspace 外不存在可写挂载
+- **WHEN** 有效 Code run 绑定已运行的持久 Sandbox
+- **THEN** 适配器复用该 Sandbox，不启动 privileged 容器，也不挂载 Docker socket
+- **AND** 除当前 Workspace 与平台批准的技能/引擎挂载外不存在额外可写宿主路径
 
 #### Scenario: Claude Code runtime 使用 bridge 网络
 
 - **WHEN** 冻结契约选择 `coding_runtime=claude_code` 且 feature flag 允许该 runtime
-- **THEN** runner 以 `network_mode=bridge` 启动
-- **AND** 其余隔离项（非特权、只读 rootfs、cap-drop ALL、no-new-privileges、单 Workspace 挂载）保持不变
+- **THEN** 适配器以 `network_mode=bridge` 记录并使用该 Sandbox
+- **AND** 仍拒绝 privileged、Docker socket 与额外宿主挂载
+
+#### Scenario: Claude Code 使用持久 Sandbox 身份
+
+- **WHEN** 有效 Claude Code run 启动
+- **THEN** Claude Code 在绑定 Sandbox 内执行，并可在权限允许时自行安装依赖
+- **AND** 容器不得获得 privileged、Docker socket 或宿主机访问
 
 #### Scenario: legacy runtime 不得获得网络
 
 - **WHEN** Code run 使用 `coding_runtime=legacy` 或未选择 Claude Code
-- **THEN** runner 以 `network_mode=none` 启动
+- **THEN** 适配器以 `network_mode=none` 记录
 - **AND** Manifest 不得单独把 legacy run 改成 `bridge`
 
 #### Scenario: 请求未批准网络或宿主挂载
 
-- **WHEN** Manifest、任务或工具请求未获平台批准的网络目标、Docker socket、宿主路径，或请求 `host` 网络
-- **THEN** 系统在容器启动或动作执行前拒绝请求
+- **WHEN** Manifest、任务或工具请求 Docker socket、宿主路径，或请求 `host` 网络
+- **THEN** 系统在适配器启动或动作执行前拒绝请求
 - **AND** 记录不可被任务设置覆盖的策略拒绝
 
 ### Requirement: 可信 runner 镜像必须预装 Claude Code、OpenSpec CLI 与 SOP 技能
@@ -195,18 +168,22 @@ runner 的 CPU、内存、进程数、磁盘、执行时间和输出限制 SHALL
 - **THEN** 系统在启动 runner 前以 `workspace_mount_invalid` 终止
 - **AND** 不把该路径作为 Docker bind source 交给 daemon
 
-### Requirement: runner 容器必须在所有终态立即移除
+### Requirement: Local 发布 runner 必须提供固定最小工具链
 
-系统 SHALL 在成功、验证失败、策略拒绝、取消、超时、预算耗尽或基础设施失败后停止并立即移除该 run 的 runner 容器及临时网络。清理失败 SHALL 产生可观察且可重试的清理记录，容器不得继续接受工具动作。
+local 发布 SHALL 复用绑定 Sandbox 的现有镜像。镜像可预装 dbt、jq、yq、`clickhouse client` 等工具，但这些业务工具 MUST NOT 成为 Runtime 启动必备项。缺失工具时 Claude Code MAY 在 Sandbox 权限允许时自行安装；缺失不得阻塞 Workspace 或 Runtime 启动。
 
-#### Scenario: run 正常或异常结束
+#### Scenario: 双架构镜像通过 preflight
 
-- **WHEN** Code run 进入任一终态
-- **THEN** 系统撤销 runner 执行资格并立即请求停止和移除容器及临时网络
-- **AND** Workspace 是否保留由独立保留策略决定
+- **WHEN** local 发布任务在已运行的绑定 Sandbox 上启动
+- **THEN** Runtime 不因可选业务工具缺失而 fail closed
+- **AND** 缺失依赖不阻止 Workspace 或 Claude Code 启动
 
-#### Scenario: 容器删除失败
+### Requirement: Local 发布网络与权限必须受限
 
-- **WHEN** runner 停止或删除操作失败
-- **THEN** 系统记录 `sandbox_cleanup_failed` 并触发受控重试或告警
-- **AND** 不将残留容器视为可运行资源
+local 发布 SHALL 使用与普通 Claude Code 任务相同的持久 Sandbox 边界：禁止 privileged、Docker socket 和宿主挂载；Claude Code 使用 `bridge` 网络。系统 MUST NOT 要求 Manifest 声明发布目的地，也 MUST NOT 为此单独降权到非 root 一次性 runner。
+
+#### Scenario: 访问未授权网络
+
+- **WHEN** 发布进程需要外网且冻结契约为 `coding_runtime=claude_code`
+- **THEN** 任务使用绑定 Sandbox 的 `bridge` 网络
+- **AND** 仍不得挂载 Docker socket 或切换到 `host` 网络

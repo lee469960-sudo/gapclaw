@@ -32,6 +32,7 @@ from app.services.code_agent.runner_protocol import RunnerBudgets, RunnerSpec
 from app.services.code_agent.lifecycle import cleanup_code_resources
 from app.services.code_agent.workspace_mount import write_workspace_sentinel
 from app.services.code_agent import workspace_mount
+from app.services import workplace as workplace_service
 
 HOST_WORKSPACE = "/srv/gap/code-agent/runs/run1/workspace"
 DIGEST = "sha256:" + "d" * 64
@@ -103,6 +104,7 @@ def _runner(tmp_path, monkeypatch, *, coding_runtime="legacy"):
             code_workspace_host_root="/srv/gap/code-agent/runs",
         ),
     )
+    monkeypatch.setattr(workplace_service, "workplace_root", lambda _sandbox_id: api_root)
     run = SimpleNamespace(
         id="run1",
         image="internal/python:3.12",
@@ -128,21 +130,26 @@ def _runner(tmp_path, monkeypatch, *, coding_runtime="legacy"):
     image = SimpleNamespace(id="sha256:image")
     container = SimpleNamespace(
         id="container1",
+        status="running",
         remove=MagicMock(),
+        reload=MagicMock(),
+        image=SimpleNamespace(tags=["internal/python:3.12"]),
         attrs=_attrs(spec),
-        exec_run=MagicMock(side_effect=lambda command: SimpleNamespace(
+        exec_run=MagicMock(side_effect=lambda command, **_kwargs: SimpleNamespace(
             exit_code=0,
             output=(
                 b"Claude Code 2.1.246\n"
                 if command == ["claude", "--version"]
-                else (workspace / ".code-agent-bind-probe").read_bytes()
+                else b""
             ),
         )),
     )
     client = MagicMock()
     client.images.get.return_value = image
     client.containers.run.return_value = container
-    facts = SimpleNamespace(path=str(workspace))
+    client.containers.get.return_value = container
+    sandbox = SimpleNamespace(id="sandbox1", container_id="container1", image="internal/python:3.12")
+    facts = SimpleNamespace(path=str(workspace), sandbox=sandbox)
     return CodeContainerRunner(client), client, run, facts
 
 
@@ -162,6 +169,16 @@ def test_runner_dockerfile_pins_claude_code_cli_version():
     assert "claude --version" in text
     assert "openspec --version" in text
     assert "CODE_AGENT_GIT_DIR=/workspace/.git" in text
+    assert "clickhouse-client" not in text
+    assert "clickhouse client --help" in text
+    assert "ARG CLICKHOUSE_VERSION=" in text
+    assert "CH_ARCH=arm64" in text
+    assert "clickhouse-common-static-" in text
+    assert "ARG NODE_VERSION=" in text
+    assert "dbt-core==${DBT_CORE_VERSION}" in text
+    assert "dbt-clickhouse==${DBT_CLICKHOUSE_VERSION}" in text
+    assert "jq --version" in text
+    assert "yq --version" in text
 
 
 def test_runner_multiarch_publish_script_documents_manifest_list_digest():
@@ -172,46 +189,109 @@ def test_runner_multiarch_publish_script_documents_manifest_list_digest():
     assert "linux/arm64,linux/amd64" in text
     assert "--push" in text
     assert "manifest-list-digest" in text
+    assert "DBT_CORE_VERSION" in text
+    assert "DBT_CLICKHOUSE_VERSION" in text
+    assert "CLICKHOUSE_VERSION" in text
+    assert "--arch-tags" in text
 
 
-def test_runner_enforces_resources_mounts_no_network_and_reports_image(tmp_path, monkeypatch):
+def test_runner_uses_bound_sandbox_and_reports_runtime_facts(tmp_path, monkeypatch):
     runner, client, run, workspace = _runner(tmp_path, monkeypatch)
     facts = runner.start(run, workspace)
     assert runner._bindings["container1"] == "run1"
-    kwargs = client.containers.run.call_args.kwargs
-    assert kwargs["network_mode"] == "none"
-    assert kwargs["privileged"] is False
-    assert kwargs["read_only"] is True
-    assert kwargs["cap_drop"] == ["ALL"]
-    assert kwargs["security_opt"] == ["no-new-privileges"]
-    assert kwargs["volumes"] == {HOST_WORKSPACE: {"bind": "/workspace", "mode": "rw"}}
-    assert kwargs["nano_cpus"] == 1_000_000_000
-    assert kwargs["mem_limit"] == "256m"
+    client.containers.run.assert_not_called()
+    client.containers.get.assert_called_with("container1")
+    assert facts.workspace_mount == "/workplace/run1/workspace"
     assert facts.image_id == "sha256:image"
     assert json.loads(run.runner_facts)["network_mode"] == "none"
     asyncio.run(cleanup_code_resources("run1:s1", "run1"))
-    client.containers.run.return_value.remove.assert_called_once_with(force=True)
 
 
-def test_runner_records_claude_code_version_for_claude_runtime(tmp_path, monkeypatch):
+def test_runner_does_not_require_claude_code_cli_before_git_sync(tmp_path, monkeypatch):
     runner, client, run, workspace = _runner(tmp_path, monkeypatch, coding_runtime="claude_code")
+    client.containers.get.return_value.exec_run.side_effect = lambda command, **_kwargs: SimpleNamespace(
+        exit_code=0,
+        output=b"",
+    )
     facts = runner.start(run, workspace)
-    assert facts.claude_code_version == "Claude Code 2.1.246"
-    assert json.loads(run.runner_facts)["claude_code_version"] == "Claude Code 2.1.246"
-    client.containers.run.return_value.exec_run.assert_any_call(["claude", "--version"])
+    assert facts.claude_code_version == ""
+    assert json.loads(run.runner_facts)["claude_code_version"] == ""
+    client.containers.get.return_value.exec_run.assert_called_once_with(
+        ["/bin/sh", "-lc", 'test -d "/workplace/run1/workspace" && test -r "/workplace/run1/workspace" && test -w "/workplace/run1/workspace"'],
+        workdir="/workplace",
+    )
     asyncio.run(cleanup_code_resources("run1:s1", "run1"))
 
 
-def test_runner_launches_by_digest_as_non_root_with_bounded_resources(tmp_path, monkeypatch):
+def test_runner_does_not_inspect_missing_image_object_for_bound_sandbox(tmp_path, monkeypatch):
     runner, client, run, workspace = _runner(tmp_path, monkeypatch)
-    runner.start(run, workspace)
-    call = client.containers.run.call_args
-    assert call.args[0] == "internal/python:3.12@" + DIGEST
-    kwargs = call.kwargs
-    assert kwargs["user"] == RUNNER_USER
-    assert kwargs["pids_limit"] == 128
-    assert kwargs["tmpfs"] == {"/tmp": "rw,noexec,nosuid,size=32m"}
-    assert kwargs["storage_opt"] == {"size": "512m"}
+    base = client.containers.get.return_value
+
+    class BoundSandboxContainer:
+        id = base.id
+        status = base.status
+        attrs = base.attrs
+        exec_run = base.exec_run
+        reload = base.reload
+        remove = base.remove
+
+        @property
+        def image(self):
+            raise RuntimeError("image_digest_not_present_locally")
+
+    container = BoundSandboxContainer()
+    client.containers.get.return_value = container
+
+    facts = runner.start(run, workspace)
+
+    assert facts.container_id == "container1"
+    assert facts.image == _image_reference(spec_for_run(run, host_path=HOST_WORKSPACE))
+    asyncio.run(cleanup_code_resources("run1:s1", "run1"))
+
+
+def test_runner_does_not_require_platform_local_publish_tool_profile(tmp_path, monkeypatch):
+    runner, client, run, workspace_info = _runner(tmp_path, monkeypatch)
+    workspace_path = Path(workspace_info.path)
+    run.task_contract = json.dumps({
+        "coding_runtime": "legacy",
+        "local_publish": {"dependencies": ["curl", "dbt-clickhouse"]},
+    })
+    container = client.containers.get.return_value
+    container.attrs = _attrs(spec_for_run(run, host_path=HOST_WORKSPACE))
+    container.exec_run.side_effect = lambda command, **_kwargs: SimpleNamespace(
+        exit_code=0,
+        output=b"",
+    )
+    facts = runner.start(run, workspace_info)
+    assert facts.container_id == "container1"
+    assert "local_publish_tool_versions" not in json.loads(run.runner_facts)
+    asyncio.run(cleanup_code_resources("run1:s1", "run1"))
+
+
+def test_runner_does_not_fail_startup_when_repository_dependencies_are_missing(tmp_path, monkeypatch):
+    runner, client, run, workspace = _runner(tmp_path, monkeypatch)
+    run.task_contract = json.dumps({
+        "local_publish": {"dependencies": ["dbt-clickhouse", "jq", "clickhouse-client", "custom-tool"]},
+    })
+    container = client.containers.get.return_value
+    container.attrs = _attrs(spec_for_run(run, host_path=HOST_WORKSPACE))
+    container.exec_run.side_effect = lambda command, **_kwargs: SimpleNamespace(
+        exit_code=0,
+        output=b"",
+    )
+    facts = runner.start(run, workspace)
+    assert facts.container_id == "container1"
+    assert "local_publish_tool_missing" not in json.loads(run.runner_facts)
+    asyncio.run(cleanup_code_resources("run1:s1", "run1"))
+
+
+def test_runner_reuses_bound_sandbox_and_keeps_policy_budgets(tmp_path, monkeypatch):
+    runner, client, run, workspace = _runner(tmp_path, monkeypatch)
+    facts = runner.start(run, workspace)
+    client.containers.run.assert_not_called()
+    assert facts.timeout_seconds == 600
+    assert facts.output_limit_bytes == 5000
+    assert facts.container_id == "container1"
     asyncio.run(cleanup_code_resources("run1:s1", "run1"))
 
 
@@ -237,8 +317,9 @@ def test_spec_for_run_uses_bridge_for_claude_code(tmp_path, monkeypatch):
 
 def test_runner_starts_claude_code_with_bridge(tmp_path, monkeypatch):
     runner, client, run, workspace = _runner(tmp_path, monkeypatch, coding_runtime="claude_code")
-    runner.start(run, workspace)
-    assert client.containers.run.call_args.kwargs["network_mode"] == "bridge"
+    facts = runner.start(run, workspace)
+    client.containers.run.assert_not_called()
+    assert facts.network_mode == "bridge"
     asyncio.run(cleanup_code_resources("run1:s1", "run1"))
 
 
@@ -323,6 +404,24 @@ def test_runner_exec_falls_back_when_stream_negotiation_is_unavailable():
 
     assert (exit_code, output) == (0, "fallback")
     container.exec_run.assert_called_once()
+
+
+def test_runner_exec_decodes_tuple_bytes_output():
+    client = MagicMock()
+    container = client.containers.get.return_value
+    commit = "b" * 40
+    container.exec_run.return_value = (0, f"line1\n{commit}\n".encode("utf-8"))
+    runner = CodeContainerRunner(client)
+
+    exit_code, output = runner.exec(
+        "container1",
+        "git rev-parse HEAD",
+        timeout_seconds=30,
+    )
+
+    assert exit_code == 0
+    assert output.splitlines() == ["line1", commit]
+    assert not output.startswith("b'")
 
 
 def test_runner_exec_ignores_stream_observer_failure():
@@ -416,7 +515,7 @@ def test_runner_exec_ignores_stream_close_oserror_after_process_exit():
     assert '"status":"success"' in output
 
 
-def test_runner_registers_container_compensation_immediately_after_allocation(tmp_path, monkeypatch):
+def test_runner_does_not_remove_bound_sandbox_on_start_failure(tmp_path, monkeypatch):
     runner, client, run, workspace = _runner(tmp_path, monkeypatch)
 
     with patch(
@@ -427,7 +526,7 @@ def test_runner_registers_container_compensation_immediately_after_allocation(tm
             runner.start(run, workspace)
 
     asyncio.run(cleanup_code_resources("run1:s1", "run1"))
-    client.containers.run.return_value.remove.assert_called_once_with(force=True)
+    client.containers.get.return_value.remove.assert_not_called()
 
 
 def test_verify_inspect_accepts_consistent_facts():
@@ -465,10 +564,10 @@ def test_verify_inspect_rejects_each_fact_drift():
             verify_inspect_matches(spec, image_id, attrs)
 
 
-def test_runner_removes_container_on_inspect_mismatch(tmp_path, monkeypatch):
+def test_runner_records_existing_sandbox_facts_without_removing_container(tmp_path, monkeypatch):
     runner, client, run, workspace = _runner(tmp_path, monkeypatch)
-    client.containers.run.return_value.attrs = _attrs(spec_for_run(run, host_path=HOST_WORKSPACE))
-    client.containers.run.return_value.attrs["Image"] = "sha256:drifted"
-    with pytest.raises(RunnerPolicyError, match="runner_facts_mismatch"):
-        runner.start(run, workspace)
-    client.containers.run.return_value.remove.assert_called_once_with(force=True)
+    client.containers.get.return_value.attrs = _attrs(spec_for_run(run, host_path=HOST_WORKSPACE))
+    client.containers.get.return_value.attrs["Image"] = "sha256:drifted"
+    facts = runner.start(run, workspace)
+    assert facts.image_id == "sha256:drifted"
+    client.containers.get.return_value.remove.assert_not_called()

@@ -1,13 +1,21 @@
 <template>
   <section class="code-workspace-panel">
-    <div class="workspace-panel-title">Code Workspace</div>
-    <div v-if="!codeRunId" class="workspace-panel-empty">等待 CodeAgent Run</div>
+    <div class="workspace-panel-header">
+      <div class="workspace-panel-title">Code Workspace</div>
+      <el-button size="small" link type="primary" :disabled="!boundSandboxId" @click="openSandboxTerminal">
+        打开沙箱终端
+      </el-button>
+    </div>
+    <div v-if="loading" class="workspace-panel-empty">加载 Workspace…</div>
+    <div v-else-if="!effectiveCodeRunId" class="workspace-panel-empty">等待 CodeAgent Run</div>
     <template v-else>
-      <div v-if="loading" class="workspace-panel-empty">加载 Workspace…</div>
-      <div v-else-if="error === 'workspace_not_prepared'" class="workspace-panel-empty">Workspace 正在准备，等待仓库挂载…</div>
-      <div v-else-if="error" class="workspace-panel-empty workspace-error">{{ workspaceErrorLabel(error) }}</div>
+      <div v-if="error === 'workspace_not_prepared'" class="workspace-panel-empty">Workspace 正在准备，等待仓库挂载…</div>
+      <div v-else-if="error" class="workspace-panel-empty workspace-error">{{ workspaceErrorLabel(error) }}<span v-if="errorDetail" class="workspace-error-detail">（{{ errorDetail }}）</span></div>
       <template v-else>
         <div class="workspace-panel-meta">{{ metadata.repository || '仓库' }} · {{ metadata.resolved_commit || '-' }}</div>
+        <div v-if="metadata.workspace_mount || metadata.sandbox_id" class="workspace-panel-meta">
+          Sandbox {{ metadata.sandbox_status || '-' }} · {{ metadata.workspace_mount || metadata.sandbox_id }}
+        </div>
         <div class="workspace-panel-tree">
           <button v-for="entry in visibleEntries" :key="entry.path" type="button" :class="['workspace-entry', { 'workspace-entry-changed': isChanged(entry), 'workspace-entry-directory': entry.type === 'directory' }]" :style="{ paddingLeft: `${entry.depth * 14 + 4}px` }" @click="entry.type === 'directory' ? toggleDirectory(entry) : selectEntry(entry)">
             {{ entry.type === 'directory' ? (isExpanded(entry) ? '▾' : '▸') : '·' }} {{ entry.name || entry.path }}
@@ -23,6 +31,11 @@
         <div v-else class="workspace-panel-git">Git {{ git.branch || '-' }} · {{ git.clean ? '工作区干净' : `变更 ${git.changed_files?.length || 0} 个文件` }}</div>
       </template>
     </template>
+    <SandboxTerminalDialog
+      v-model="sandboxTerminalVisible"
+      :sandbox-id="boundSandboxId"
+      :workdir="terminalWorkdir"
+    />
   </section>
 </template>
 <script setup>
@@ -31,14 +44,20 @@ import { marked } from 'marked'
 import { ElMessage } from 'element-plus'
 import { getCgi } from '../api'
 import { enhanceMarkdownHtml, prepareMarkdownForPreview } from '../utils/markdownPreview'
+import SandboxTerminalDialog from './SandboxTerminalDialog.vue'
 const props = defineProps({
   agentId: { type: String, default: '' },
+  sessionId: { type: String, default: '' },
   codeRunId: { type: String, default: '' },
+  sandboxId: { type: String, default: '' },
 })
-const metadata = ref({}); const entries = ref([]); const childrenByPath = ref({}); const expandedPaths = ref(new Set()); const git = ref({}); const selectedContent = ref(null); const selectedPath = ref(''); const loading = ref(false); const error = ref(''); const directoryLoading = ref({})
+const metadata = ref({}); const entries = ref([]); const childrenByPath = ref({}); const expandedPaths = ref(new Set()); const git = ref({}); const selectedContent = ref(null); const selectedPath = ref(''); const loading = ref(false); const error = ref(''); const errorDetail = ref(''); const directoryLoading = ref({}); const sandboxTerminalVisible = ref(false); const fallbackCodeRunId = ref('')
 let workspaceRetryTimer = null
 let workspaceLoadToken = 0
 let workspaceRetryAttempts = 0
+const effectiveCodeRunId = computed(() => String(props.codeRunId || fallbackCodeRunId.value || '').trim())
+const boundSandboxId = computed(() => String(metadata.value.sandbox_id || props.sandboxId || '').trim())
+const terminalWorkdir = computed(() => String(metadata.value.workspace_mount || '/workplace').trim() || '/workplace')
 const visibleEntries = computed(() => {
   const flattened = []
   const append = (items, depth) => {
@@ -77,24 +96,38 @@ function scheduleWorkspaceRetry(token) {
   clearWorkspaceRetry()
   workspaceRetryTimer = setTimeout(() => {
     workspaceRetryTimer = null
-    if (token === workspaceLoadToken && props.codeRunId) load()
+    if (token === workspaceLoadToken && effectiveCodeRunId.value) load()
   }, 1000)
+}
+async function hydrateFallbackCodeRunId() {
+  if (!props.agentId || props.codeRunId) return ''
+  const result = await getCgi('/pages/page_agent_chat.cgi', {
+    action: 'get_code_result',
+    agent_id: props.agentId,
+    session_id: props.sessionId,
+  })
+  const runId = String(result.data?.run_id || '').trim()
+  const workspaceAvailable = result.data?.workspace?.available === true
+  fallbackCodeRunId.value = runId && workspaceAvailable ? runId : ''
+  return fallbackCodeRunId.value
 }
 async function load() {
   clearWorkspaceRetry()
   const token = ++workspaceLoadToken
-  if (!props.codeRunId) return
-  loading.value = true; error.value = ''; childrenByPath.value = {}; expandedPaths.value = new Set(); selectedContent.value = null; git.value = {}
+  loading.value = true; error.value = ''; errorDetail.value = ''; childrenByPath.value = {}; expandedPaths.value = new Set(); selectedContent.value = null; git.value = {}
   try {
-    const base = { agent_id: props.agentId, code_run_id: props.codeRunId }
+    let runId = effectiveCodeRunId.value
+    if (!runId) runId = await hydrateFallbackCodeRunId()
+    if (!runId) return
+    const base = { agent_id: props.agentId, code_run_id: runId }
     const meta = await getCgi('/pages/page_agent_chat.cgi', { action: 'get_code_workspace', ...base })
-    if (!meta.data || meta.data.state !== 'ready') throw { reason: meta.data?.state || 'workspace_unsupported' }
+    if (!meta.data || meta.data.state !== 'ready') throw { reason: meta.data?.state || 'workspace_unsupported', detail: meta.data?.failure_reason || meta.data?.status || '' }
     metadata.value = meta.data
     workspaceRetryAttempts = 0
     const tree = await getCgi('/pages/page_agent_chat.cgi', { action: 'list_code_workspace', ...base }); entries.value = tree.data?.entries || []
     const status = await getCgi('/pages/page_agent_chat.cgi', { action: 'get_code_workspace_git', ...base }); git.value = status.data || {}
   } catch (err) {
-    error.value = workspaceErrorReason(err)
+    error.value = workspaceErrorReason(err); errorDetail.value = String(err?.detail || '')
     // Run creation returns before the background worker clones/mounts the
     // repository. Treat this one state as transient so the panel converges to
     // ready without requiring a page refresh.
@@ -118,7 +151,7 @@ async function toggleDirectory(entry) {
   if (!childrenByPath.value[entry.path] && !directoryLoading.value[entry.path]) {
     directoryLoading.value = { ...directoryLoading.value, [entry.path]: true }
     try {
-      const result = await getCgi('/pages/page_agent_chat.cgi', { action: 'list_code_workspace', agent_id: props.agentId, code_run_id: props.codeRunId, path: entry.path })
+      const result = await getCgi('/pages/page_agent_chat.cgi', { action: 'list_code_workspace', agent_id: props.agentId, code_run_id: effectiveCodeRunId.value, path: entry.path })
       childrenByPath.value = { ...childrenByPath.value, [entry.path]: result.data?.entries || [] }
     } finally {
       const nextLoading = { ...directoryLoading.value }
@@ -131,7 +164,7 @@ async function toggleDirectory(entry) {
 }
 async function selectEntry(entry) {
   if (entry.type !== 'file') return
-  const result = await getCgi('/pages/page_agent_chat.cgi', { action: 'read_code_workspace_file', agent_id: props.agentId, code_run_id: props.codeRunId, path: entry.path }); selectedPath.value = entry.path; selectedContent.value = result.data?.content || ''
+  const result = await getCgi('/pages/page_agent_chat.cgi', { action: 'read_code_workspace_file', agent_id: props.agentId, code_run_id: effectiveCodeRunId.value, path: entry.path }); selectedPath.value = entry.path; selectedContent.value = result.data?.content || ''
 }
 function previewLanguage(path) {
   const match = /\.([a-z0-9]+)$/i.exec(path)
@@ -176,20 +209,29 @@ async function copyPreviewText(text) {
   area.remove()
   if (!copied) throw new Error('clipboard_unavailable')
 }
+function openSandboxTerminal() {
+  if (!boundSandboxId.value) {
+    ElMessage.warning('当前 CodeAgent 未绑定沙箱')
+    return
+  }
+  sandboxTerminalVisible.value = true
+}
 function workspaceErrorLabel(reason) {
-  const labels = { workspace_not_prepared: 'Workspace 尚未准备', workspace_expired: 'Workspace 已过期或已清理', workspace_mount_invalid: 'Workspace 挂载无效', code_run_unauthorized: '无权访问该 CodeAgent Run', workspace_permission_denied: '无权访问 Workspace', workspace_unsupported: '当前服务端不支持 CodeAgent Workspace 预览，请升级服务端或查看对话结果' }
+  const labels = { workspace_not_prepared: 'Workspace 尚未准备', workspace_prepare_failed: 'Workspace 准备失败', workspace_expired: 'Workspace 已过期或已清理', workspace_mount_invalid: 'Workspace 挂载无效', sandbox_not_configured: 'CodeAgent 未绑定沙箱，请在 Agent 编辑页配置沙箱', sandbox_not_running: '绑定沙箱未启动，请先在沙箱页面手动启动', code_run_unauthorized: '无权访问该 CodeAgent Run', workspace_permission_denied: '无权访问 Workspace', workspace_unsupported: '当前服务端不支持 CodeAgent Workspace 预览，请升级服务端或查看对话结果' }
   return labels[reason] || reason || 'Workspace 不可用'
 }
 function workspaceErrorReason(err) {
   if (err?.response?.status === 404 || err?.code === 'workspace_unsupported') return 'workspace_unsupported'
   return err?.reason || err?.msg || err?.message || 'workspace_unavailable'
 }
-watch(() => props.codeRunId, () => {
+watch(() => [props.agentId, props.sessionId, props.codeRunId], () => {
   workspaceRetryAttempts = 0
+  if (props.codeRunId) fallbackCodeRunId.value = ''
   selectedPath.value = ''; selectedContent.value = null; load()
 }, { immediate: true }); onBeforeUnmount(clearWorkspaceRetry); defineExpose({ load })
 </script>
 <style scoped>
 .code-workspace-panel { height: 100%; padding: 14px; overflow: auto; background: var(--el-bg-color); }
-.workspace-panel-title { font-weight: 600; margin-bottom: 10px; }.workspace-panel-empty { color: var(--el-text-color-secondary); padding: 12px 0; }.workspace-error { color: var(--el-color-danger); }.workspace-panel-meta { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 8px; word-break: break-all; }.workspace-entry { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding-top: 4px; padding-bottom: 4px; cursor: pointer; }.workspace-entry-changed { color: var(--el-color-warning); background: color-mix(in srgb, var(--el-color-warning) 12%, transparent); }.workspace-entry-badge { float: right; font-size: 11px; }.workspace-file-preview-wrap { margin-top: 10px; }.workspace-file-preview-title { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 6px; word-break: break-all; }.workspace-file-preview { max-height: 420px; overflow: auto; font-size: 12px; line-height: 1.55; word-break: break-word; }.workspace-file-preview :deep(pre) { white-space: pre-wrap; overflow-wrap: anywhere; }.workspace-file-preview :deep(pre code) { display: block; padding: 10px; border-radius: 6px; background: var(--el-fill-color-light); font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }.workspace-file-preview :deep(table) { width: 100%; border-collapse: collapse; }.workspace-file-preview :deep(th), .workspace-file-preview :deep(td) { border: 1px solid var(--el-border-color); padding: 4px 6px; text-align: left; }.workspace-panel-changes { margin-top: 8px; color: var(--el-color-warning); font-size: 12px; }
+.workspace-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.workspace-panel-title { font-weight: 600; }.workspace-panel-empty { color: var(--el-text-color-secondary); padding: 12px 0; }.workspace-error { color: var(--el-color-danger); }.workspace-error-detail { margin-left: 4px; font-size: 12px; }.workspace-panel-meta { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 8px; word-break: break-all; }.workspace-entry { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding-top: 4px; padding-bottom: 4px; cursor: pointer; }.workspace-entry-changed { color: var(--el-color-warning); background: color-mix(in srgb, var(--el-color-warning) 12%, transparent); }.workspace-entry-badge { float: right; font-size: 11px; }.workspace-file-preview-wrap { margin-top: 10px; }.workspace-file-preview-title { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 6px; word-break: break-all; }.workspace-file-preview { max-height: 420px; overflow: auto; font-size: 12px; line-height: 1.55; word-break: break-word; }.workspace-file-preview :deep(pre) { white-space: pre-wrap; overflow-wrap: anywhere; }.workspace-file-preview :deep(pre code) { display: block; padding: 10px; border-radius: 6px; background: var(--el-fill-color-light); font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }.workspace-file-preview :deep(table) { width: 100%; border-collapse: collapse; }.workspace-file-preview :deep(th), .workspace-file-preview :deep(td) { border: 1px solid var(--el-border-color); padding: 4px 6px; text-align: left; }.workspace-panel-changes { margin-top: 8px; color: var(--el-color-warning); }
 </style>

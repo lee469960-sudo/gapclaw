@@ -142,6 +142,38 @@ def test_docker_delete_failure_retries_then_converges(tmp_path):
     assert container.remove.call_count == 2
 
 
+def test_persistent_sandbox_terminal_run_releases_without_removing_bound_container(tmp_path):
+    db = _db()
+    root = tmp_path / "runs"
+    run, _workspace = _run(db, root, status="infrastructure_error")
+    run.source_facts = json.dumps({"workspace_mode": "persistent_sandbox"})
+    run.cleanup_state = "failed"
+    run.cleanup_error = "sandbox_cleanup_failed"
+    container = _container()
+    container.name = "gap-sandbox-shared"
+    container.attrs = {"Config": {"Labels": {}}}
+    client = MagicMock()
+    client.containers.get.return_value = container
+    janitor = CodeLifecycleJanitor(
+        db,
+        workspace_manager=WorkspaceManager(root, retention_hours=168),
+        docker_client=client,
+    )
+
+    result = janitor.cleanup_run(run, now=datetime(2026, 8, 24, 10, 0, 0))
+    again = janitor.cleanup_run(run, now=datetime(2026, 8, 24, 10, 1, 0))
+
+    db.refresh(run)
+    assert result.outcome == "completed"
+    assert again.outcome == "not_required"
+    assert run.runner_state == "released"
+    assert run.cleanup_state == "completed"
+    assert run.cleanup_error == ""
+    assert run.container_id == "container1"
+    assert run.workspace_state == "prepared"
+    container.remove.assert_not_called()
+
+
 def test_workspace_delete_failure_retries_then_converges(tmp_path, monkeypatch):
     db = _db()
     root = tmp_path / "runs"

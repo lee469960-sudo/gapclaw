@@ -105,6 +105,13 @@ def init_db(db: Session) -> None:
             "source_scan_report_id": "VARCHAR(16) DEFAULT ''",
             "image_digest": "VARCHAR(128) DEFAULT ''",
             "security_schema_version": "INTEGER DEFAULT 0",
+            "local_publish_command_id": "VARCHAR(128) DEFAULT ''",
+            "local_publish_target": "VARCHAR(16) DEFAULT ''",
+            "local_publish_dependencies": "TEXT DEFAULT '[]'",
+            "local_publish_network_targets": "TEXT DEFAULT '[]'",
+            "local_publish_secret_ref": "VARCHAR(128) DEFAULT ''",
+            "local_publish_verification_plan": "TEXT DEFAULT '[]'",
+            "local_publish_lock_key": "VARCHAR(255) DEFAULT ''",
         }
         with engine.begin() as conn:
             for name, definition in manifest_columns.items():
@@ -182,6 +189,17 @@ def init_db(db: Session) -> None:
                 conn.execute(text("ALTER TABLE code_agent_runs ADD COLUMN retained_until VARCHAR(32) DEFAULT ''"))
             if "workspace_downloadable" not in crcols:
                 conn.execute(text("ALTER TABLE code_agent_runs ADD COLUMN workspace_downloadable BOOLEAN DEFAULT 0"))
+            publish_columns = {
+                "publish_state": "VARCHAR(32) DEFAULT 'not_requested'",
+                "publish_preflight": "TEXT DEFAULT '{}'",
+                "publish_confirmation": "VARCHAR(64) DEFAULT ''",
+                "publish_result": "TEXT DEFAULT '{}'",
+            }
+            for name, definition in publish_columns.items():
+                if name not in crcols:
+                    conn.execute(text(
+                        f"ALTER TABLE code_agent_runs ADD COLUMN {name} {definition}"
+                    ))
             if "tool_audit" not in crcols:
                 conn.execute(text("ALTER TABLE code_agent_runs ADD COLUMN tool_audit TEXT DEFAULT '[]'"))
             if "tool_calls_used" not in crcols:

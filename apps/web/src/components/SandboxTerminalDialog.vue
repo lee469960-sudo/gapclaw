@@ -13,7 +13,7 @@
       ref="panelRef"
       variant="sandbox"
       ws-url="/pages/page_sandbox.ws"
-      :init-payload="{ id: sandboxId, workdir: '/workplace' }"
+      :init-payload="{ id: sandboxId, workdir }"
     />
   </el-dialog>
 </template>
@@ -25,6 +25,7 @@ import XtermPanel from './XtermPanel.vue'
 const props = defineProps({
   modelValue: Boolean,
   sandboxId: String,
+  workdir: { type: String, default: '/workplace' },
 })
 
 const emit = defineEmits(['update:modelValue'])

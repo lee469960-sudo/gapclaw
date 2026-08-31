@@ -2,13 +2,14 @@
 
 ### Requirement: Local 发布 runner 必须提供固定最小工具链
 
-支持 local 发布的 runner image SHALL 由平台批准、固定 digest 并同时提供 `amd64` 与 `arm64` 变体。镜像仅预装 canonical 命令所需的固定版本工具，运行期间不得动态安装依赖。
+支持 local 发布的 runner image SHALL 由平台批准、固定 digest 并同时提供 `amd64` 与 `arm64` 变体。镜像仅预装 CodeAgent/Claude Code 运行和受控命令执行所需的固定基础工具；dbt、jq、clickhouse-client 等项目/CI 业务工具不得成为 runner 启动必备项。运行期间不得动态安装依赖。
 
 #### Scenario: 双架构镜像通过 preflight
 
 - **WHEN** local 发布 Run 选择批准的 runner digest
-- **THEN** runner 在目标架构上可用且 preflight 能确认工具版本
-- **AND** 工具版本和镜像 digest 进入审计事实
+- **THEN** runner 在目标架构上可用且 preflight 能确认基础运行工具版本
+- **AND** 可选业务依赖探测结果和镜像 digest 进入审计事实
+- **AND** 缺失业务依赖不阻止 Workspace 或 Runtime 启动
 
 ### Requirement: Local 发布网络与权限必须受限
 

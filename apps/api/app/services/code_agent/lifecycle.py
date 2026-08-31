@@ -80,8 +80,19 @@ async def cleanup_code_resources(
             db.commit()
         raise CodeCleanupError(failures)
     if run is not None:
-        run.container_id = ""
-        run.runner_network_id = ""
-        run.runner_state = "removed"
+        persistent = False
+        try:
+            import json
+
+            facts = json.loads(run.source_facts or "{}")
+            persistent = isinstance(facts, dict) and facts.get("workspace_mode") == "persistent_sandbox"
+        except Exception:
+            persistent = False
+        if not persistent:
+            run.container_id = ""
+            run.runner_network_id = ""
+            run.runner_state = "removed"
+        else:
+            run.runner_state = "released"
         run.cleanup_state = "completed"
         db.commit()

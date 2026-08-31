@@ -20,7 +20,7 @@ from app.models import (
     CodeDeployCredential,
     CodeProject,
     CodeProjectManifest,
-    CodeSourceSnapshot,
+    Sandbox,
 )
 import app.services.code_agent.control_plane as control_plane
 from app.services.code_agent.control_plane import (
@@ -51,12 +51,20 @@ def _actor():
 def _project(db):
     row = CodeProject(id="project1", name="Project", creator="admin")
     db.add(row)
-    db.add(Agent(id="agent1", name="Code Agent"))
+    db.add(Sandbox(
+        id="sandbox1",
+        name="Code Sandbox",
+        image="internal/python:3.12",
+        container_id="container1",
+        status="running",
+        creator="admin",
+    ))
+    db.add(Agent(id="agent1", name="Code Agent", sandbox_id="sandbox1"))
     db.commit()
     return row
 
 
-def _manifest(db, *, status="published", allowed_paths='["src/"]'):
+def _manifest(db, *, status="published", requested_ref="main"):
     row = CodeProjectManifest(
         id="manifest1",
         project_id="project1",
@@ -65,17 +73,17 @@ def _manifest(db, *, status="published", allowed_paths='["src/"]'):
         source_id="source1",
         source_type="ssh",
         credential_ref="deploy-token-ref",
-        requested_ref="main",
-        resolved_commit="a" * 40,
-        snapshot_id="snapshot1",
-        snapshot_hash="b" * 64,
-        source_scan_report_id="scan1",
+        requested_ref=requested_ref,
         repository="ssh://git.internal/example/repo.git",
-        base_commit="a" * 40,
-        allowed_paths=allowed_paths,
+        base_commit="",
+        resolved_commit="",
+        snapshot_id="",
+        snapshot_hash="",
+        source_scan_report_id="",
+        allowed_paths="[]",
         validation_plan='[{"command": "pytest -q"}]',
         trusted_image="internal/python:3.12",
-        image_digest="sha256:" + "c" * 64,
+        image_digest="",
         security_schema_version=1,
         allowed_tools='["read", "search", "edit", "test"]',
         policy='{"network": false}',
@@ -87,23 +95,12 @@ def _manifest(db, *, status="published", allowed_paths='["src/"]'):
 
 
 def _secure_fixture(db, monkeypatch):
-    """Seed sealed snapshot + active deploy credential and mock ready settings.
+    """Seed active deploy credential and mock ready settings.
 
-    ``create_code_run`` now gates admission on ``secure_readiness_reason``, so any
-    test that expects a run to be created must back the Manifest's frozen
-    source/snapshot/image evidence with real rows and a matching settings view.
+    ``create_code_run`` requires a published Git config, a visible credential,
+    and a running bound Sandbox. The actual commit is resolved later by runtime
+    Git sync inside that Sandbox.
     """
-    db.add(CodeSourceSnapshot(
-        id="snapshot1",
-        source_id="source1",
-        resolved_commit="a" * 40,
-        content_hash="b" * 64,
-        storage_path="/tmp/snapshot1",
-        scan_report_id="scan1",
-        importer_version="1",
-        policy_hash="p" * 64,
-        status="sealed",
-    ))
     db.add(CodeDeployCredential(
         id="deploy-token-ref",
         organization_id="default",
@@ -127,6 +124,10 @@ def _secure_fixture(db, monkeypatch):
 
     monkeypatch.setattr(control_plane, "get_settings", lambda: ReadySettings())
     monkeypatch.setattr(app.routers.code_project, "get_settings", lambda: ReadySettings())
+    monkeypatch.setattr(
+        "app.services.docker_service.sync_container_status",
+        lambda _container_id: "running",
+    )
 
 
 def test_missing_or_unpublished_manifest_does_not_create_code_run():
@@ -170,8 +171,8 @@ def test_non_internal_non_production_project_never_creates_code_run(environment_
 def test_invalid_manifest_does_not_create_writable_code_run():
     db = _db()
     _project(db)
-    _manifest(db, allowed_paths="[]")
-    with pytest.raises(ManifestUnavailableError, match="manifest_missing_allowed_paths"):
+    _manifest(db, requested_ref="")
+    with pytest.raises(ManifestUnavailableError, match="security_republish_required"):
         create_code_run(
             db,
             agent=db.get(Agent, "agent1"),
@@ -230,97 +231,47 @@ def test_published_manifest_freezes_contract_and_policy_snapshot(monkeypatch):
     assert run.status == "pending"
     assert run.workspace_retention_hours == 24
     assert run.manifest_version == 1
-    assert frozen_contract["base_commit"] == "a" * 40
+    assert frozen_contract["repository"] == "ssh://git.internal/example/repo.git"
+    assert frozen_contract["base_commit"] == "main"
     assert frozen_contract["source_id"] == "source1"
     assert frozen_contract["source_type"] == "ssh"
+    assert frozen_contract["credential_ref"] == "deploy-token-ref"
     assert frozen_contract["requested_ref"] == "main"
-    assert frozen_contract["resolved_commit"] == "a" * 40
-    assert frozen_contract["snapshot_id"] == "snapshot1"
-    assert frozen_contract["snapshot_hash"] == "b" * 64
-    assert frozen_contract["source_scan_report_id"] == "scan1"
-    assert frozen_contract["image_digest"] == "sha256:" + "c" * 64
+    assert frozen_contract["resolved_commit"] == ""
+    assert frozen_contract["snapshot_id"] == ""
+    assert frozen_contract["snapshot_hash"] == ""
+    assert frozen_contract["source_scan_report_id"] == ""
     assert frozen_contract["security_schema_version"] == 1
     assert run.source_id == frozen_contract["source_id"]
     assert run.resolved_commit == frozen_contract["resolved_commit"]
     assert run.snapshot_id == frozen_contract["snapshot_id"]
     assert run.snapshot_hash == frozen_contract["snapshot_hash"]
-    assert run.image_digest == frozen_contract["image_digest"]
+    assert run.image == "internal/python:3.12"
+    assert run.image_digest == ""
     assert run.security_schema_version == 1
-    assert frozen_contract["allowed_paths"] == ["src/"]
+    assert frozen_contract["allowed_paths"] == ["**"]
     assert frozen_contract["coding_runtime"] == "legacy"
     assert frozen_contract["allowed_skills"] == []
     assert frozen_contract["authorized_mcp_servers"] == []
     assert frozen_contract["runtime_budgets"] == {"max_verifier_retries": 2}
     assert frozen_contract["model_config"] == {"model_ref": "", "provider": "agent_llm"}
-    assert json.loads(run.effective_policy) == {
-        "allowed_image_digests": ["sha256:" + "c" * 64],
-        "allowed_paths": ["src/"],
-        "allowed_skills": [],
-        "allowed_source_types": ["ssh"],
-        "allowed_sources": ["source1"],
-        "allowed_tools": ["edit", "read", "search", "test"],
-        "authorized_mcp_servers": [],
-        "budgets": {
-            "cpu_count": 2,
-            "max_iterations": 40,
-            "max_tool_calls": 200,
-            "max_concurrent_runs": 5,
-            "max_changed_files": 20,
-            "max_diff_lines": 500,
-            "memory_mb": 512,
-            "timeout_seconds": 1800,
-            "pids_limit": 256,
-            "tmpfs_mb": 64,
-            "disk_mb": 1024,
-            "output_limit_bytes": 100000,
-        },
-        "coding_runtime": "legacy",
-        "model_config": {"model_ref": "", "provider": "agent_llm"},
-        "network": False,
-        "policy_sources": {
-            "allowed_image_digests": "manifest",
-            "allowed_paths": "manifest",
-            "allowed_skills": "agent_binding",
-            "allowed_source_types": "manifest",
-            "allowed_sources": "manifest",
-            "allowed_tools": "manifest",
-            "authorized_mcp_servers": "agent_binding",
-            "budgets": {
-                "cpu_count": "platform",
-                "max_changed_files": "platform",
-                "max_concurrent_runs": "platform",
-                "max_diff_lines": "platform",
-                "max_iterations": "platform",
-                "max_tool_calls": "platform",
-                "memory_mb": "platform",
-                "timeout_seconds": "platform",
-                "pids_limit": "platform",
-                "tmpfs_mb": "platform",
-                "disk_mb": "platform",
-                "output_limit_bytes": "platform",
-            },
-            "coding_runtime": "platform",
-            "model_config": "agent",
-            "network": "platform",
-            "protected_paths": "platform",
-            "runtime_budgets": {
-                "max_verifier_retries": "platform",
-            },
-            "secret_policy": "platform",
-            "shell_commands": "platform",
-            "test_integrity_paths": "platform",
-        },
-        "protected_paths": [],
-        "secret_policy": {
-            "source": "block",
-            "source_unscannable": "block",
-            "patch": "block",
-            "output": "redact",
-        },
-        "runtime_budgets": {"max_verifier_retries": 2},
-        "shell_commands": ["pytest", "ruff", "mypy", "npm", "pnpm", "yarn", "make"],
-        "test_integrity_paths": [],
-    }
+    effective_policy = json.loads(run.effective_policy)
+    assert effective_policy["allowed_paths"] == ["**"]
+    assert effective_policy["allowed_source_types"] == ["ssh"]
+    assert effective_policy["allowed_sources"] == ["source1"]
+    assert effective_policy["allowed_tools"] == [
+        "edit",
+        "git_read",
+        "read",
+        "search",
+        "shell",
+        "test",
+    ]
+    assert effective_policy["coding_runtime"] == "legacy"
+    assert effective_policy["model_config"] == {"model_ref": "", "provider": "agent_llm"}
+    assert effective_policy["network"] is True
+    assert effective_policy["policy_sources"]["network"] == "sandbox_binding"
+    assert effective_policy["policy_sources"]["coding_runtime"] == "agent_profile"
     assert run.effective_policy_hash == hashlib.sha256(
         run.effective_policy.encode("utf-8")
     ).hexdigest()
@@ -329,9 +280,9 @@ def test_published_manifest_freezes_contract_and_policy_snapshot(monkeypatch):
     manifest.snapshot_id = "snapshot2"
     manifest.resolved_commit = "d" * 40
     db.commit()
-    assert json.loads(run.task_contract)["allowed_paths"] == ["src/"]
-    assert run.snapshot_id == "snapshot1"
-    assert run.resolved_commit == "a" * 40
+    assert json.loads(run.task_contract)["allowed_paths"] == ["**"]
+    assert run.snapshot_id == ""
+    assert run.resolved_commit == ""
 
 
 def test_secure_draft_publish_and_run_copy_keep_one_immutable_contract(monkeypatch):
@@ -373,15 +324,18 @@ def test_secure_draft_publish_and_run_copy_keep_one_immutable_contract(monkeypat
     )
     frozen = json.loads(run.task_contract)
     assert frozen["source_id"] == manifest.source_id
-    assert frozen["snapshot_id"] == manifest.snapshot_id
-    assert frozen["resolved_commit"] == manifest.resolved_commit
-    assert run.image_digest == manifest.image_digest
+    assert frozen["credential_ref"] == manifest.credential_ref
+    assert frozen["requested_ref"] == manifest.requested_ref
+    assert frozen["snapshot_id"] == ""
+    assert frozen["resolved_commit"] == ""
+    assert run.image == "internal/python:3.12"
+    assert run.image_digest == ""
 
     manifest.snapshot_id = "changed-after-publish"
     manifest.resolved_commit = "e" * 40
     db.commit()
-    assert run.snapshot_id == "snapshot1"
-    assert run.resolved_commit == "a" * 40
+    assert run.snapshot_id == ""
+    assert run.resolved_commit == ""
 
 
 def test_policy_layers_exclude_lower_level_expansion_attempts():

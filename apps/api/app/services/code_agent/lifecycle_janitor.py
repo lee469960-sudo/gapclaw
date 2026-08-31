@@ -63,6 +63,14 @@ class CodeLifecycleJanitor:
             return bound_run_id == run_id
         return str(getattr(resource, "name", "") or "").lstrip("/") == expected_name
 
+    @staticmethod
+    def _is_persistent_sandbox(run) -> bool:
+        try:
+            facts = json.loads(getattr(run, "source_facts", "") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(facts, dict) and facts.get("workspace_mode") == "persistent_sandbox"
+
     def _remove_container(self, run) -> None:
         container_id = str(run.container_id or "")
         if not container_id:
@@ -182,12 +190,12 @@ class CodeLifecycleJanitor:
         due = _parse_time(run.cleanup_next_attempt)
         if due is not None and due > current:
             return LifecycleCleanupResult(run.id, "not_due", run.cleanup_attempts)
+        persistent = self._is_persistent_sandbox(run)
         recover_active = startup_recovery and run.status in {"pending", "running"}
         terminal_or_failed = (
             run.status not in {"pending", "running"}
             and (
-                bool(run.container_id)
-                or bool(run.runner_network_id)
+                (not persistent and (bool(run.container_id) or bool(run.runner_network_id)))
                 or run.execution_eligible
                 or run.cleanup_state in {"running", "failed"}
             )
@@ -208,6 +216,24 @@ class CodeLifecycleJanitor:
                 status="failed",
                 reason="CodeAgent 服务重启，运行已终止",
             )
+        if persistent and (recover_active or terminal_or_failed):
+            run.execution_eligible = False
+            run.runner_state = "released"
+            run.cleanup_state = "completed"
+            run.cleanup_error = ""
+            run.cleanup_next_attempt = ""
+            run.workspace_state = "prepared"
+            run.retained_until = ""
+            run.workspace_downloadable = False
+            if recover_active:
+                self._append_profile_event(
+                    run,
+                    phase="cleanup",
+                    status="completed",
+                    reason="startup_recovery",
+                )
+            self.db.commit()
+            return LifecycleCleanupResult(run.id, "completed", run.cleanup_attempts)
         run.execution_eligible = False
         run.cleanup_state = "running"
         if run.container_id or run.runner_network_id:

@@ -30,25 +30,28 @@
 
 ### Requirement: Manifest 以草稿和已发布版本管理
 
-系统 SHALL 允许项目管理者为 Code Project 创建和编辑草稿 Manifest，并在完整性与安全策略校验通过后发布不可变版本。Manifest SHALL 至少表达受管仓库来源类型与标识、可选 Secret 引用、请求的 branch/tag/commit、发布时解析的精确 commit SHA 与源码快照、允许路径、验证计划、按 digest 固定的可信镜像、允许工具和资源预算；历史已发布版本 SHALL 可查看但不可被修改，且 MUST NOT 保存秘密值。
-
-#### Scenario: 保存未完成草稿
-
-- **WHEN** 管理者保存尚未具备全部必填约束的 Manifest
-- **THEN** 系统保存为草稿并标出缺失、无效或未经批准的字段
-- **AND** 该草稿不得用于创建 Code run
+系统 SHALL 允许项目管理者为 Code Project 创建和编辑草稿 Manifest，并在仓库来源、凭据引用和请求 Ref 字段校验通过后发布版本。Manifest SHALL 仅表达受管仓库来源类型与标识、可选 Git Secret 引用和请求的 branch/tag/commit；发布时 MUST NOT 导入仓库、扫描源码或封存源码快照。历史已发布版本 SHALL 可查看但不可被修改，且 MUST NOT 保存秘密值。运行 Sandbox、模型、Skill、MCP、策略、路径、验证计划、镜像和预算 MUST NOT 由 Manifest 配置。
 
 #### Scenario: 发布有效 Manifest
+- **WHEN** 管理者提交来源、凭据引用和请求 ref 字段有效的草稿
+- **THEN** 系统发布仅包含 Git 配置的新版本
+- **AND** 后续任务从 CodeAgent 编辑页资源配置获取运行环境
+- **AND** 后续任务在绑定 Sandbox Workspace 内解析实际 commit
 
-- **WHEN** 管理者提交包含全部必填约束、来源与凭据引用可用、ref 可解析且通过策略校验的草稿
-- **THEN** 系统发布一个冻结精确 commit SHA、源码快照标识、镜像 digest 和有效策略的新版本化 Manifest
-- **AND** 后续 Code run 使用该已发布版本冻结任务契约
+#### Scenario: 保存未完成草稿
+- **WHEN** 管理者保存缺少 Git 必填信息的草稿
+- **THEN** 系统保存草稿并标出 Git 字段问题
+- **AND** 该草稿不得用于新任务
+
+#### Scenario: 发布缺少 Git 信息的 Manifest 被拒绝
+- **WHEN** 管理者尝试发布缺少仓库、ref 或可用凭据的草稿
+- **THEN** 系统拒绝发布并返回字段级原因
+- **AND** 不要求填写镜像、预算、验证计划或发布配置
 
 #### Scenario: 发布无效 Manifest 被拒绝
-
-- **WHEN** 管理者尝试发布缺少必填约束、来源或镜像未经批准、凭据引用不可用、ref 无法解析、违反允许范围或请求不支持环境的 Manifest
-- **THEN** 系统拒绝发布并返回字段级可行动原因
-- **AND** 不替换当前已发布版本或留下可供 run 使用的部分快照
+- **WHEN** 仓库来源、凭据引用或 Ref 字段无法校验
+- **THEN** 系统拒绝发布并保留当前已发布版本
+- **AND** 返回可行动的 Git 字段原因
 
 ### Requirement: 控制面展示项目可用性和运行前门禁
 
@@ -80,3 +83,19 @@
 - **WHEN** 仅具有 run 操作权限的主体尝试修改来源 allowlist、Secret 引用或可信镜像
 - **THEN** 系统拒绝操作并记录授权失败
 - **AND** 不泄露现有敏感配置的秘密内容
+
+### Requirement: Manifest 必须声明 local 发布命令与确认策略
+
+Manifest SHALL NOT 声明或消费 local 发布命令、target、网络目的地、Secret 引用、验证计划或并发锁。启用 local 发布时，控制面 MUST 忽略历史数据库列中的上述字段，且不得把它们纳入新 Run 契约。
+
+#### Scenario: 发布有效 Manifest
+
+- **WHEN** 已发布 Manifest 仅包含 Git 基线与既有非发布字段
+- **THEN** 控制面允许创建普通 CodeAgent Run，包括用户随后提出的 local 发布任务
+- **AND** 不把历史 `local_publish_*` 列写入冻结契约
+
+#### Scenario: 发布配置缺失
+
+- **WHEN** Manifest 不含 local 发布命令或确认策略
+- **THEN** 控制面不得因此拒绝创建 Run
+- **AND** 不得要求用户在 Manifest UI 补齐发布字段

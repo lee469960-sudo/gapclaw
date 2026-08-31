@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import tarfile
@@ -26,6 +27,13 @@ _COMMIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 class WorkspacePreparationError(RuntimeError):
     pass
+
+
+class WorkspaceGitSyncError(RuntimeError):
+    def __init__(self, reason: str, *, detail: str = ""):
+        self.reason = reason
+        self.detail = detail
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -116,30 +124,57 @@ class WorkspaceManager:
         run,
         *,
         snapshot_store: SourceSnapshotStore | None = None,
+        sandbox_id: str = "",
     ) -> WorkspaceFacts:
-        """Materialize the run's sealed snapshot into an isolated writable Workspace.
+        """Materialize or reuse the project's persistent writable Workspace.
 
-        Preparation never re-clones the repository or resolves a symbolic ref: it
-        verifies the immutable, content-addressed snapshot (hash, exact commit and
-        sanitized Git metadata), copies its worktree into a per-run directory and
-        reuses its sanitized ``.git`` for the later read-only status/diff/log queries.
+        For CodeAgent runs bound to an existing Sandbox, the Workspace lives under
+        that Sandbox's `/workplace/code/<project_id>/workspace` directory so the
+        human terminal, Claude Code and the left preview panel see the same files.
+        In persistent mode this only prepares the shared directory; repository
+        clone/fetch happens inside the bound Sandbox after runner attachment.
         """
-        run_root = (self.root / run.id).resolve()
-        if run_root.parent != self.root or run_root.exists():
-            raise WorkspacePreparationError("workspace_already_exists")
+        persistent = bool(str(sandbox_id or "").strip())
+        if persistent:
+            from app.services.workplace import ensure_workplace
 
-        store = snapshot_store or _default_snapshot_store()
-        snapshot_path, resolved_commit = self._verify_snapshot(run, store)
+            project_key = str(getattr(run, "project_id", "") or "").strip() or run.id
+            run_root = (ensure_workplace(sandbox_id) / "code" / project_key).resolve()
+            workspace = run_root / "workspace"
+            needs_materialize = not workspace.exists() or not any(workspace.iterdir())
+            if workspace.exists() and not workspace.is_dir():
+                raise WorkspacePreparationError("workspace_mount_invalid")
+        else:
+            run_root = (self.root / run.id).resolve()
+            if run_root.parent != self.root or run_root.exists():
+                raise WorkspacePreparationError("workspace_already_exists")
+            workspace = run_root / "workspace"
+            needs_materialize = True
 
-        workspace = run_root / "workspace"
-        run_root.mkdir(parents=True)
+        run_root.mkdir(parents=True, exist_ok=persistent)
         self._allocated_runs.add(run.id)
+        created_persistent_workspace = False
         try:
-            repo_root_mode = self._materialize(snapshot_path, run_root, run=run)
+            repo_root_mode = "persistent_empty" if persistent else "snapshot_materialized"
+            if persistent:
+                workspace.mkdir(parents=True, exist_ok=True)
+                repo_root_mode = "persistent_reused" if (workspace / ".git").is_dir() else "persistent_empty"
+            else:
+                store = snapshot_store or _default_snapshot_store()
+                snapshot_path, resolved_commit = self._verify_snapshot(run, store)
+                if persistent:
+                    if workspace.exists():
+                        shutil.rmtree(workspace)
+                    _remove_path_for_retention(run_root / "source.git")
+                    created_persistent_workspace = True
+                repo_root_mode = self._materialize(snapshot_path, run_root, run=run)
+            if not persistent and needs_materialize is False and not (workspace / ".git").is_dir():
+                raise WorkspacePreparationError("workspace_git_metadata_missing")
             if _run_uses_claude_code(run):
-                _verify_claude_workspace_git_root(workspace)
+                if not persistent:
+                    _verify_claude_workspace_git_root(workspace)
             control = run_root / "control"
-            control.mkdir()
+            control.mkdir(exist_ok=True)
             baseline = _workspace_snapshot(workspace)
             baseline_json = json.dumps(baseline, sort_keys=True, separators=(",", ":"))
             (control / "baseline.json").write_text(baseline_json, encoding="utf-8")
@@ -148,23 +183,33 @@ class WorkspaceManager:
                 run_root, run.id, str(getattr(run, "snapshot_hash", "") or "")
             )
         except Exception:
-            shutil.rmtree(run_root, ignore_errors=True)
+            self._allocated_runs.discard(run.id)
+            if not persistent:
+                shutil.rmtree(run_root, ignore_errors=True)
+            elif created_persistent_workspace:
+                shutil.rmtree(workspace, ignore_errors=True)
+                _remove_path_for_retention(run_root / "source.git")
             raise
         facts = WorkspaceFacts(
             path=str(workspace),
             repository=run.repository,
             requested_commit=run.base_commit,
-            resolved_commit=resolved_commit,
+            resolved_commit=str(getattr(run, "resolved_commit", "") or run.base_commit or ""),
             snapshot_id=str(getattr(run, "snapshot_id", "") or ""),
             snapshot_hash=str(getattr(run, "snapshot_hash", "") or ""),
             baseline_digest=hashlib.sha256(baseline_json.encode()).hexdigest(),
-            preparation_mode="snapshot_materialize",
+            preparation_mode="persistent_git_sync" if persistent else "snapshot_materialize",
             repo_root_mode=repo_root_mode,
             repo_root_ready=True,
             repo_root_reason="ready",
         )
         run.workspace_path = facts.path
         run.source_facts = json.dumps(facts.to_dict(), sort_keys=True)
+        if persistent:
+            source_facts = json.loads(run.source_facts)
+            source_facts["workspace_mode"] = "persistent_sandbox"
+            source_facts["sandbox_id"] = sandbox_id
+            run.source_facts = json.dumps(source_facts, sort_keys=True)
         run.workspace_state = "prepared"
         run.workspace_downloadable = False
         return facts
@@ -224,6 +269,9 @@ class WorkspaceManager:
         """Compensate from the first allocated directory, including partial prepare."""
         if run.id not in self._allocated_runs:
             return
+        if _source_facts(run).get("workspace_mode") == "persistent_sandbox":
+            self._allocated_runs.discard(run.id)
+            return
         resolved_root = (self.root / run.id).resolve()
         if resolved_root.parent != self.root:
             raise WorkspacePreparationError("workspace_cleanup_target_invalid")
@@ -243,6 +291,11 @@ class WorkspaceManager:
             self._allocated_runs.discard(run.id)
 
     def retain_after_run(self, run) -> None:
+        if _source_facts(run).get("workspace_mode") == "persistent_sandbox":
+            run.workspace_state = "prepared"
+            run.retained_until = ""
+            run.workspace_downloadable = False
+            return
         workspace = Path(run.workspace_path).resolve()
         run_root = workspace.parent
         if run_root.parent != self.root or not workspace.is_dir():
@@ -273,6 +326,18 @@ class WorkspaceManager:
 
     def reset_to_frozen_baseline(self, run) -> None:
         """Restore the prepared tree after pre-execution baseline validation."""
+        if _source_facts(run).get("workspace_mode") == "persistent_sandbox":
+            workspace = Path(run.workspace_path).resolve()
+            baseline = _workspace_snapshot(workspace)
+            baseline_json = json.dumps(baseline, sort_keys=True, separators=(",", ":"))
+            (workspace.parent / "control" / "baseline.json").write_text(
+                baseline_json, encoding="utf-8"
+            )
+            facts = _source_facts(run)
+            facts["baseline_digest"] = hashlib.sha256(baseline_json.encode()).hexdigest()
+            facts["path"] = run.workspace_path
+            run.source_facts = json.dumps(facts, sort_keys=True)
+            return
         workspace = Path(run.workspace_path).resolve()
         run_root = workspace.parent
         mirror = run_root / "source.git"
@@ -352,6 +417,237 @@ def _default_snapshot_store() -> SourceSnapshotStore:
         raise WorkspacePreparationError("workspace_snapshot_store_invalid")
     resolved.chmod(0o700)
     return SourceSnapshotStore(resolved)
+
+
+_GIT_SYNC_AUTH_RE = re.compile(
+    r"authentication failed|could not read username|could not read password|"
+    r"terminal prompts disabled|401|403|access denied|permission denied",
+    re.IGNORECASE,
+)
+_GIT_SYNC_REF_RE = re.compile(
+    r"couldn't find remote ref|could not find remote ref|not our ref|"
+    r"invalid refspec|unknown revision|ambiguous argument",
+    re.IGNORECASE,
+)
+_GIT_SYNC_NETWORK_RE = re.compile(
+    r"could not resolve host|failed to connect|connection refused|"
+    r"network is unreachable|operation timed out|connection timed out|"
+    r"repository not found|could not read from remote repository",
+    re.IGNORECASE,
+)
+_COMMIT_OUTPUT_RE = re.compile(r"^[0-9a-f]{40,64}$")
+
+
+def _classify_git_sync_failure(output: str) -> str:
+    text = str(output or "")
+    if _GIT_SYNC_AUTH_RE.search(text):
+        return "repository_auth_failed"
+    if _GIT_SYNC_REF_RE.search(text):
+        return "repository_ref_invalid"
+    if _GIT_SYNC_NETWORK_RE.search(text):
+        return "repository_unreachable"
+    return "repository_sync_failed"
+
+
+def _workspace_mount_from_facts(runner_facts) -> str:
+    value = getattr(runner_facts, "workspace_mount", "")
+    if value:
+        return str(value)
+    if isinstance(runner_facts, dict):
+        return str(runner_facts.get("workspace_mount") or "")
+    return ""
+
+
+def _credential_for_git_sync(db, run) -> tuple[str, str]:
+    from app.models import CodeDeployCredential, CodeProject, CodeProjectManifest
+    from app.services.code_agent.secret_store import (
+        DeployTokenSecretStore,
+        repository_importer_identity,
+    )
+
+    manifest = db.get(CodeProjectManifest, str(getattr(run, "manifest_id", "") or ""))
+    credential_ref = str(getattr(manifest, "credential_ref", "") or "")
+    if not credential_ref:
+        return "", ""
+    project = db.get(CodeProject, str(getattr(run, "project_id", "") or ""))
+    if project is None:
+        raise WorkspaceGitSyncError("repository_auth_failed")
+    row = db.get(CodeDeployCredential, credential_ref)
+    username = str(getattr(row, "auth_username", "") or "") if row else ""
+    try:
+        with DeployTokenSecretStore(db).resolve_for_importer(
+            identity=repository_importer_identity(),
+            reference_id=credential_ref,
+            organization_id=str(project.organization_id or ""),
+            project_id=str(project.id or ""),
+        ) as lease:
+            password = lease.read().decode("utf-8", errors="strict")
+    except Exception as exc:
+        raise WorkspaceGitSyncError("repository_auth_failed") from exc
+    return username, password
+
+
+def _refresh_persistent_workspace_baseline(run, *, resolved_commit: str) -> None:
+    workspace = Path(run.workspace_path).resolve()
+    run_root = workspace.parent
+    control = run_root / "control"
+    control.mkdir(exist_ok=True)
+    baseline = _workspace_snapshot(workspace)
+    baseline_json = json.dumps(baseline, sort_keys=True, separators=(",", ":"))
+    (control / "baseline.json").write_text(baseline_json, encoding="utf-8")
+    (control / "authorized_writes.json").write_text("[]", encoding="utf-8")
+    try:
+        facts = json.loads(run.source_facts or "{}")
+    except (TypeError, json.JSONDecodeError):
+        facts = {}
+    if not isinstance(facts, dict):
+        facts = {}
+    facts.update({
+        "path": str(workspace),
+        "repository": str(getattr(run, "repository", "") or ""),
+        "requested_commit": str(getattr(run, "requested_ref", "") or ""),
+        "resolved_commit": resolved_commit,
+        "baseline_digest": hashlib.sha256(baseline_json.encode()).hexdigest(),
+        "preparation_mode": "persistent_git_sync",
+        "repo_root_mode": "sandbox_git_synced",
+        "repo_root_ready": True,
+        "repo_root_reason": "ready",
+        "workspace_mode": "persistent_sandbox",
+    })
+    run.source_facts = json.dumps(facts, sort_keys=True)
+
+
+def sync_repository_in_sandbox(db, run, runner, runner_facts) -> dict[str, str]:
+    """Clone/fetch the Manifest repository inside the bound persistent Sandbox."""
+    repository = str(getattr(run, "repository", "") or "").strip()
+    requested_ref = str(getattr(run, "requested_ref", "") or "").strip() or "HEAD"
+    container_id = str(getattr(run, "container_id", "") or "")
+    workspace_mount = _workspace_mount_from_facts(runner_facts)
+    if not repository or not requested_ref:
+        raise WorkspaceGitSyncError("repository_ref_invalid")
+    if not container_id or not workspace_mount.startswith("/workplace/"):
+        raise WorkspaceGitSyncError("workspace_mount_invalid")
+
+    git_code, git_output = runner.exec(
+        container_id,
+        "git --version",
+        timeout_seconds=30,
+    )
+    if git_code != 0:
+        raise WorkspaceGitSyncError("repository_feature_unsupported", detail=git_output)
+
+    username, password = _credential_for_git_sync(db, run)
+    base_environment = {"GIT_TERMINAL_PROMPT": "0"}
+    credential_environment = {
+        **base_environment,
+        "GIT_ASKPASS": f"/tmp/code-agent-askpass-{run.id}",
+        "GIT_USERNAME": username,
+        "GIT_PASSWORD": password,
+    }
+    askpass = shlex.quote(credential_environment["GIT_ASKPASS"])
+    if username or password:
+        setup_askpass = (
+            f"umask 077 && printf '%s\\n' "
+            f"'#!/bin/sh' "
+            f"'case \"$1\" in' "
+            f"'*Username*) printf \"%s\\\\n\" \"$GIT_USERNAME\" ;;' "
+            f"'*Password*) printf \"%s\\\\n\" \"$GIT_PASSWORD\" ;;' "
+            f"'*) printf \"\\\\n\" ;;' "
+            f"'esac' > {askpass} && chmod 700 {askpass}"
+        )
+        code, output = runner.exec(
+            container_id,
+            setup_askpass,
+            timeout_seconds=30,
+            environment=credential_environment,
+        )
+        if code != 0:
+            raise WorkspaceGitSyncError("repository_auth_failed", detail=output)
+
+    workspace_arg = shlex.quote(workspace_mount)
+    repo_arg = shlex.quote(repository)
+    ref_arg = shlex.quote(requested_ref)
+    sync_command = (
+        "set -eu\n"
+        f"cd {workspace_arg}\n"
+        "if [ -d .git ]; then\n"
+        f"  git remote set-url origin {repo_arg} 2>/dev/null || git remote add origin {repo_arg}\n"
+        "else\n"
+        "  if [ -n \"$(find . -mindepth 1 -maxdepth 1 -not -name .claude -print -quit)\" ]; then\n"
+        "    echo WORKSPACE_NOT_EMPTY_WITHOUT_GIT >&2\n"
+        "    exit 43\n"
+        "  fi\n"
+        f"  git clone --no-checkout {repo_arg} .\n"
+        "fi\n"
+        f"git fetch --tags --prune origin {ref_arg}\n"
+        "git checkout -f --detach FETCH_HEAD\n"
+        "git rev-parse HEAD\n"
+    )
+    environment = credential_environment if (username or password) else base_environment
+    try:
+        code, output = runner.exec(
+            container_id,
+            sync_command,
+            timeout_seconds=300,
+            environment=environment,
+        )
+    finally:
+        if username or password:
+            try:
+                runner.exec(container_id, f"rm -f {askpass}", timeout_seconds=10)
+            except Exception:
+                pass
+    if code != 0:
+        reason = (
+            "workspace_git_metadata_missing"
+            if "WORKSPACE_NOT_EMPTY_WITHOUT_GIT" in str(output or "")
+            else _classify_git_sync_failure(output)
+        )
+        raise WorkspaceGitSyncError(reason, detail=output)
+    commit = ""
+    for line in reversed(str(output or "").splitlines()):
+        candidate = line.strip().lower()
+        if _COMMIT_OUTPUT_RE.fullmatch(candidate):
+            commit = candidate
+            break
+    if not commit:
+        code, rev_output = runner.exec(
+            container_id,
+            f"cd {workspace_arg} && git rev-parse HEAD",
+            timeout_seconds=30,
+            environment=base_environment,
+        )
+        if code == 0:
+            for line in reversed(str(rev_output or "").splitlines()):
+                candidate = line.strip().lower()
+                if _COMMIT_OUTPUT_RE.fullmatch(candidate):
+                    commit = candidate
+                    break
+    if not commit:
+        raise WorkspaceGitSyncError("repository_sync_failed", detail=output)
+    run.resolved_commit = commit
+    run.base_commit = commit
+    run.snapshot_id = ""
+    run.snapshot_hash = ""
+    run.source_scan_report_id = ""
+    _refresh_persistent_workspace_baseline(run, resolved_commit=commit)
+    try:
+        contract = json.loads(run.task_contract or "{}")
+    except (TypeError, json.JSONDecodeError):
+        contract = {}
+    if isinstance(contract, dict):
+        contract["resolved_commit"] = commit
+        contract["base_commit"] = commit
+        contract["snapshot_id"] = ""
+        contract["snapshot_hash"] = ""
+        contract["source_scan_report_id"] = ""
+        run.task_contract = json.dumps(contract, sort_keys=True)
+    return {
+        "repository": repository,
+        "requested_ref": requested_ref,
+        "resolved_commit": commit,
+        "workspace_mount": workspace_mount,
+    }
 
 
 def _verify_sanitized_git_metadata(snapshot_path: Path) -> None:
@@ -603,7 +899,10 @@ class WorkspaceIntegrityGuard:
             self._fail("workspace_snapshot_identity_invalid")
         if (
             str(facts.get("path") or "") != self.run.workspace_path
-            or self.workspace.parent.name != self.run.id
+            or (
+                facts.get("workspace_mode") != "persistent_sandbox"
+                and self.workspace.parent.name != self.run.id
+            )
         ):
             self._fail("workspace_cross_run_mount")
         self._check_uncontrolled_checkout()
@@ -641,10 +940,19 @@ class WorkspaceIntegrityGuard:
             head = (metadata / "HEAD").read_text(encoding="utf-8").strip()
         except OSError:
             self._fail("workspace_integrity_metadata_error")
-        if head != "ref: refs/heads/snapshot":
-            self._fail("workspace_uncontrolled_checkout")
         expected = str(getattr(self.run, "resolved_commit", "") or self.run.base_commit or "").strip().lower()
-        if _read_git_ref(metadata, "refs/heads/snapshot") != expected:
+        if str(getattr(self.run, "snapshot_hash", "") or "").strip():
+            if head != "ref: refs/heads/snapshot":
+                self._fail("workspace_uncontrolled_checkout")
+            if _read_git_ref(metadata, "refs/heads/snapshot") != expected:
+                self._fail("workspace_uncontrolled_checkout")
+            return
+        actual = ""
+        if _COMMIT_SHA.fullmatch(head.lower()):
+            actual = head.lower()
+        elif head.startswith("ref: "):
+            actual = _read_git_ref(metadata, head.removeprefix("ref: ").strip())
+        if not expected or actual != expected:
             self._fail("workspace_uncontrolled_checkout")
 
     def check_before_write(self, relative_path: str) -> None:
@@ -690,7 +998,7 @@ class WorkspaceIntegrityGuard:
         unauthorized = [
             path for path in changed
             if not rules
-            or ("." not in rules and not any(
+            or ("." not in rules and "**" not in rules and not any(
                 path == rule or path.startswith(rule + "/") or fnmatch.fnmatch(path, rule)
                 for rule in rules if rule
             ))

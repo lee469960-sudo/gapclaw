@@ -62,34 +62,57 @@ def test_required_terminal_states_have_stable_presentation_and_only_verified_sea
         assert "不可直接采用" in result["warning"]
 
     inconsistent = serialize_code_result(_run("patch_ready", verified=False), None)
-    assert inconsistent["status"] == "infrastructure_error"
+    assert inconsistent["status"] == "verification_inconclusive"
     assert inconsistent["directly_adoptable"] is False
+
+
+def test_code_result_exposes_workspace_availability_without_host_path():
+    failed = _run("infrastructure_error")
+    failed.workspace_path = ""
+    failed.workspace_state = "prepared"
+    failed_result = serialize_code_result(failed)
+    assert failed_result["workspace"] == {"state": "prepared", "available": False}
+
+    retained = _run("patch_ready", verified=True)
+    retained.failure_reason = "patch_ready"
+    retained.workspace_path = "/host/private/run/workspace"
+    retained.workspace_state = "retained_read_only"
+    retained_result = serialize_code_result(retained, _artifact())
+    assert retained_result["workspace"] == {"state": "retained_read_only", "available": True}
+    assert "/host/private/run/workspace" not in json.dumps(retained_result)
 
 
 def test_patch_verification_output_is_present_for_every_terminal_result():
     ready = serialize_code_result(_run("patch_ready", verified=True), _artifact())
     ready["verifier_report"]["changed_paths"] = ["models/a.sql"]
     text = format_patch_verification_output(ready)
-    assert "Patch 验证结果" in text
-    assert "Code run" in text
-    assert "Manifest" in text
-    assert "Runtime" in text
-    assert "Verifier：通过" in text
-    assert "Sealed artifact：已生成" in text
+    assert "补丁验证结果" in text
+    assert "代码运行" in text
+    assert "运行清单" in text
+    assert "编码运行时" in text
+    assert "验证器：通过" in text
+    assert "封存工件：已生成" in text
     assert "models/a.sql" in text
-    assert "Verifier 证据" in text
+    assert "验证器证据" in text
     assert "Git 提交/推送：未执行" in text
+    assert "patch_ready" in text
+    assert "models/a.sql" in text
+    assert "- Code run：" not in text
+    assert "- Manifest：" not in text
+    assert "- Runtime：" not in text
+    assert "- Verifier：" not in text
+    assert "- Sealed artifact：" not in text
 
     claude_run = _run("patch_ready", verified=True)
     claude_run.task_contract = json.dumps({"coding_runtime": "claude_code"})
     claude_text = format_patch_verification_output(
         serialize_code_result(claude_run, _artifact())
     )
-    assert "Host 验证命令" in claude_text
+    assert "主机验证命令" in claude_text
 
     failed = serialize_code_result(_run("coding_failed"), None)
     failed_text = format_patch_verification_output(failed)
-    assert "Verifier：未通过或证据不足" in failed_text
+    assert "验证器：未通过或证据不足" in failed_text
     assert "可直接采用：否" in failed_text
 
 
@@ -120,12 +143,51 @@ def test_patch_verification_output_shows_redacted_stage_code_snippets_before_res
 
     rendered = format_patch_verification_output(serialize_code_result(run, _artifact()))
 
-    assert rendered.index("阶段代码片段") < rendered.index("Patch 验证结果")
+    assert rendered.index("阶段代码片段") < rendered.index("补丁验证结果")
     assert "gamestat/dbt_project.yml" in rendered
     assert "修改前" in rendered and "修改后" in rendered
     assert "PASS 中文输出" in rendered
     assert secret not in rendered
     assert "[REDACTED:SECRET]" in rendered
+
+
+def test_patch_output_falls_back_to_file_changed_events_when_verifier_report_missing():
+    run = _run("failed", verified=False)
+    run.failure_reason = "failed"
+    run.workspace_path = "/host/workplace/code/project/workspace"
+    run.task_contract = json.dumps({"coding_runtime": "claude_code"})
+    run.effective_policy = json.dumps({"coding_runtime": "claude_code"})
+    run.verifier_report = "{}"
+    run.runner_facts = json.dumps({
+        "workspace_mount": "/workplace/code/project/workspace",
+        "code_profile_events": [
+            {
+                "phase": "file_changed",
+                "status": "started",
+                "path": "/workplace/code/project/workspace/gamestat/dbt_project.yml",
+                "snippet": "--- 修改前\npg_host: old\n+++ 修改后\npg_host: new",
+            },
+        ],
+        "claude_code_runtime": {
+            "status": "coding_completed",
+            "summary": "修改已完成",
+            "changed_files": [],
+        },
+    })
+
+    result = serialize_code_result(run)
+    rendered = format_patch_verification_output(result)
+
+    assert result["status"] == "verification_inconclusive"
+    assert result["failure_reason"] == ""
+    assert result["failure"] == {}
+    assert result["verifier_report"]["reason"] == "verification_not_completed_after_coding"
+    assert result["verifier_report"]["changed_paths"] == ["gamestat/dbt_project.yml"]
+    assert "gamestat/dbt_project.yml" in rendered
+    assert "验证不充分" in rendered
+    assert "infrastructure_error" not in rendered
+    assert "变更文件\n- 无" not in rendered
+    assert "阶段代码片段" in rendered
 
 
 def test_non_patch_terminal_results_are_distinct_and_not_adoptable():

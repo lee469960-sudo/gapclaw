@@ -129,19 +129,22 @@ Patch 阶段（canonical diff 与待封存新增内容）SHALL 受该 run 冻结
 
 ### Requirement: Claude Code 完成必须经现有 Verifier 和 Sealer 裁决
 
-当 CodeAgent 使用 Claude Code runtime 时，Claude Code coding completed SHALL 只表示编码阶段结束。系统 SHALL 在每次 coding completed 后运行现有 CodeAgent Verifier，并仅在 Verifier 通过且现有 Sealer 成功封存 canonical diff、Verifier report、策略和工件哈希后进入 `patch_ready`。
+当 CodeAgent 使用 Claude Code runtime 时，Claude Code 的完成 SHALL 产生普通代码修改、测试和 diff 事实。系统 MAY 基于编辑页资源配置执行常规验证并展示结果，但 MUST NOT 要求 local 发布预检、发布确认、发布 ID、发布证据或发布专用 Sealer 才允许向用户显示任务结果。
 
 #### Scenario: Claude Code 声称完成
-
-- **WHEN** Claude Code 返回成功退出码或在文本中声明任务完成
-- **THEN** 系统不得直接标记 `patch_ready`
-- **AND** 必须运行现有 Verifier 与 Sealer 后才能产生成功交付
+- **WHEN** Claude Code 在持久 Sandbox 中完成编辑和测试
+- **THEN** 系统展示实际修改、测试输出和验证事实
+- **AND** 不因不存在发布证据而进入失败或重试
 
 #### Scenario: Verifier 和 Sealer 通过
+- **WHEN** 常规验证通过且存在可展示的 diff 或无变更事实
+- **THEN** 系统展示普通验证和变更结果
+- **AND** 不要求发布专用封存证据
 
-- **WHEN** Claude Code coding completed 后现有 Verifier 通过且 Sealer 成功封存工件
-- **THEN** 系统进入 `patch_ready`
-- **AND** 结果展示包含 Verifier 与 sealed artifact 证据
+#### Scenario: 测试失败
+- **WHEN** 常规验证命令失败
+- **THEN** 系统展示脱敏失败输出并允许 Claude Code 按现有 retry 配置修复
+- **AND** 不启动 local 发布流程
 
 ### Requirement: Verifier 失败必须触发受控 Claude Code 自修复闭环
 
@@ -229,3 +232,19 @@ Patch 阶段（canonical diff 与待封存新增内容）SHALL 受该 run 冻结
 - **THEN** 系统可在最终结果中展示 `host-validate.sh` 内容块
 - **AND** 不把该脚本写入业务 repository
 - **AND** 不将宿主机验证命令作为自动 `patch_ready` 门禁
+
+### Requirement: Local 发布必须提交完整结果证据供 Verifier 裁决
+
+Verifier SHALL 继续裁决 local 发布任务的成功。缺少必要证据、发生状态未知或验证失败时不得标记成功。Claude Code 文本或命令退出码不得单独替代 Verifier。
+
+#### Scenario: 完整证据通过
+
+- **WHEN** Claude Code 完成且 Verifier 匹配任务契约
+- **THEN** Verifier 允许 Run 进入成功终态
+- **AND** 用户可查看脱敏证据摘要
+
+#### Scenario: 证据不足或状态未知
+
+- **WHEN** 验证失败或远端状态无法确认
+- **THEN** Verifier 阻止成功交付
+- **AND** Run 展示明确的非成功原因

@@ -167,6 +167,8 @@ class ChatBody(BaseModel):
     message_id: int | None = None
     limit: int | None = None
     artifact_id: str | None = None
+    code_run_id: str | None = None
+    confirmed: bool | None = None
 
 
 def _run_chat_bg(
@@ -338,22 +340,49 @@ async def chat_get(
             source_facts = json.loads(run.source_facts or "{}")
         except (TypeError, json.JSONDecodeError):
             source_facts = {}
+        try:
+            runner_facts = json.loads(run.runner_facts or "{}")
+        except (TypeError, json.JSONDecodeError):
+            runner_facts = {}
+        if not isinstance(runner_facts, dict):
+            runner_facts = {}
         workspace_path = str(run.workspace_path or "")
-        if not workspace_path:
+        workspace_root = Path(workspace_path) if workspace_path else None
+        persistent_git_sync = source_facts.get("preparation_mode") == "persistent_git_sync"
+        git_synced = source_facts.get("repo_root_mode") == "sandbox_git_synced"
+        terminal_run = run.status not in {"pending", "running"}
+        if run.workspace_state in {"expired", "deleted"}:
+            state = "workspace_expired"
+        elif not workspace_path and run.status not in {"pending", "running"}:
+            # A failed startup can leave no materialized path. Do not report it
+            # as an indefinitely pending mount; expose the terminal run reason
+            # so the UI can stop polling and show the actionable failure.
+            state = "workspace_prepare_failed"
+        elif not workspace_path:
             state = "workspace_not_prepared"
-        elif run.workspace_state in {"expired", "deleted"} or (
+        elif (
             run.workspace_state in {"sealed", "retained_read_only"}
-            and not Path(workspace_path).exists()
+            and workspace_root is not None
+            and not workspace_root.exists()
         ):
             state = "workspace_expired"
-        elif not Path(workspace_path).is_dir():
+        elif workspace_root is None or not workspace_root.is_dir():
             state = "workspace_mount_invalid"
+        elif persistent_git_sync and not git_synced and not (workspace_root / ".git").is_dir():
+            state = "workspace_prepare_failed" if terminal_run else "workspace_not_prepared"
         else:
             state = "ready"
         return ok({
             "run_id": run.id,
             "state": state,
             "workspace_path": workspace_path if state == "ready" else "",
+            "status": run.status,
+            "failure_reason": str(run.failure_reason or ""),
+            "workspace_state": str(run.workspace_state or ""),
+            "runner_state": str(run.runner_state or ""),
+            "sandbox_id": str(source_facts.get("sandbox_id") or ""),
+            "sandbox_status": "running" if str(run.runner_state or "") in {"active", "released"} and str(run.container_id or "") else "",
+            "workspace_mount": str(runner_facts.get("workspace_mount") or ""),
             "repository": run.repository,
             "resolved_commit": run.resolved_commit,
             "base_commit": run.base_commit,

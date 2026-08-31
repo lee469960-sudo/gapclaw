@@ -27,9 +27,9 @@ Manifest 只引用 `local_publish_command_id`。平台维护命令 ID 到仓库�
 
 发布动作作为现有 CodeAgent run 的受控阶段运行，沿用 Workspace bind、非 root、只读 rootfs、capability drop、资源预算和清理流程。发布能力只在冻结策略声明的网络例外下启用；普通 CodeAgent 仍保持默认隔离。
 
-### 3. 依赖进入固定双架构镜像
+### 3. 固定双架构镜像只承载平台基础工具
 
-为发布能力构建 `amd64`/`arm64` 镜像，预装 canonical 命令实际需要的固定版本工具（例如 curl、Python、dbt adapter），并以 digest 固定。运行时不执行 apt/pip/npm 安装；若命令依赖变化，发布新镜像和新 Manifest 版本。
+为发布能力构建 `amd64`/`arm64` 镜像，预装 CodeAgent/Claude Code 运行和受控命令执行所需的固定基础工具，并以 digest 固定。dbt、jq、clickhouse-client 等项目/CI 业务工具不是 runner 启动必备项；平台可对 Manifest 登记的依赖做可选探测和审计，但缺失只能在具体发布命令阶段形成清晰失败，不能阻塞 Workspace/Runtime 启动。运行时不执行 apt/pip/npm 安装；若项目需要额外工具，应由项目 CI 脚本、项目专用镜像或后续 Manifest 版本显式承载。
 
 ### 4. 凭证通过 Secret 引用短暂注入
 
@@ -51,14 +51,14 @@ Manifest 保存 Secret 标识而非值。preflight 校验引用可用性，正�
 
 - **[Risk] canonical 命令内部仍调用未登记的脚本或服务** → 发布注册表固定入口、参数和网络目的地，preflight 检查依赖与路径，Verifier 检查最终证据。
 - **[Risk] 发布超时但远端已经生效** → 不自动重试；保留远端任务 ID和状态查询方式，进入状态未知并要求人工确认。
-- **[Risk] dbt/系统依赖版本漂移** → 依赖只进入固定 digest 镜像，工具版本纳入 Manifest 和审计事实。
+- **[Risk] 项目业务依赖缺失或版本漂移** → 基础 runner 不把 dbt/jq/clickhouse-client 作为通用必备；依赖探测只写审计事实，具体命令缺失时以发布阶段失败和恢复提示暴露。
 - **[Risk] 凭证或命令输出泄露秘密** → Secret 分离注入，统一脱敏，禁止命令参数携带秘密，并对 transcript 做二次扫描。
 - **[Risk] 发布动作影响现有 CodeAgent 稳定性** → 能力由 feature flag/Manifest 显式启用；禁用发布能力即可回退到原有 CodeAgent 路径。
 
 ## Migration Plan
 
 1. 增加命令注册、Manifest 字段和策略校验，默认关闭 local publish。
-2. 构建并批准双架构发布镜像，登记 digest、依赖版本、网络目的地和验证计划。
+2. 构建并批准双架构发布镜像，登记 digest、可选依赖探测结果、网络目的地和验证计划。
 3. 为一个试点仓库发布仅含 local 命令的 Manifest，先执行 preflight/dry-run，再开启人工确认后的正式发布。
 4. 观察审计、证据和状态未知场景；出现问题时撤销 feature flag/Manifest 或镜像 digest，不影响普通 CodeAgent。
 

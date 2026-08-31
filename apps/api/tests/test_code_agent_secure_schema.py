@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -45,6 +45,67 @@ def test_secure_workspace_schema_upgrade_and_downgrade_are_reversible():
 
     upgrade_secure_workspace_schema(engine)
     assert SECURE_TABLES <= set(inspect(engine).get_table_names())
+
+
+def test_secure_workspace_schema_upgrades_existing_scan_table_columns():
+    engine = _engine_with_project_table()
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE code_scan_reports (
+                id VARCHAR(16) PRIMARY KEY,
+                scope VARCHAR(16) NOT NULL,
+                input_hash VARCHAR(64) NOT NULL,
+                scanner VARCHAR(64) NOT NULL,
+                scanner_version VARCHAR(64) NOT NULL,
+                status VARCHAR(16) NOT NULL,
+                complete BOOLEAN DEFAULT 0,
+                findings_count INTEGER DEFAULT 0,
+                files_discovered INTEGER DEFAULT 0,
+                files_scanned INTEGER DEFAULT 0,
+                bytes_discovered INTEGER DEFAULT 0,
+                bytes_scanned INTEGER DEFAULT 0,
+                skipped_count INTEGER DEFAULT 0,
+                truncated_count INTEGER DEFAULT 0,
+                findings TEXT DEFAULT '[]',
+                failure_reason VARCHAR(64) DEFAULT '',
+                created_at VARCHAR(32) DEFAULT ''
+            )
+        """))
+
+    upgrade_secure_workspace_schema(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("code_scan_reports")}
+    assert {
+        "publish_state", "publish_preflight", "publish_confirmation", "publish_result",
+    } <= columns
+
+
+def test_secure_workspace_schema_upgrades_existing_run_publish_columns():
+    engine = _engine_with_project_table()
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE code_agent_runs (
+                id VARCHAR(16) PRIMARY KEY,
+                agent_id VARCHAR(16) NOT NULL,
+                session_id VARCHAR(64) DEFAULT '',
+                project_id VARCHAR(16) NOT NULL,
+                manifest_id VARCHAR(16) NOT NULL,
+                manifest_version INTEGER NOT NULL,
+                task_contract TEXT DEFAULT '{}',
+                effective_policy TEXT DEFAULT '{}',
+                runner_facts TEXT DEFAULT '{}',
+                status VARCHAR(32) DEFAULT 'pending',
+                failure_reason VARCHAR(64) DEFAULT '',
+                created_at VARCHAR(32) DEFAULT ''
+            )
+        """))
+
+    upgrade_secure_workspace_schema(engine)
+
+    run_columns = {column["name"] for column in inspect(engine).get_columns("code_agent_runs")}
+    assert {
+        "publish_state", "publish_preflight", "publish_confirmation", "publish_result",
+    } <= run_columns
 
 
 def test_secure_workspace_schema_persists_references_not_secret_values():

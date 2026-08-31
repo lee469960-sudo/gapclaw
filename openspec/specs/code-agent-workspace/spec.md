@@ -8,25 +8,28 @@
 
 ### Requirement: 每个 CodeAgent run 使用独立且固定基线的 Workspace
 
-系统 SHALL 为每个 CodeAgent run 从已发布 Manifest 冻结的不可变源码快照创建独立可写 Workspace，并验证其仓库标识和精确基线 commit。并发 run SHALL 不共享可写工作目录；API 进程不得直接访问 Workspace 内容，所有允许的源码操作 SHALL 仅通过该 run 的专用 runner 执行。
+系统 SHALL 为每个 Code Project 维护可挂载到其绑定持久 Sandbox 的受管 Workspace，并在 Run 启动时通过绑定 Sandbox 将 Manifest 中的 Git 仓库同步到该 Workspace。任务 MAY 在该持久 Workspace 上连续执行；系统 MUST NOT 在每次任务结束时删除 Workspace 或 Sandbox。并发任务 MUST NOT 同时写入同一项目 Workspace。
 
 #### Scenario: 两个 run 操作同一仓库
-
-- **WHEN** 两个 CodeAgent run 使用同一仓库和相同或不同冻结基线
-- **THEN** 系统为它们准备彼此独立的可写 Workspace
-- **AND** 任一 run 的文件写入不得出现在另一个 run 的 Workspace 中
+- **WHEN** 两个任务请求写入同一项目 Workspace
+- **THEN** 系统只允许一个任务持有写锁
+- **AND** 另一个任务拒绝或等待
 
 #### Scenario: 固定基线准备
-
-- **WHEN** CodeAgent run 开始准备 Workspace
-- **THEN** Workspace 的源码严格对应任务契约中的快照标识与精确 commit
-- **AND** 系统记录该仓库标识、快照标识和 commit 作为运行事实，不访问原 Git 服务
+- **WHEN** 同一项目在同一持久 Sandbox 上执行后续任务
+- **THEN** 系统在同一 Workspace 内 clone 或 fetch Manifest 配置的仓库和 ref
+- **AND** 后续任务看到此前保留的工具环境和 Workspace 文件状态
+- **AND** 左侧预览继续指向该项目 Workspace
 
 #### Scenario: API 进程尝试源码操作
+- **WHEN** API 进程需要执行仓库命令
+- **THEN** 系统通过绑定 Sandbox 调度该操作
+- **AND** API 进程不得直接在宿主 Workspace 中执行命令
 
-- **WHEN** Code Tool 无法通过该 run 的专用 runner 执行
-- **THEN** 系统拒绝该动作并结束或暂停 run
-- **AND** 不回退到 API 进程直接读取或修改 Workspace
+#### Scenario: 同一 Workspace 已有写入任务
+- **WHEN** 新任务尝试写入已有活动任务的项目 Workspace
+- **THEN** 系统拒绝或排队该新任务并说明 Workspace 正忙
+- **AND** 不并发修改同一份代码
 
 ### Requirement: Workspace 必须物化到配置的 API root
 

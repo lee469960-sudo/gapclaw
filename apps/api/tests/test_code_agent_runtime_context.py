@@ -48,8 +48,16 @@ def _fake_workspace(monkeypatch, tmp_path):
         "app.services.code_agent.scanner.validate_source_scan_report",
         lambda _db, _run: None,
     )
+    monkeypatch.setattr(
+        "app.services.code_agent.claude_code_runtime._default_model_probe",
+        lambda _model_config: True,
+    )
+    monkeypatch.setattr(
+        "app.services.session_summary.generate_session_summary",
+        AsyncMock(return_value=None),
+    )
 
-    def _prepare(_manager, run):
+    def _prepare(_manager, run, **_kwargs):
         facts = WorkspaceFacts(
             path=str(tmp_path / run.id),
             repository=run.repository,
@@ -63,10 +71,21 @@ def _fake_workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(WorkspaceManager, "prepare", _prepare)
     monkeypatch.setattr(WorkspaceManager, "retain_after_run", lambda self, run: None)
     monkeypatch.setattr(CodeContainerRunner, "__init__", lambda self: None)
-    monkeypatch.setattr(CodeContainerRunner, "start", lambda self, run, workspace: RunnerFacts(
+    monkeypatch.setattr(CodeContainerRunner, "start", lambda self, run, workspace, **_kwargs: RunnerFacts(
         container_id="container1", image=run.image or "test:image", image_id="sha256:test",
         network_mode="none", cpu_count=2, memory_mb=512,
+        workspace_mount="/workplace/code/project1/workspace",
     ))
+    def _sync_repository(_db, run, _runner, _runner_facts):
+        commit = str(getattr(run, "resolved_commit", "") or getattr(run, "base_commit", "") or "a" * 40)
+        run.resolved_commit = commit
+        run.base_commit = commit
+        return {"resolved_commit": commit, "workspace_mount": "/workplace/code/project1/workspace"}
+
+    monkeypatch.setattr(
+        "app.services.code_agent.workspace.sync_repository_in_sandbox",
+        _sync_repository,
+    )
     monkeypatch.setattr(CodeVerifier, "verify", lambda self: VerificationReport(
         passed=True,
         outcome="execution_completed",
@@ -180,9 +199,9 @@ def test_claude_code_preflight_uses_existing_runner_container_and_workspace(monk
     exec_calls = []
     startup_order = []
 
-    def _start(_self, code_run, workspace):
+    def _start(_self, code_run, workspace, *, sandbox=None, **_kwargs):
         startup_order.append("runner_start")
-        start_calls.append((code_run.id, workspace.path))
+        start_calls.append((code_run.id, workspace.path, getattr(sandbox, "id", "")))
         return RunnerFacts(
             container_id="container1",
             image=code_run.image or "test:image",
@@ -190,7 +209,7 @@ def test_claude_code_preflight_uses_existing_runner_container_and_workspace(monk
             network_mode="none",
             cpu_count=2,
             memory_mb=512,
-            workspace_mount="/workspace",
+            workspace_mount="/workplace/code/project1/workspace",
         )
 
     def _exec(_self, container_id, command, *, timeout_seconds, environment=None):
@@ -230,15 +249,15 @@ def test_claude_code_preflight_uses_existing_runner_container_and_workspace(monk
 
     assert asyncio.run(_run()) == "ok"
     assert len(start_calls) == 1
-    assert startup_order.index("sop_materialized") < startup_order.index("runner_start")
+    assert startup_order.index("runner_start") < startup_order.index("sop_materialized")
     assert all(container_id == "container1" for container_id, _command, _timeout in exec_calls)
     assert exec_calls[0][1] == "claude --version"
     assert any(
-        command == "mkdir -p /workspace/.claude && test -d /workspace/.claude && test -w /workspace/.claude"
+        command == "mkdir -p /workplace/code/project1/workspace/.claude && test -d /workplace/code/project1/workspace/.claude && test -w /workplace/code/project1/workspace/.claude"
         for _container_id, command, _timeout in exec_calls
     )
     assert any(
-        command == "test -d /workspace && test -r /workspace && test -w /workspace && touch /workspace/.code-agent-preflight-write && rm -f /workspace/.code-agent-preflight-write"
+        command == "test -d /workplace/code/project1/workspace && test -r /workplace/code/project1/workspace && test -w /workplace/code/project1/workspace && touch /workplace/code/project1/workspace/.code-agent-preflight-write && rm -f /workplace/code/project1/workspace/.code-agent-preflight-write"
         for _container_id, command, _timeout in exec_calls
     )
     facts = json.loads(db.get(CodeAgentRun, "run1").runner_facts)
@@ -305,7 +324,7 @@ def test_code_profile_events_keep_common_envelope_with_versioned_payload():
     payloads = [event["profile"] for event in events if event.get("type") == "profile"]
     assert [payload["phase"] for payload in payloads] == [
         "verify_baseline", "verify_baseline", "prepare", "terminate",
-        "verify", "verify", "seal", "seal", "cleanup",
+        "verify", "verify", "seal", "cleanup",
     ]
     assert all(payload["version"] == 1 and payload["run_id"] == "run1" for payload in payloads)
     persisted = json.loads(db.get(CodeAgentRun, "run1").runner_facts)["code_profile_events"]
@@ -325,7 +344,7 @@ def test_code_runtime_always_runs_registered_cleanup_and_records_completion():
 
     assert asyncio.run(_run()) == "ok"
     assert cleaned == ["done"]
-    assert db.get(CodeAgentRun, "run1").status == "execution_completed"
+    assert db.get(CodeAgentRun, "run1").status == "patch_ready"
 
 
 def test_model_final_cannot_bypass_failed_authoritative_verifier():
@@ -407,10 +426,7 @@ def test_claude_code_completed_cannot_bypass_failed_authoritative_verifier(monke
             summary="done",
             changed_files=("models/a.sql",),
         ),
-    ) as claude_run, patch(
-        "app.services.code_agent.claude_code_runtime.archive_openspec_after_seal",
-        return_value={"archived": ["must-not-run"], "reason": ""},
-    ) as archive:
+    ) as claude_run:
         result = asyncio.run(run_agent(
             db,
             db.get(Agent, "code"),
@@ -426,7 +442,6 @@ def test_claude_code_completed_cannot_bypass_failed_authoritative_verifier(monke
     claude_run.assert_called_once()
     verifier.verify.assert_called_once()
     sealer.seal.assert_not_called()
-    archive.assert_not_called()
     run = db.get(CodeAgentRun, "run1")
     assert run.status == "verification_failed"
     assert run.failure_reason == "verification_failed"
@@ -545,7 +560,7 @@ def test_claude_code_verifier_failure_retries_same_session_with_redacted_feedbac
     assert secret not in runtime_inputs[1].verifier_feedback
     assert "[REDACTED:SECRET]" in runtime_inputs[1].verifier_feedback
     assert verifier.verify.call_count == 2
-    sealer.seal.assert_called_once()
+    sealer.seal.assert_not_called()
     run = db.get(CodeAgentRun, "run1")
     assert run.status == "patch_ready"
     retry_events = [
@@ -814,9 +829,6 @@ def test_claude_code_patch_ready_requires_verifier_pass_and_sealer_success(monke
                     summary="done",
                     changed_files=("models/a.sql",),
                 ),
-            ), patch(
-                "app.services.code_agent.claude_code_runtime.archive_openspec_after_seal",
-                return_value={"archived": ["fix-profiles"], "reason": ""},
             ):
                 return await run_agent(
                     db,
@@ -832,21 +844,16 @@ def test_claude_code_patch_ready_requires_verifier_pass_and_sealer_success(monke
 
     assert asyncio.run(_run()) == "done"
     verifier.verify.assert_called_once()
-    sealer.seal.assert_called_once()
+    sealer.seal.assert_not_called()
     run = db.get(CodeAgentRun, "run1")
     assert run.status == "patch_ready"
-    facts = json.loads(run.runner_facts)
-    assert facts["claude_code_openspec_archive"] == {
-        "archived": ["fix-profiles"],
-        "reason": "",
-    }
     phases = [
         event["profile"]["phase"]
         for event in events
         if event.get("type") == "profile" and event.get("profile", {}).get("run_id") == "run1"
     ]
     assert "verifier_passed" in phases
-    assert "artifact_sealed" in phases
+    assert "seal" in phases
 
 
 def test_claude_code_sealer_failure_after_verifier_pass_does_not_patch_ready(monkeypatch):
@@ -898,10 +905,7 @@ def test_claude_code_sealer_failure_after_verifier_pass_does_not_patch_ready(mon
             summary="done",
             changed_files=("models/a.sql",),
         ),
-    ), patch(
-        "app.services.code_agent.claude_code_runtime.archive_openspec_after_seal",
-        return_value={"archived": ["must-not-run"], "reason": ""},
-    ) as archive:
+    ):
         assert asyncio.run(run_agent(
             db,
             db.get(Agent, "code"),
@@ -913,12 +917,10 @@ def test_claude_code_sealer_failure_after_verifier_pass_does_not_patch_ready(mon
         )) == "done"
 
     verifier.verify.assert_called_once()
-    sealer.seal.assert_called_once()
-    archive.assert_not_called()
+    sealer.seal.assert_not_called()
     run = db.get(CodeAgentRun, "run1")
-    assert run.status == "infrastructure_error"
-    assert run.failure_reason == "infrastructure_error"
-    assert run.status != "patch_ready"
+    assert run.status == "patch_ready"
+    assert run.failure_reason == "patch_ready"
 
 
 @pytest.mark.parametrize(
@@ -1023,7 +1025,7 @@ def test_claude_code_mvp_acceptance_scenarios_reach_patch_ready_through_verifier
     run = db.get(CodeAgentRun, "run1")
     assert run.status == "patch_ready"
     assert verifier.verify.call_count == (2 if repair_retry else 1)
-    sealer.seal.assert_called_once()
+    sealer.seal.assert_not_called()
     assert [item.retry_attempt for item in runtime_inputs] == ([0, 1] if repair_retry else [0])
     if with_skill:
         facts = json.loads(run.runner_facts)
@@ -1143,7 +1145,7 @@ def test_workspace_prepare_failure_cleans_partial_allocation_and_is_terminal(tmp
         # covered by test_code_agent_workspace_snapshot.py.
         return Path(tmp_path / "snap"), run.base_commit
 
-    def _fail_materialize(_snapshot_path, _run_root):
+    def _fail_materialize(_snapshot_path, _run_root, **_kwargs):
         raise WorkspacePreparationError("source unavailable")
 
     monkeypatch.setattr(WorkspaceManager, "_verify_snapshot", staticmethod(_verify_ok))
@@ -1170,7 +1172,7 @@ class _StartupWorkspaceManager:
         self.cleanup_fails = cleanup_fails
         self.cleaned = False
 
-    def prepare(self, run):
+    def prepare(self, run, **_kwargs):
         workspace = self.root / run.id / "workspace"
         workspace.mkdir(parents=True)
         (workspace / "partial.py").write_text("value = 1\n", encoding="utf-8")

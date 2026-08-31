@@ -112,6 +112,8 @@ class RunnerSpec:
     cap_drop: tuple[str, ...] = ("ALL",)
     no_new_privileges: bool = True
     read_only_rootfs: bool = True
+    dependency_bootstrap: bool = False
+    run_as_root: bool = False
     tmpfs_mounts: dict[str, str] = field(default_factory=lambda: {"/tmp": "rw,noexec,nosuid"})
     helper_version: str = RUNNER_HELPER_VERSION
     schema_version: int = RUNNER_PROTOCOL_VERSION
@@ -130,6 +132,8 @@ class RunnerSpec:
             "cap_drop": list(self.cap_drop),
             "no_new_privileges": self.no_new_privileges,
             "read_only_rootfs": self.read_only_rootfs,
+            "dependency_bootstrap": self.dependency_bootstrap,
+            "run_as_root": self.run_as_root,
             "tmpfs_mounts": dict(self.tmpfs_mounts),
             "helper_version": self.helper_version,
             "schema_version": self.schema_version,
@@ -154,7 +158,12 @@ class RunnerSpec:
         network_mode = str(raw.get("network_mode", "none") or "none")
         _require(network_mode in {"none", "bridge"}, "runner_spec_network_not_allowed")
         _require(raw.get("privileged") is False, "runner_spec_privileged_not_allowed")
-        _require(raw.get("read_only_rootfs") is True, "runner_spec_rootfs_not_read_only")
+        bootstrap = raw.get("dependency_bootstrap") is True
+        run_as_root = raw.get("run_as_root") is True
+        _require(
+            raw.get("read_only_rootfs") is True or bootstrap,
+            "runner_spec_rootfs_not_read_only",
+        )
         _require(raw.get("no_new_privileges") is True, "runner_spec_privilege_escalation_allowed")
 
         budgets = RunnerBudgets.from_dict(raw.get("budgets"))
@@ -181,7 +190,9 @@ class RunnerSpec:
             privileged=False,
             cap_drop=tuple(str(item) for item in cap_drop),
             no_new_privileges=True,
-            read_only_rootfs=True,
+            read_only_rootfs=raw.get("read_only_rootfs") is True,
+            dependency_bootstrap=bootstrap,
+            run_as_root=run_as_root,
             tmpfs_mounts=dict(tmpfs_mounts),
             helper_version=RUNNER_HELPER_VERSION,
             schema_version=RUNNER_PROTOCOL_VERSION,

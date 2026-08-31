@@ -1,17 +1,9 @@
-"""Resource-bounded container runner for managed CodeAgent workspaces.
-
-The runner launches a container pinned to the run's frozen image digest with the
-security posture and resource limits derived from the merged effective policy
-(see :mod:`runner_protocol`). After launch it reads Docker inspect facts and fails
-closed if the running container does not exactly match the ``RunnerSpec``.
-"""
+"""Container runner adapter for CodeAgent work inside a bound persistent sandbox."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-import secrets
 import socket
 import struct
 import threading
@@ -20,7 +12,6 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from pathlib import Path
 
-from app.services.code_agent.lifecycle import register_code_cleanup
 from app.services.code_agent.runner_protocol import (
     RUNNER_HELPER_VERSION,
     RUNNER_PROTOCOL_VERSION,
@@ -33,6 +24,7 @@ from app.services.code_agent.runner_protocol import (
 
 # Non-root identity for the container main process (nobody:nogroup).
 RUNNER_USER = "65534:65534"
+ROOT_USER = "0:0"
 
 # The baked helper executable and its in-container workspace root. Every approved
 # Code Tool is routed to the helper as JSON on stdin → JSON on stdout (no shell).
@@ -172,8 +164,8 @@ def _run_uses_claude_code(run) -> bool:
 
 def _decode_exec_output(output: object) -> str:
     if isinstance(output, bytes):
-        return output.decode("utf-8", errors="replace").strip()
-    return str(output or "").strip()
+        return output.decode("utf-8", errors="replace")
+    return str(output or "")
 
 
 def _probe_claude_code_version(container) -> str:
@@ -216,11 +208,13 @@ def spec_for_run(run, *, host_path: str) -> RunnerSpec:
         "budgets": budgets.to_dict(),
         "workspace_mount_source": host_path,
         "workspace_mount_target": "/workspace",
-        # Claude Code needs Docker bridge network for model access. This is full
-        # egress, not a domain allowlist; legacy CodeAgent remains network none.
         "network_mode": "bridge" if _run_uses_claude_code(run) else "none",
+        "network_targets": [],
         "privileged": False,
+        "cap_drop": [] if _run_uses_claude_code(run) else ["ALL"],
         "read_only_rootfs": True,
+        "dependency_bootstrap": False,
+        "run_as_root": _run_uses_claude_code(run),
         "no_new_privileges": True,
         "helper_version": RUNNER_HELPER_VERSION,
         "schema_version": RUNNER_PROTOCOL_VERSION,
@@ -281,11 +275,11 @@ def verify_inspect_matches(spec: RunnerSpec, image_id: str, attrs: dict) -> None
         raise RunnerPolicyError("runner_facts_mismatch")
     if facts["read_only_rootfs"] is not spec.read_only_rootfs:
         raise RunnerPolicyError("runner_facts_mismatch")
-    if "ALL" not in facts["cap_drop"]:
+    if not spec.run_as_root and "ALL" not in facts["cap_drop"]:
         raise RunnerPolicyError("runner_facts_mismatch")
     if facts["no_new_privileges"] is not spec.no_new_privileges:
         raise RunnerPolicyError("runner_facts_mismatch")
-    if facts["user"] in ("", "root", "0"):
+    if not spec.run_as_root and facts["user"] in ("", "root", "0"):
         raise RunnerPolicyError("runner_facts_mismatch")
     if facts["pids_limit"] != spec.budgets.pids_limit:
         raise RunnerPolicyError("runner_facts_mismatch")
@@ -369,12 +363,14 @@ class CodeContainerRunner:
         # container_id -> run_id, populated at start() and used by the per-call
         # preflight to reject a run reusing a container bound to another run.
         self._bindings: dict[str, str] = {}
+        self._workdirs: dict[str, str] = {}
 
     def start(
         self,
         run,
         workspace,
         *,
+        sandbox=None,
         network: bool = False,
         privileged: bool = False,
         nested_container: bool = False,
@@ -393,119 +389,74 @@ class CodeContainerRunner:
         workspace_path = Path(workspace.path).resolve()
         if not workspace_path.is_dir():
             raise RunnerPolicyError("runner_workspace_unavailable")
-        from app.services.code_agent.workspace_mount import (
-            WorkspaceMountError,
-            resolve_workspace_host_path,
-        )
-
+        if sandbox is None:
+            sandbox = getattr(workspace, "sandbox", None)
+        if sandbox is None:
+            raise RunnerUnavailableError("sandbox_not_configured")
+        sandbox_container_id = str(getattr(sandbox, "container_id", "") or "").strip()
+        if not sandbox_container_id:
+            raise RunnerUnavailableError("sandbox_not_running")
         try:
-            host_path = resolve_workspace_host_path(
-                workspace.path,
-                run_id=run.id,
-                snapshot_hash=str(getattr(run, "snapshot_hash", "") or ""),
-            )
-        except WorkspaceMountError as exc:
-            raise RunnerPolicyError(exc.reason) from exc
-        try:
-            spec = spec_for_run(run, host_path=host_path)
-        except RunnerProtocolError as exc:
-            raise RunnerPolicyError(exc.reason) from exc
-        image_reference = _image_reference(spec)
-        try:
-            image = self.client.images.get(image_reference)
-            container = self.client.containers.run(
-                image_reference,
-                ["sleep", "infinity"],
-                name=f"code-agent-{run.id}",
-                labels={"code_agent.run_id": str(run.id)},
-                detach=True,
-                user=RUNNER_USER,
-                network_mode=spec.network_mode,
-                privileged=spec.privileged,
-                read_only=spec.read_only_rootfs,
-                cap_drop=list(spec.cap_drop),
-                security_opt=["no-new-privileges"],
-                pids_limit=spec.budgets.pids_limit,
-                nano_cpus=spec.budgets.cpu_count * 1_000_000_000,
-                mem_limit=f"{spec.budgets.memory_mb}m",
-                storage_opt={"size": f"{spec.budgets.disk_mb}m"},
-                volumes={host_path: {"bind": spec.workspace_mount_target, "mode": "rw"}},
-                tmpfs={"/tmp": f"rw,noexec,nosuid,size={spec.budgets.tmpfs_mb}m"},
-                working_dir=spec.workspace_mount_target,
-            )
+            container = self.client.containers.get(sandbox_container_id)
+            container.reload()
         except Exception as exc:
-            raise RunnerUnavailableError(
-                "runner_start_failed",
-                detail=f"{type(exc).__name__}: {exc}",
-            ) from exc
-
-        def _cleanup() -> None:
-            try:
-                container.remove(force=True)
-            finally:
-                self._deadlines.pop(container.id, None)
-                self._bindings.pop(container.id, None)
-
-        register_code_cleanup(run.id, _cleanup)
-        claude_code_version = ""
+            raise RunnerUnavailableError("sandbox_not_running") from exc
+        if str(getattr(container, "status", "") or "") != "running":
+            raise RunnerUnavailableError("sandbox_not_running")
         try:
-            verify_inspect_matches(spec, image.id, getattr(container, "attrs", {}))
-            probe_name = ".code-agent-bind-probe"
-            probe_path = workspace_path / probe_name
-            probe_token = secrets.token_hex(32)
-            descriptor = os.open(
-                probe_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o644,
+            from app.services.workplace import workplace_root
+
+            sandbox_workplace = workplace_root(str(getattr(sandbox, "id", "") or "")).resolve()
+            relative = workspace_path.relative_to(sandbox_workplace).as_posix()
+        except (OSError, ValueError) as exc:
+            raise RunnerPolicyError("workspace_mount_invalid") from exc
+        workspace_mount = "/workplace" if not relative else f"/workplace/{relative}"
+        try:
+            quoted = json.dumps(workspace_mount)
+            observed = container.exec_run(
+                ["/bin/sh", "-lc", f"test -d {quoted} && test -r {quoted} && test -w {quoted}"],
+                workdir="/workplace",
             )
-            try:
-                os.write(descriptor, probe_token.encode("ascii"))
-            finally:
-                os.close(descriptor)
-            try:
-                observed = container.exec_run(["/bin/cat", f"/workspace/{probe_name}"])
-                output = getattr(observed, "output", b"")
-                if isinstance(output, bytes):
-                    output = output.decode("ascii", errors="replace")
-                if int(getattr(observed, "exit_code", 1)) != 0 or output != probe_token:
-                    raise RunnerPolicyError("workspace_mount_invalid")
-            finally:
-                probe_path.unlink(missing_ok=True)
-            if _run_uses_claude_code(run):
-                claude_code_version = _probe_claude_code_version(container)
+            if int(getattr(observed, "exit_code", 1)) != 0:
+                raise RunnerPolicyError("workspace_mount_invalid")
         except RunnerPolicyError:
-            _cleanup()
             raise
         except RunnerUnavailableError:
-            _cleanup()
             raise
         except Exception as exc:
-            _cleanup()
             raise RunnerPolicyError("workspace_mount_invalid") from exc
+        inspected = inspect_facts(getattr(container, "attrs", {}))
+        image_reference = str(inspected.get("image") or getattr(sandbox, "image", "") or "")
+        try:
+            policy = json.loads(getattr(run, "effective_policy", "") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            policy = {}
+        budgets = policy.get("budgets") if isinstance(policy, dict) else {}
         facts = RunnerFacts(
             container_id=container.id,
             image=image_reference,
-            image_id=image.id,
-            network_mode=spec.network_mode,
-            cpu_count=spec.budgets.cpu_count,
-            memory_mb=spec.budgets.memory_mb,
-            pids_limit=spec.budgets.pids_limit,
-            tmpfs_mb=spec.budgets.tmpfs_mb,
-            disk_mb=spec.budgets.disk_mb,
-            timeout_seconds=spec.budgets.timeout_seconds,
-            output_limit_bytes=spec.budgets.output_limit_bytes,
-            user=RUNNER_USER,
-            workspace_mount=spec.workspace_mount_target,
-            privileged=spec.privileged,
-            read_only_rootfs=spec.read_only_rootfs,
-            cap_drop=tuple(spec.cap_drop),
-            no_new_privileges=spec.no_new_privileges,
-            claude_code_version=claude_code_version,
+            image_id=inspected.get("image_id", ""),
+            network_mode=inspected.get("network_mode", ""),
+            cpu_count=inspected.get("cpu_count", 0),
+            memory_mb=inspected.get("memory_mb", 0),
+            pids_limit=inspected.get("pids_limit", 0),
+            tmpfs_mb=0,
+            disk_mb=0,
+            timeout_seconds=_clamp_int((budgets or {}).get("timeout_seconds"), 1800, 1, 86400),
+            output_limit_bytes=_clamp_int((budgets or {}).get("output_limit_bytes"), 100_000, 1024, 10_000_000),
+            user=inspected.get("user", ""),
+            workspace_mount=workspace_mount,
+            privileged=bool(inspected.get("privileged")),
+            read_only_rootfs=bool(inspected.get("read_only_rootfs")),
+            cap_drop=tuple(inspected.get("cap_drop") or []),
+            no_new_privileges=bool(inspected.get("no_new_privileges")),
+            claude_code_version="",
         )
         run.container_id = container.id
         run.runner_facts = json.dumps(facts.to_dict(), sort_keys=True)
-        self._deadlines[container.id] = time.monotonic() + spec.budgets.timeout_seconds
+        self._deadlines[container.id] = time.monotonic() + facts.timeout_seconds
         self._bindings[container.id] = str(run.id)
+        self._workdirs[container.id] = workspace_mount
         return facts
 
     def exec(
@@ -552,7 +503,7 @@ class CodeContainerRunner:
                 if on_output is None:
                     result_holder["result"] = container.exec_run(
                         ["/bin/sh", "-lc", command],
-                        workdir="/workspace",
+                        workdir=self._workdirs.get(container_id, "/workspace"),
                         environment=exec_env,
                     )
                 else:
@@ -563,7 +514,7 @@ class CodeContainerRunner:
                             ["/bin/sh", "-lc", command],
                             stdout=True,
                             stderr=True,
-                            workdir="/workspace",
+                            workdir=self._workdirs.get(container_id, "/workspace"),
                             environment=exec_env,
                         )["Id"]
                         stream = self.client.api.exec_start(exec_id, stream=True, demux=True)
@@ -674,7 +625,7 @@ class CodeContainerRunner:
                         logger.warning("streaming exec unavailable; falling back to sync exec", exc_info=True)
                         result_holder["result"] = container.exec_run(
                             ["/bin/sh", "-lc", command],
-                            workdir="/workspace",
+                            workdir=self._workdirs.get(container_id, "/workspace"),
                             environment=exec_env,
                         )
             except BaseException as exc:
@@ -702,12 +653,69 @@ class CodeContainerRunner:
             raise RunnerUnavailableError("runner_exec_failed")
         result = result_holder["result"]
         if isinstance(result, tuple):
-            return int(result[0]), str(result[1])[:100000]
+            return int(result[0]), _decode_exec_output(result[1])[:100000]
         exit_code = int(getattr(result, "exit_code", 1))
         output = getattr(result, "output", b"")
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         return exit_code, str(output)[:100000]
+
+    def exec_argv(
+        self,
+        container_id: str,
+        argv: list[str] | tuple[str, ...],
+        *,
+        timeout_seconds: int,
+        environment: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
+        """Execute a pre-approved argv directly, without invoking a shell."""
+        values = [str(item) for item in argv]
+        if not values or any(not item.strip() for item in values):
+            raise RunnerPolicyError("runner_command_invalid")
+        if any(any(token in item for token in (";", "&&", "||", "`", "$(")) for item in values):
+            raise RunnerPolicyError("runner_shell_not_allowed")
+        try:
+            container = self.client.containers.get(container_id)
+        except Exception as exc:
+            raise RunnerUnavailableError("runner_exec_failed") from exc
+        requested_timeout = max(0.0, float(timeout_seconds))
+        deadline = self._deadlines.get(container_id)
+        remaining = requested_timeout if deadline is None else min(
+            requested_timeout, max(0.0, deadline - time.monotonic())
+        )
+        if remaining <= 0:
+            self._terminate_timed_out_container(container)
+            raise RunnerCommandTimeout()
+        result_holder: dict[str, object] = {}
+        completed = threading.Event()
+
+        def _execute() -> None:
+            try:
+                exec_env = {
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTEST_ADDOPTS": "-p no:cacheprovider",
+                }
+                if environment:
+                    exec_env.update({str(key): str(value) for key, value in environment.items() if str(key).strip()})
+                result_holder["result"] = container.exec_run(
+                    values,
+                    workdir=self._workdirs.get(container_id, "/workspace"),
+                    environment=exec_env,
+                )
+            except BaseException as exc:
+                result_holder["error"] = exc
+            finally:
+                completed.set()
+
+        threading.Thread(target=_execute, name=f"code-runner-argv-{container_id[:12]}", daemon=True).start()
+        if not completed.wait(remaining):
+            self._terminate_timed_out_container(container)
+            raise RunnerCommandTimeout()
+        if "error" in result_holder:
+            raise RunnerUnavailableError("runner_exec_failed") from result_holder["error"]
+        observed = result_holder["result"]
+        output = _decode_exec_output(getattr(observed, "output", ""))
+        return int(getattr(observed, "exit_code", 1)), output[:100000]
 
     def _preflight(self, run, container_id: str) -> None:
         """Per-call active-lifecycle and run/container binding guard.
@@ -785,7 +793,7 @@ class CodeContainerRunner:
                     stdout=True,
                     stderr=True,
                     stdin=True,
-                    workdir=RUNNER_WORKSPACE,
+                    workdir=self._workdirs.get(container_id, RUNNER_WORKSPACE),
                 )["Id"]
                 sock = self.client.api.exec_start(exec_id, socket=True)
                 output = _helper_stdio_exchange(sock, payload)
@@ -837,19 +845,15 @@ class CodeContainerRunner:
                 pass
 
     def freeze(self, container_id: str) -> None:
-        try:
-            self.client.containers.get(container_id).stop(timeout=5)
-            self._deadlines.pop(container_id, None)
-            self._bindings.pop(container_id, None)
-        except Exception as exc:
-            raise RunnerUnavailableError("runner_freeze_failed") from exc
+        self._deadlines.pop(container_id, None)
+        self._bindings.pop(container_id, None)
+        self._workdirs.pop(container_id, None)
 
     def start_stopped(self, container_id: str) -> None:
         try:
             container = self.client.containers.get(container_id)
-            status = str(getattr(container, "status", "") or "")
-            if status != "running":
-                container.start()
-            self._bindings[container_id] = self._bindings.get(container_id, "")
+            container.reload()
         except Exception as exc:
             raise RunnerUnavailableError("runner_exec_failed") from exc
+        if str(getattr(container, "status", "") or "") != "running":
+            raise RunnerUnavailableError("sandbox_not_running")

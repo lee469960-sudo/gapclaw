@@ -21,6 +21,7 @@ from app.models import (
     CodeProjectManifest,
     CodeSourceSnapshot,
     LLMResource,
+    Sandbox,
 )
 from app.security import new_id, now_str
 from app.services.code_agent.output_security import redact_code_output
@@ -318,11 +319,6 @@ def _require_contract_in_effective_policy(
             policy["allowed_source_types"],
             "policy_source_type_denied",
         ),
-        (
-            contract.image_digest,
-            policy["allowed_image_digests"],
-            "policy_image_denied",
-        ),
     )
     for selected, allowed, reason in checks:
         if selected not in allowed and "*" not in allowed:
@@ -339,12 +335,12 @@ class FrozenCodeTaskContract:
     base_commit: str
     source_id: str
     source_type: str
+    credential_ref: str
     requested_ref: str
     resolved_commit: str
     snapshot_id: str
     snapshot_hash: str
     source_scan_report_id: str
-    image_digest: str
     security_schema_version: int
     objective: str
     allowed_paths: tuple[str, ...]
@@ -362,12 +358,12 @@ class FrozenCodeTaskContract:
             "base_commit": self.base_commit,
             "source_id": self.source_id,
             "source_type": self.source_type,
+            "credential_ref": self.credential_ref,
             "requested_ref": self.requested_ref,
             "resolved_commit": self.resolved_commit,
             "snapshot_id": self.snapshot_id,
             "snapshot_hash": self.snapshot_hash,
             "source_scan_report_id": self.source_scan_report_id,
-            "image_digest": self.image_digest,
             "security_schema_version": self.security_schema_version,
             "objective": self.objective,
             "allowed_paths": list(self.allowed_paths),
@@ -435,35 +431,31 @@ def freeze_task_contract(
     allowed_skills: list[str] | None = None,
     authorized_mcp_servers: list[str] | None = None,
 ) -> FrozenCodeTaskContract:
-    allowed_paths = _json_value(manifest.allowed_paths, list, "allowed_paths")
-    validation_plan = _json_value(manifest.validation_plan, list, "validation_plan")
-    budgets = _json_value(manifest.budgets, dict, "budgets")
+    allowed_paths = _json_value(manifest.allowed_paths, list, "allowed_paths") or ["**"]
+    validation_plan = _json_value(manifest.validation_plan, list, "validation_plan") or []
+    budgets = _json_value(manifest.budgets, dict, "budgets") or dict(PLATFORM_POLICY["budgets"])
     if not manifest.repository.strip():
         raise ManifestUnavailableError("manifest_missing_repository")
-    resolved_commit = (manifest.resolved_commit or manifest.base_commit).strip()
-    if not resolved_commit:
-        raise ManifestUnavailableError("manifest_missing_base_commit")
+    requested_ref = (manifest.requested_ref or "HEAD").strip()
     if not objective.strip():
         raise ManifestUnavailableError("task_missing_objective")
-    if not allowed_paths or not all(isinstance(path, str) and path.strip() for path in allowed_paths):
+    if not all(isinstance(path, str) and path.strip() for path in allowed_paths):
         raise ManifestUnavailableError("manifest_missing_allowed_paths")
-    if not validation_plan or not all(isinstance(item, dict) for item in validation_plan):
-        raise ManifestUnavailableError("manifest_missing_validation_plan")
     if not budgets or not all(isinstance(value, int) and value > 0 for value in budgets.values()):
         raise ManifestUnavailableError("manifest_invalid_budgets")
     if coding_runtime not in {"legacy", "claude_code"}:
         raise ManifestUnavailableError("manifest_invalid_coding_runtime")
     return FrozenCodeTaskContract(
         repository=manifest.repository,
-        base_commit=resolved_commit,
+        base_commit=(manifest.resolved_commit or manifest.base_commit or requested_ref).strip(),
         source_id=manifest.source_id or "",
         source_type=manifest.source_type or "",
-        requested_ref=manifest.requested_ref or "",
-        resolved_commit=resolved_commit,
+        credential_ref=manifest.credential_ref or "",
+        requested_ref=requested_ref,
+        resolved_commit=(manifest.resolved_commit or "").strip(),
         snapshot_id=manifest.snapshot_id or "",
         snapshot_hash=manifest.snapshot_hash or "",
         source_scan_report_id=manifest.source_scan_report_id or "",
-        image_digest=manifest.image_digest or "",
         security_schema_version=int(manifest.security_schema_version or 0),
         objective=objective.strip(),
         allowed_paths=tuple(allowed_paths),
@@ -507,18 +499,10 @@ def preview_coding_runtime(db: Session, agent: Agent) -> str:
     project_id = str(getattr(agent, "code_project_id", "") or "").strip()
     if not project_id:
         return "legacy"
-    try:
-        manifest = _published_manifest(db, project_id)
-    except ManifestUnavailableError:
-        return "legacy"
-    policy = _json_value(manifest.policy, dict, "policy")
-    runtime = str(policy.get("coding_runtime") or "legacy")
     settings = get_settings()
-    if runtime == "claude_code" and not bool(
+    return "claude_code" if bool(
         getattr(settings, "code_claude_code_runtime_enabled", False)
-    ):
-        return "legacy"
-    return runtime if runtime in {"legacy", "claude_code"} else "legacy"
+    ) else "legacy"
 
 
 def agent_would_use_claude_code(db: Session, agent: Agent) -> bool:
@@ -529,11 +513,8 @@ def _require_secure_manifest_evidence(manifest: CodeProjectManifest) -> None:
     required = (
         manifest.source_id,
         manifest.source_type,
-        manifest.resolved_commit,
-        manifest.snapshot_id,
-        manifest.snapshot_hash,
-        manifest.source_scan_report_id,
-        manifest.image_digest,
+        manifest.repository,
+        manifest.requested_ref,
     )
     if int(manifest.security_schema_version or 0) < 1 or any(
         not (value or "").strip() for value in required
@@ -580,13 +561,7 @@ def secure_readiness_reason(
     project: CodeProject,
     settings,
 ) -> str:
-    """Return '' when the published Manifest is ready, else a stable non-ready reason.
-
-    Re-validates the frozen source/ref/snapshot/image evidence against the current
-    deployment state so allowlist removal, disabled credentials, garbage-collected
-    snapshots, image digest drift and invalid Workspace mount configuration each surface
-    a distinct actionable reason instead of collapsing into ``manifest_invalid``.
-    """
+    """Return '' when the published Git configuration is ready for a run."""
     source_type = (manifest.source_type or "").strip()
     locator = (manifest.repository or "").strip()
     if not source_type or not locator:
@@ -611,35 +586,8 @@ def secure_readiness_reason(
     if credential_ref and not _credential_available(db, credential_ref, project):
         return "repository_auth_failed"
 
-    resolved_commit = (manifest.resolved_commit or "").strip()
-    if not _COMMIT_SHA.fullmatch(resolved_commit):
+    if not (manifest.requested_ref or "").strip():
         return "repository_ref_invalid"
-
-    snapshot_id = (manifest.snapshot_id or "").strip()
-    snapshot_hash = (manifest.snapshot_hash or "").strip()
-    snapshot = db.get(CodeSourceSnapshot, snapshot_id) if snapshot_id else None
-    if (
-        not snapshot_id
-        or not snapshot_hash
-        or snapshot is None
-        or snapshot.status != "sealed"
-        or snapshot.content_hash != snapshot_hash
-        or snapshot.resolved_commit != resolved_commit
-    ):
-        return "snapshot_invalid"
-
-    image_digest = (manifest.image_digest or "").strip()
-    if not image_digest or image_digest not in set(
-        _settings_list(settings.code_trusted_image_digests)
-    ):
-        return "image_digest_invalid"
-
-    readiness = settings.code_agent_security_readiness()
-    if any(
-        key in readiness["errors"]
-        for key in ("workspace_api_root", "workspace_host_root")
-    ):
-        return "workspace_mount_invalid"
 
     return ""
 
@@ -652,25 +600,36 @@ def validate_manifest_for_admission(
     """Validate the same immutable fields required before a Code run can start."""
     _require_secure_manifest_evidence(manifest)
     contract = freeze_task_contract(manifest, "availability-check")
-    if not manifest.trusted_image.strip():
-        raise ManifestUnavailableError("manifest_missing_trusted_image")
-    allowed_tools = _json_value(manifest.allowed_tools, list, "allowed_tools")
-    if not allowed_tools:
-        raise ManifestUnavailableError("manifest_missing_allowed_tools")
     manifest_policy = _json_value(manifest.policy, dict, "policy")
     policy = merge_policy_layers(
         project=project_policy,
         manifest={
             **manifest_policy,
             "allowed_paths": list(contract.allowed_paths),
-            "allowed_tools": allowed_tools,
             "allowed_sources": [contract.source_id],
             "allowed_source_types": [contract.source_type],
-            "allowed_image_digests": [contract.image_digest],
             "budgets": dict(contract.budgets),
         },
     )
     _require_contract_in_effective_policy(policy, contract)
+
+
+def _running_bound_sandbox(db: Session, agent: Agent) -> Sandbox:
+    sandbox_id = str(getattr(agent, "sandbox_id", "") or "").strip()
+    if not sandbox_id:
+        raise ManifestUnavailableError("sandbox_not_configured")
+    sandbox = db.get(Sandbox, sandbox_id)
+    if sandbox is None:
+        raise ManifestUnavailableError("sandbox_not_configured")
+    from app.services import docker_service
+
+    status = docker_service.sync_container_status(sandbox.container_id) if sandbox.container_id else None
+    if status and status != sandbox.status:
+        sandbox.status = status
+        db.flush()
+    if not sandbox.container_id or (status or sandbox.status) != "running":
+        raise ManifestUnavailableError("sandbox_not_running")
+    return sandbox
 
 
 def project_availability(db: Session, project: CodeProject) -> dict[str, Any]:
@@ -774,12 +733,10 @@ def create_code_run(
     require_project_operator(actor, project, db=db, operation="run:create")
     manifest = _published_manifest(db, project_id)
     _require_secure_manifest_evidence(manifest)
+    settings = get_settings()
     contract = freeze_task_contract(manifest, objective)
-    if not manifest.trusted_image.strip():
-        raise ManifestUnavailableError("manifest_missing_trusted_image")
-    allowed_tools = _json_value(manifest.allowed_tools, list, "allowed_tools")
-    if not allowed_tools:
-        raise ManifestUnavailableError("manifest_missing_allowed_tools")
+    sandbox = _running_bound_sandbox(db, agent)
+    allowed_tools = list(PLATFORM_POLICY["allowed_tools"])
     from app.services.code_agent.kill_switch import enforce_code_kill_switches
 
     enforce_code_kill_switches(
@@ -787,18 +744,15 @@ def create_code_run(
         project_id=project_id,
         repository=manifest.repository,
         tools=allowed_tools,
-        image=manifest.trusted_image,
+        image=sandbox.image,
         model=agent.llm_id,
     )
-    settings = get_settings()
     from app.services.code_agent.storage_capacity import enforce_storage_admission
 
     enforce_storage_admission(db, settings=settings)
     manifest_policy = {
-        **_json_value(manifest.policy, dict, "policy"),
         "allowed_sources": [contract.source_id],
         "allowed_source_types": [contract.source_type],
-        "allowed_image_digests": [contract.image_digest],
         "allowed_paths": list(contract.allowed_paths),
         "allowed_tools": allowed_tools,
         "budgets": dict(contract.budgets),
@@ -812,7 +766,10 @@ def create_code_run(
         task=task_policy,
     )
     settings = get_settings()
-    _apply_runtime_feature_flag(policy, settings)
+    policy["coding_runtime"] = preview_coding_runtime(db, agent)
+    policy["network"] = str(getattr(sandbox, "network_mode", "") or "bridge") != "none"
+    policy.setdefault("policy_sources", {})["coding_runtime"] = "agent_profile"
+    policy.setdefault("policy_sources", {})["network"] = "sandbox_binding"
     bound_skills = _json_string_list(agent.skills)
     bound_mcps = _json_string_list(agent.mcps)
     frozen_skills = _bound_capabilities(bound_skills, policy["allowed_skills"])
@@ -854,7 +811,7 @@ def create_code_run(
         project_id=project_id,
         repository=manifest.repository,
         tools=allowed_tools,
-        image=manifest.trusted_image,
+        image=sandbox.image,
         model=agent.llm_id,
         runtime=policy["coding_runtime"],
     )
@@ -896,8 +853,8 @@ def create_code_run(
         source_scan_report_id=contract.source_scan_report_id,
         repository=contract.repository,
         base_commit=contract.base_commit,
-        image=manifest.trusted_image,
-        image_digest=contract.image_digest,
+        image=sandbox.image,
+        image_digest="",
         security_schema_version=contract.security_schema_version,
         task_contract=json.dumps(contract.to_dict(), sort_keys=True),
         effective_policy=policy_json,
@@ -931,7 +888,8 @@ def create_code_run(
         "resolved_commit": contract.resolved_commit,
         "snapshot_id": contract.snapshot_id,
         "snapshot_hash": contract.snapshot_hash,
-        "image_digest": contract.image_digest,
+        "sandbox_id": sandbox.id,
+        "sandbox_image": sandbox.image,
         "security_schema_version": contract.security_schema_version,
         "effective_policy_hash": policy_hash,
     }

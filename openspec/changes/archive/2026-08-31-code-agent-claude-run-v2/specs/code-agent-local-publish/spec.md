@@ -40,10 +40,12 @@
 
 系统 SHALL 在当前 CodeAgent 专用 runner 内以非 root 身份执行 local 发布，允许访问的文件仅限当前 Workspace 和运行时临时目录。网络仅允许已发布 Manifest 明确声明的目的地，且不得暴露 Docker Socket、宿主机路径或 Secret Store。
 
-#### Scenario: 发布依赖已在固定镜像中
+#### Scenario: 基础运行环境可用且业务依赖不阻塞启动
 
 - **WHEN** runner 启动 local 发布 Run
-- **THEN** `curl`、Python、dbt 及所需 adapter 等实际依赖来自平台批准的固定 digest 镜像
+- **THEN** CodeAgent/Claude Code 运行和受控命令执行所需基础工具来自平台批准的固定 digest 镜像
+- **AND** dbt、jq、clickhouse-client 等项目/CI 业务工具不是 runner 启动必备项
+- **AND** 对 Manifest 登记依赖的探测结果仅作为审计事实，缺失不得阻塞 Workspace 或 Runtime 启动
 - **AND** 运行期间不得通过 apt、pip 或 npm 动态安装依赖
 
 #### Scenario: 发布请求越过 Sandbox 边界

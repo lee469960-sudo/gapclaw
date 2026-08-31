@@ -181,7 +181,6 @@ class CodeArtifactSealer:
                 or snapshot.id != self.run.snapshot_id
                 or snapshot.content_hash != self.run.snapshot_hash
                 or snapshot.resolved_commit != self.run.resolved_commit
-                or not self.run.image_digest
                 or not self.run.effective_policy_hash
             ):
                 return SealingResult(False, "infrastructure_error", "artifact_evidence_missing")

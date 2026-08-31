@@ -31,6 +31,7 @@ from app.models import (
     CodeSourceSnapshot,
     LLMResource,
     RoleDefinition,
+    Sandbox,
 )
 from app.menu_config import ALL_PAGES, PAGE_ROUTE_MAP
 from app.routers.code_project import (
@@ -216,6 +217,24 @@ def _ssh_ready(db, monkeypatch):
     monkeypatch.setattr(control_plane, "get_settings", lambda: ReadySettings())
 
 
+def _running_sandbox(db, monkeypatch, *, sandbox_id: str = "sandbox1") -> Sandbox:
+    sandbox = Sandbox(
+        id=sandbox_id,
+        name="Code Sandbox",
+        image="code-agent-runner:latest",
+        container_id="container1",
+        status="running",
+        creator="admin",
+    )
+    db.add(sandbox)
+    db.commit()
+    monkeypatch.setattr(
+        "app.services.docker_service.sync_container_status",
+        lambda _container_id: "running",
+    )
+    return sandbox
+
+
 def _prepare_secure_draft(db, manifest_id: str, *, commit: str) -> CodeProjectManifest:
     manifest = db.get(CodeProjectManifest, manifest_id)
     manifest.source_id = "source1"
@@ -361,7 +380,7 @@ def test_startup_resynchronizes_existing_builtin_admin_roles(monkeypatch, tmp_pa
         (False, "internal_non_production", False, '["src/"]', "project_disabled"),
         (True, "production", False, '["src/"]', "project_environment_not_allowed"),
         (True, "internal_non_production", False, '["src/"]', "manifest_missing"),
-        (True, "internal_non_production", True, "[]", "manifest_invalid"),
+        (True, "internal_non_production", True, "[]", "repository_source_not_allowed"),
     ],
 )
 def test_project_availability_has_stable_side_effect_free_states(
@@ -520,10 +539,6 @@ def test_manifest_options_expose_only_approved_values_and_reference_metadata(
     assert response["code"] == 0
     assert response["data"]["source_types"] == ["http"]
     assert response["data"]["remote_origins"] == ["http://g.testskydata.com:80"]
-    assert response["data"]["trusted_image_digests"] == [
-        "registry.test/code-runner@sha256:" + "c" * 64,
-    ]
-    assert response["data"]["coding_runtimes"] == ["legacy", "claude_code"]
     assert response["data"]["credential_references"] == [credential.to_dict()]
     assert raw_secret not in serialized
     assert "secret_enc" not in serialized
@@ -590,10 +605,10 @@ def test_structured_manifest_draft_saves_canonical_approved_source_and_reference
     )
     assert saved["data"]["credential_ref"] == "credential1"
     assert saved["data"]["requested_ref"] == "main"
-    assert saved["data"]["coding_runtime"] == "claude_code"
-    assert saved["data"]["policy"]["coding_runtime"] == "claude_code"
-    assert saved["data"]["trusted_image"] == "registry.test/code-runner"
-    assert saved["data"]["image_digest"] == image_digest
+    assert saved["data"]["coding_runtime"] == "legacy"
+    assert saved["data"]["policy"] == {}
+    assert saved["data"]["trusted_image"] == ""
+    assert saved["data"]["image_digest"] == ""
     assert saved["data"]["security_validation"] == {
         "ready": True,
         "status": "ready_for_validation",
@@ -693,7 +708,7 @@ def test_unapproved_manifest_security_selections_are_rejected_atomically(
     assert db.query(CodeControlAudit).count() == 0
 
 
-def test_unapproved_image_digest_can_be_saved_as_repairable_draft(
+def test_manifest_draft_ignores_runtime_image_digest_fields(
     monkeypatch,
     tmp_path,
 ):
@@ -722,11 +737,9 @@ def test_unapproved_image_digest_can_be_saved_as_repairable_draft(
     ))
 
     assert saved["code"] == 0
-    assert saved["data"]["image_digest"] == image_digest
-    assert saved["data"]["validation_errors"]["image_digest"] == (
-        "image_digest_not_allowed"
-    )
-    assert saved["data"]["security_validation"]["status"] == "draft_incomplete"
+    assert saved["data"]["image_digest"] == ""
+    assert "image_digest" not in saved["data"]["validation_errors"]
+    assert saved["data"]["security_validation"]["status"] == "ready_for_validation"
     assert db.query(CodeProjectManifest).count() == 1
 
 
@@ -801,9 +814,7 @@ def test_incomplete_structured_manifest_can_be_saved_as_repairable_draft(
     assert saved["data"]["validation_errors"]["requested_ref"] == (
         "manifest_missing_requested_ref"
     )
-    assert saved["data"]["validation_errors"]["image_digest"] == (
-        "manifest_missing_image_digest"
-    )
+    assert "image_digest" not in saved["data"]["validation_errors"]
     assert db.query(CodeRepositorySource).count() == 0
 
 
@@ -945,7 +956,7 @@ def test_manifest_publish_persistence_failure_rolls_back_atomically(monkeypatch,
     def fail_commit():
         nonlocal commit_count
         commit_count += 1
-        if commit_count == 2:
+        if commit_count == 1:
             raise RuntimeError("storage unavailable")
         return original_commit()
 
@@ -966,9 +977,7 @@ def test_manifest_publish_persistence_failure_rolls_back_atomically(monkeypatch,
     assert db.get(CodeProjectManifest, current.id).status == "published"
     assert db.get(CodeProjectManifest, draft["data"]["id"]).status == "draft"
     assert not db.get(CodeProjectManifest, draft["data"]["id"]).snapshot_id
-    orphan = db.query(CodeSourceSnapshot).one()
-    assert orphan.status == "failed"
-    assert orphan.ref_count == 0
+    assert db.query(CodeSourceSnapshot).count() == 0
     assert project_availability(db, project)["manifest_version"] == 1
 
 
@@ -977,7 +986,14 @@ def test_control_plane_writes_are_audited_without_mutating_frozen_runs(monkeypat
     project = _project(db)
     _manifest(db)
     _ssh_ready(db, monkeypatch)
-    agent = Agent(id="agent1", name="Code Agent", profile="code", code_project_id=project.id)
+    sandbox = _running_sandbox(db, monkeypatch)
+    agent = Agent(
+        id="agent1",
+        name="Code Agent",
+        profile="code",
+        code_project_id=project.id,
+        sandbox_id=sandbox.id,
+    )
     db.add(agent)
     db.commit()
     run = create_code_run(
@@ -1013,7 +1029,7 @@ def test_control_plane_writes_are_audited_without_mutating_frozen_runs(monkeypat
     assert run_audit_details["resolved_commit"] == run.resolved_commit
     assert run_audit_details["snapshot_id"] == run.snapshot_id
     assert run_audit_details["snapshot_hash"] == run.snapshot_hash
-    assert run_audit_details["image_digest"] == run.image_digest
+    assert "image_digest" not in run_audit_details
     assert run_audit_details["effective_policy_hash"] == run.effective_policy_hash
     db.refresh(run)
     assert run.task_contract == frozen_contract
@@ -1039,11 +1055,13 @@ def test_manifest_component_groups_fields_and_disables_invalid_publish():
         Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "CodeProjects.vue"
     ).read_text(encoding="utf-8")
 
-    for heading in ("仓库与基线", "路径与验证", "执行镜像与工具", "策略与预算"):
+    for heading in ("Git 仓库",):
         assert heading in component
+    for removed_heading in ("路径与验证", "执行镜像与工具", "策略与预算"):
+        assert removed_heading not in component
     assert "fieldError('source_locator')" in component
-    assert "fieldError('image_digest')" in component
-    assert "fieldError('budgets')" in component
+    assert "fieldError('image_digest')" not in component
+    assert "fieldError('budgets')" not in component
     assert ':disabled="!draft || hasValidationErrors"' in component
     assert "saveDraft" in component
 
@@ -1056,10 +1074,10 @@ def test_manifest_component_limits_security_fields_to_server_options_and_referen
     assert "action: 'manifest_options'" in component
     assert 'v-model="manifestForm.source_type"' in component
     assert "manifestOptions.source_types" in component
-    assert 'v-model="manifestForm.coding_runtime"' in component
-    assert "codingRuntimeOptions" in component
-    assert "policy.coding_runtime = manifestForm.coding_runtime || 'legacy'" in component
-    assert "coding_runtime: manifestForm.coding_runtime || 'legacy'" in component
+    assert 'v-model="manifestForm.coding_runtime"' not in component
+    assert "codingRuntimeOptions" not in component
+    assert "policy.coding_runtime = manifestForm.coding_runtime || 'legacy'" not in component
+    assert "coding_runtime: manifestForm.coding_runtime || 'legacy'" not in component
     assert 'v-model="manifestForm.credential_ref"' in component
     assert 'v-model="manifestForm.credential_label"' in component
     assert 'v-model="manifestForm.credential_username"' in component
@@ -1069,12 +1087,61 @@ def test_manifest_component_limits_security_fields_to_server_options_and_referen
     assert "show-password" in component
     assert "不会回显" in component
     assert 'v-model="manifestForm.requested_ref"' in component
-    assert 'v-model="manifestForm.image_digest"' in component
-    assert "manifestOptions.trusted_image_digests" in component
-    assert "可信镜像由环境变量管理" in component
-    assert "multi-arch manifest-list digest" in component
-    assert "draft?.security_validation" in component
+    assert 'v-model="manifestForm.image_digest"' not in component
+    assert "manifestOptions.trusted_image_digests" not in component
+    assert "可信镜像由环境变量管理" not in component
+    assert "multi-arch manifest-list digest" not in component
+    assert "draft?.security_validation" not in component
     assert "secret_enc" not in component
+
+
+def test_manifest_component_hides_local_publish_fields():
+    component = (
+        Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "CodeProjects.vue"
+    ).read_text(encoding="utf-8")
+
+    assert "Local 发布配置" not in component
+    for field in (
+        "local_publish_command_id",
+        "local_publish_target",
+        "local_publish_dependencies",
+        "local_publish_network_targets",
+        "local_publish_secret_ref",
+        "local_publish_verification_plan",
+        "local_publish_lock_key",
+    ):
+        assert f"manifestForm.{field}" not in component
+        assert f"{field}:" not in component
+    assert "DEFAULT_LOCAL_PUBLISH" not in component
+    assert "parseJsonField('local_publish_dependencies'" not in component
+    assert "local 发布会从仓库中的 CI 配置和发布脚本自动发现" not in component
+
+
+def test_manifest_api_does_not_expose_or_consume_local_publish_fields():
+    fields = CodeProjectBody.model_fields
+    response_fields = ManifestResponse.model_fields
+    for field in (
+        "local_publish_command_id",
+        "local_publish_target",
+        "local_publish_dependencies",
+        "local_publish_network_targets",
+        "local_publish_secret_ref",
+        "local_publish_verification_plan",
+        "local_publish_lock_key",
+    ):
+        assert field not in fields
+        assert field not in response_fields
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "code_agent" / "control_plane.py").read_text(encoding="utf-8")
+    assert 'getattr(manifest, "local_publish_command_id"' not in source
+
+
+def test_code_agent_conversation_labels_do_not_include_platform_local_publish_phases():
+    runtime = (Path(__file__).resolve().parents[1] / "app" / "services" / "agent_runtime" / "runtime.py").read_text(encoding="utf-8")
+    component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
+    for source in (runtime, component):
+        assert "publish_discovery" not in source
+        assert "publish_dependencies" not in source
 
 
 def test_manifest_component_confirms_publish_and_renders_read_only_history():
@@ -1082,10 +1149,11 @@ def test_manifest_component_confirms_publish_and_renders_read_only_history():
         Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "CodeProjects.vue"
     ).read_text(encoding="utf-8")
 
-    assert "发布后该版本不可修改" in component
+    assert "发布后该 Git 配置版本不可修改" in component
     assert 'action: \'publish\'' in component
     assert 'action: \'history\'' in component
-    assert "JSON.stringify(item, null, 2)" in component
+    assert "manifest-summary" in component
+    assert "JSON.stringify(item, null, 2)" not in component
     assert "await loadProjects()" in component
 
 
@@ -1138,6 +1206,8 @@ def test_agent_chat_uses_code_workspace_panel_only_for_code_profile():
     assert '<CodeWorkspacePanel' in component
     assert 'v-if="agent?.profile === \'code\'"' in component
     assert ':agent-id="agentId"' in component
+    assert ':session-id="sessionId"' in component
+    assert ':sandbox-id="agentSandboxId"' in component
     assert "code-run-id=\"activeCodeRunId\"" in component
     assert 'ref="codeWpRef"' in component
     assert "function reloadWorkspacePanels()" in component
@@ -1148,6 +1218,9 @@ def test_agent_chat_keeps_last_workspace_when_clarification_has_no_new_run():
     component = (Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "AgentChat.vue").read_text(encoding="utf-8")
     assert "async function hydrateActiveCodeRun()" in component
     assert "const nextCodeRunId = String(submitted.data?.code_run_id || '').trim()" in component
+    assert "const terminal = res.data?.terminal === true" in component
+    assert "const workspaceAvailable = res.data?.workspace?.available === true" in component
+    assert "if (runId && (!terminal || workspaceAvailable)) activeCodeRunId.value = runId" in component
     assert "if (nextCodeRunId)" in component
     assert "await hydrateActiveCodeRun()" in component
     assert "activeCodeRunId.value = ''" in component
@@ -1159,12 +1232,20 @@ def test_agent_chat_keeps_last_workspace_when_clarification_has_no_new_run():
 def test_code_workspace_panel_sends_agent_id_with_every_run_bound_request():
     component = (Path(__file__).resolve().parents[2] / "web" / "src" / "components" / "CodeWorkspacePanel.vue").read_text(encoding="utf-8")
     assert "agentId: { type: String, default: '' }" in component
+    assert "sessionId: { type: String, default: '' }" in component
     assert "agent_id: props.agentId" in component
-    assert "agent_id: props.agentId, code_run_id: props.codeRunId" in component
+    assert "effectiveCodeRunId" in component
+    assert "hydrateFallbackCodeRunId" in component
+    assert "workspaceAvailable" in component
+    assert "agent_id: props.agentId, code_run_id: effectiveCodeRunId.value" in component
 
 
 def test_code_workspace_panel_renders_distinct_preview_states():
     component = (Path(__file__).resolve().parents[2] / "web" / "src" / "components" / "CodeWorkspacePanel.vue").read_text(encoding="utf-8")
+    assert "SandboxTerminalDialog" in component
+    assert "打开沙箱终端" in component
+    assert "boundSandboxId" in component
+    assert "terminalWorkdir" in component
     assert "Workspace 文件树为空" in component
     assert "Workspace 已过期或已清理" in component
     assert "Workspace 挂载无效" in component
@@ -1423,17 +1504,93 @@ def test_sealed_run_without_retained_workspace_reports_expired_not_mount_invalid
     assert result["data"]["state"] == "workspace_expired"
 
 
+def test_terminal_run_without_workspace_reports_prepare_failure_instead_of_pending(tmp_path):
+    db = _db()
+    project = _project(db)
+    db.add(Agent(id="code-prepare-failed", name="Code", profile="code", code_project_id=project.id))
+    run = CodeAgentRun(
+        id="run-prepare-failed", agent_id="code-prepare-failed", session_id="session-prepare-failed",
+        project_id=project.id, manifest_id="manifest-prepare-failed", manifest_version=1,
+        repository="http://git.example.test/repo.git", workspace_path="", workspace_state="prepared",
+        status="infrastructure_error", failure_reason="workspace_snapshot_invalid",
+    )
+    db.add(run)
+    db.commit()
+
+    result = asyncio.run(chat_get(
+        action="get_code_workspace", request=SimpleNamespace(headers={}),
+        agent_id="code-prepare-failed", session_id="session-prepare-failed",
+        path="", code_run_id=run.id, artifact_id=None, artifact_kind=None,
+        message_id=None, limit=50, since=0, user=_user(), db=db,
+    ))
+
+    assert result["data"]["state"] == "workspace_prepare_failed"
+    assert result["data"]["status"] == "infrastructure_error"
+    assert result["data"]["failure_reason"] == "workspace_snapshot_invalid"
+
+
+def test_terminal_persistent_git_sync_empty_workspace_reports_prepare_failure(tmp_path):
+    db = _db()
+    project = _project(db)
+    db.add(Agent(id="code-empty-git", name="Code", profile="code", code_project_id=project.id))
+    workspace = tmp_path / "code" / project.id / "workspace"
+    workspace.mkdir(parents=True)
+    run = CodeAgentRun(
+        id="run-empty-git", agent_id="code-empty-git", session_id="session-empty-git",
+        project_id=project.id, manifest_id="manifest-empty-git", manifest_version=1,
+        repository="http://git.example.test/repo.git", workspace_path=str(workspace),
+        workspace_state="prepared", status="infrastructure_error",
+        failure_reason="startup_failed",
+        source_facts=json.dumps({
+            "preparation_mode": "persistent_git_sync",
+            "repo_root_mode": "persistent_empty",
+        }),
+    )
+    db.add(run)
+    db.commit()
+
+    result = asyncio.run(chat_get(
+        action="get_code_workspace", request=SimpleNamespace(headers={}),
+        agent_id="code-empty-git", session_id="session-empty-git",
+        path="", code_run_id=run.id, artifact_id=None, artifact_kind=None,
+        message_id=None, limit=50, since=0, user=_user(), db=db,
+    ))
+
+    assert result["data"]["state"] == "workspace_prepare_failed"
+    assert result["data"]["workspace_path"] == ""
+    assert result["data"]["readiness"]["repo_root_mode"] == "persistent_empty"
+
+
+def test_code_result_marks_unsynced_persistent_git_workspace_unavailable():
+    run = SimpleNamespace(
+        id="run-unsynced", project_id="project1", status="infrastructure_error",
+        failure_reason="startup_failed", manifest_id="manifest1", manifest_version=1,
+        verifier_report="{}", budget_usage="{}", runner_facts="{}",
+        task_contract="{}", effective_policy="{}",
+        artifact_id="", workspace_path="/tmp/workplace/code/project1/workspace",
+        workspace_state="prepared",
+        source_facts=json.dumps({
+            "preparation_mode": "persistent_git_sync",
+            "repo_root_mode": "persistent_empty",
+        }),
+    )
+
+    result = serialize_code_result(run)
+
+    assert result["terminal"] is True
+    assert result["workspace"]["available"] is False
+
+
 def test_code_agent_workspace_usage_documentation_defines_run_flow_and_root_boundaries():
     documentation = (Path(__file__).resolve().parents[3] / "docs" / "code-agent-workspace.md").read_text(encoding="utf-8")
     for phrase in (
         "profile=code",
         "code_run_id",
-        "/workspace",
-        "/workplace",
+        "/workplace/code/<project_id>/workspace",
         "Verifier",
-        "Sealed Artifact",
+        "测试结果",
         "target_not_found",
-        "不会回退到通用 `/workplace`",
+        "不会自动创建或启动 Sandbox",
     ):
         assert phrase in documentation
 
@@ -1674,7 +1831,7 @@ def test_agent_chat_shows_code_context_and_moves_result_evidence_into_markdown()
     assert "test_run: 'Claude Code 测试执行'" in component
     assert "verifier_failed_retrying: 'Verifier 失败，继续 Claude Code 修复'" in component
     assert "verifier_passed: 'Verifier 已通过'" in component
-    assert "artifact_sealed: '封存工件已生成'" in component
+    assert "artifact_sealed: '结果工件已生成'" in component
     assert "请先管理 Code Project" in component
 
 
@@ -1683,11 +1840,11 @@ def test_manifest_component_rejects_invalid_json_without_silent_fallback():
         Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "CodeProjects.vue"
     ).read_text(encoding="utf-8")
 
-    assert "parseJsonField('validation_plan'" in component
-    assert "parseJsonField('policy'" in component
-    assert "parseJsonField('budgets'" in component
-    assert "JSON 数组" in component
-    assert "JSON 对象" in component
+    assert "parseJsonField('validation_plan'" not in component
+    assert "parseJsonField('policy'" not in component
+    assert "parseJsonField('budgets'" not in component
+    assert "JSON 数组" not in component
+    assert "JSON 对象" not in component
     assert "if (!payload)" in component
     assert "请先修正 Manifest JSON 字段" in component
     assert "function parseJson(value, fallback)" not in component
@@ -1709,6 +1866,7 @@ def test_control_plane_end_to_end_enables_existing_agent_and_fails_closed(
     )
     db.add(agent)
     db.commit()
+    _running_sandbox(db, monkeypatch)
 
     created = asyncio.run(code_project_post(
         CodeProjectBody(
@@ -1750,6 +1908,7 @@ def test_control_plane_end_to_end_enables_existing_agent_and_fails_closed(
             description=agent.description,
             profile="code",
             code_project_id=project_id,
+            sandbox="sandbox1",
         ),
         admin,
         db,
@@ -1837,3 +1996,66 @@ def test_control_plane_end_to_end_enables_existing_agent_and_fails_closed(
     assert disabled_submit["msg"] == "project_unavailable"
     assert unpublished_submit["msg"] == "manifest_missing"
     assert db.query(CodeAgentRun).count() == run_count
+
+
+def test_chat_does_not_resume_removed_local_publish_confirmation_flow(tmp_path):
+    db = _db()
+    admin = _user()
+    project = _project(db)
+    agent = Agent(
+        id="agent1",
+        name="Publisher",
+        profile="code",
+        creator="admin",
+        code_project_id=project.id,
+    )
+    run = CodeAgentRun(
+        id="run1",
+        agent_id=agent.id,
+        session_id="session1",
+        project_id=project.id,
+        manifest_id="manifest1",
+        manifest_version=1,
+        repository="repo",
+        image="registry.test/code-runner",
+        image_digest="sha256:" + "c" * 64,
+        task_contract=json.dumps({
+            "objective": "使用 CI 中的发布命令执行 local 环境发布",
+            "local_publish": {
+                "command_id": "dbt-local",
+                "target": "local",
+                "lock_key": "dbt-local",
+            },
+        }),
+        effective_policy=json.dumps({"budgets": {"timeout_seconds": 30}}),
+        runner_facts="{}",
+        workspace_path=str(tmp_path / "workspaces" / "run1" / "workspace"),
+        container_id="container1",
+        runner_state="active",
+        execution_eligible=True,
+        status="needs_user_decision",
+        failure_reason="local_publish_confirmation_required",
+        publish_state="awaiting_confirmation",
+    )
+    db.add_all([agent, run])
+    db.commit()
+    tasks = BackgroundTasks()
+
+    submitted = asyncio.run(chat_post(
+        ChatBody(
+            action="submit_chat",
+            agent_id=agent.id,
+            session_id="session1",
+            message="确认",
+        ),
+        tasks,
+        action=None,
+        user=admin,
+        db=db,
+    ))
+
+    assert submitted["code"] == 1
+    assert submitted["msg"] == "manifest_missing"
+    assert db.query(CodeAgentRun).count() == 1
+    assert db.get(CodeAgentRun, "run1").publish_state == "awaiting_confirmation"
+    assert not tasks.tasks
