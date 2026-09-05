@@ -119,6 +119,7 @@ def test_completion_declaration_regex():
     # 正向完成声明
     assert _looks_like_completion_declaration("已完成，交付 report.xlsx")
     assert _looks_like_completion_declaration("任务完成，最终交付结果")
+    assert _looks_like_completion_declaration("交付物确认完成，已生成 report.xlsx")
     assert _looks_like_completion_declaration("无需再调用工具，所有子任务已完成")
     # 否定 / 疑问不触发
     assert not _looks_like_completion_declaration("无法完成，MCP 连接失败")
@@ -198,6 +199,65 @@ def test_completion_signal_confirm_false_resets():
 
     confirm.assert_awaited()  # streak 到 2 后确认过
     reflect.assert_not_awaited()  # 但确认判否 → 未送 FINAL
+
+
+def test_repeated_completion_after_file_write_converges_without_extra_confirm():
+    ctx = _fake_ctx(allowed_actions=["file_write"])
+    ctx.agent.max_iterations = 10
+    calls = 0
+
+    async def _chat(llm, messages, **_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ChatResult(text="WRITE: report.md\nok")
+        return ChatResult(text="交付物确认完成。--- # 报告\n已生成 report.md")
+
+    confirm = AsyncMock(return_value=False)
+    reflect = AsyncMock(return_value=None)
+
+    async def _run():
+        with _patched_runtime(_chat, confirm=confirm, reflect=reflect):
+            return await AgentRuntime().run(ctx)
+
+    result = asyncio.run(_run())
+
+    assert "交付物确认完成" in result
+    assert calls == 3
+    confirm.assert_not_awaited()
+    reflect.assert_awaited_once()
+
+
+def test_repeated_cached_mcp_reference_hard_stops_before_budget_exhaustion():
+    calls = 0
+
+    async def _tool_executor(action, normalized):
+        nonlocal calls
+        calls += 1
+        assert action == "mcp_tool_call"
+        return "该结果已缓存/已落盘，请直接读取 task/1/mcp_result_1.json，勿重复调用。"
+
+    ctx = _fake_ctx(
+        allowed_actions=["mcp_tool_call"],
+        tool_executor=_tool_executor,
+    )
+    ctx.agent.max_iterations = 20
+
+    async def _chat(llm, messages, **_kw):
+        return ChatResult(text='MCP: daily {"ts_code":"600519.SH","trade_date":"20260901"}')
+
+    async def _run():
+        with _patched_runtime(
+            _chat,
+            distill=AsyncMock(return_value="不应走到预算耗尽"),
+        ):
+            return await AgentRuntime().run(ctx)
+
+    result = asyncio.run(_run())
+
+    assert calls == 3
+    assert "连续 3 次重复请求已缓存的 MCP 结果" in result
+    assert "200" not in result
 
 
 # ---- R2 需求感知完成度复核 ----

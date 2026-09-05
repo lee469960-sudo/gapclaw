@@ -15,6 +15,7 @@
         <div class="tick-main">
           <div class="tick-cron">{{ t.cron }}</div>
           <div class="tick-msg">{{ t.message || '(无消息)' }}</div>
+          <div v-if="t.next_run_time" class="tick-next">下次触发：{{ t.next_run_time }}</div>
         </div>
         <div class="tick-actions">
           <el-switch v-model="t.enabled" @change="toggleTick(t)" />
@@ -74,7 +75,10 @@ const formSaving = ref(false)
 const form = reactive({ tick_id: '', cron: '0 9 * * *', message: '', enabled: true })
 
 async function loadTicks() {
-  if (!props.agentId || !props.sessionId) return
+  if (!props.agentId || !props.sessionId) {
+    ticks.value = []
+    return
+  }
   loading.value = true
   try {
     const res = await postCgi('/pages/page_agent_chat.cgi?action=list_ticks', {
@@ -88,6 +92,10 @@ async function loadTicks() {
 }
 
 function openForm(row) {
+  if (!props.agentId || !props.sessionId) {
+    ElMessage.warning('Agent 或会话尚未加载完成，不能设置定时器')
+    return
+  }
   if (row) {
     Object.assign(form, { tick_id: row.tick_id, cron: row.cron, message: row.message, enabled: row.enabled })
   } else {
@@ -97,6 +105,10 @@ function openForm(row) {
 }
 
 async function saveForm() {
+  if (!props.agentId || !props.sessionId) {
+    ElMessage.warning('Agent 或会话尚未加载完成，不能保存定时器')
+    return
+  }
   if (!form.cron.trim()) {
     ElMessage.warning('请填写 Cron 表达式')
     return
@@ -154,6 +166,7 @@ async function removeTick(t) {
 .tick-item:last-child { border-bottom: none; }
 .tick-cron { font-weight: 600; font-family: monospace; }
 .tick-msg { font-size: 13px; color: #606266; margin-top: 4px; }
+.tick-next { font-size: 12px; color: #909399; margin-top: 4px; }
 .tick-actions { display: flex; align-items: center; gap: 8px; }
 .empty { text-align: center; color: #c0c4cc; padding: 48px 16px; }
 .form-tip { font-size: 12px; color: #909399; margin-top: 4px; }

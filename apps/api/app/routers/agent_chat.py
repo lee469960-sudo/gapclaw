@@ -171,6 +171,44 @@ class ChatBody(BaseModel):
     confirmed: bool | None = None
 
 
+def _agent_session_ids(agent: Agent) -> set[str]:
+    try:
+        sessions = json.loads(agent.session_list or "[]")
+    except Exception:
+        sessions = []
+    ids = {
+        str(item.get("session_id") or "").strip()
+        for item in sessions
+        if isinstance(item, dict) and str(item.get("session_id") or "").strip()
+    }
+    if not ids:
+        ids.add(str(agent.id))
+    return ids
+
+
+def _validate_tick_scope(db: Session, agent_id: str | None, session_id: str | None) -> tuple[Agent | None, str]:
+    aid = str(agent_id or "").strip()
+    sid = str(session_id or "").strip()
+    if not aid or not sid:
+        return None, "Agent 或会话未就绪，不能创建定时器"
+    agent = db.query(Agent).filter(Agent.id == aid).first()
+    if not agent:
+        return None, "Agent 不存在，不能创建定时器"
+    if sid not in _agent_session_ids(agent):
+        return None, "会话不存在或不属于该 Agent，不能创建定时器"
+    return agent, ""
+
+
+def _tick_payload(t: AgentTick) -> dict:
+    return {
+        "tick_id": t.tick_id,
+        "cron": t.cron,
+        "message": t.message,
+        "enabled": t.enabled,
+        "next_run_time": tick_scheduler.next_run_time(t.tick_id) if t.enabled else "",
+    }
+
+
 def _run_chat_bg(
     agent_id: str,
     session_id: str,
@@ -705,6 +743,13 @@ async def chat_post(
 
     if act in ("list_ticks", "add_tick", "update_tick", "toggle_tick", "delete_tick", "ping"):
         if act == "add_tick":
+            _agent, err = _validate_tick_scope(db, body.agent_id, body.session_id)
+            if err:
+                return fail(err)
+            try:
+                tick_scheduler.build_tick_trigger(body.cron or "0 * * * *")
+            except Exception as exc:
+                return fail(f"Cron 表达式无效: {exc}")
             enabled = body.enabled if body.enabled is not None else True
             t = AgentTick(
                 tick_id=new_id(),
@@ -719,7 +764,7 @@ async def chat_post(
             db.commit()
             if enabled:
                 tick_scheduler.add_tick_job(t.tick_id, t.cron)
-            return ok({"tick_id": t.tick_id}, "添加成功")
+            return ok(_tick_payload(t), "添加成功")
         if act == "toggle_tick":
             t = db.query(AgentTick).filter(AgentTick.tick_id == body.tick_id).first()
             if t:
@@ -729,7 +774,8 @@ async def chat_post(
                     tick_scheduler.add_tick_job(t.tick_id, t.cron)
                 else:
                     tick_scheduler.remove_tick_job(t.tick_id)
-            return ok(None, "操作成功")
+                return ok(_tick_payload(t), "操作成功")
+            return fail("定时器不存在")
         if act == "delete_tick":
             t = db.query(AgentTick).filter(AgentTick.tick_id == body.tick_id).first()
             if t:
@@ -742,6 +788,10 @@ async def chat_post(
             if not t:
                 return fail("定时器不存在")
             if body.cron is not None:
+                try:
+                    tick_scheduler.build_tick_trigger(body.cron)
+                except Exception as exc:
+                    return fail(f"定时器 Cron 表达式无效: {exc}")
                 t.cron = body.cron
             if body.message is not None:
                 t.message = body.message
@@ -751,10 +801,13 @@ async def chat_post(
             tick_scheduler.remove_tick_job(t.tick_id)
             if t.enabled:
                 tick_scheduler.add_tick_job(t.tick_id, t.cron)
-            return ok(None, "更新成功")
+            return ok(_tick_payload(t), "更新成功")
         if act == "list_ticks":
+            _agent, err = _validate_tick_scope(db, body.agent_id, body.session_id)
+            if err:
+                return fail(err)
             ticks = db.query(AgentTick).filter(AgentTick.agent_id == body.agent_id, AgentTick.session_id == body.session_id).all()
-            return ok([{"tick_id": t.tick_id, "cron": t.cron, "message": t.message, "enabled": t.enabled} for t in ticks])
+            return ok([_tick_payload(t) for t in ticks])
         if act == "ping":
             return ok({"pong": True})
 

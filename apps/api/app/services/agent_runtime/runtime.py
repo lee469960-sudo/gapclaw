@@ -63,9 +63,11 @@ _NO_PROGRESS_HINT_EVERY = 5
 # confirms it, then the text is escalated to a FINAL candidate for the Verifier.
 # Negative "cannot complete" phrasings and questions never trigger. Soft — no gate.
 _COMPLETION_SIGNAL_CONFIRM_AT = 2
+_COMPLETION_SIGNAL_DUPLICATE_FINAL_AT = 2
+_CACHED_REFERENCE_HARD_STOP_AT = 3
 _COMPLETION_DECL_RE = re.compile(
     r"(已完成|已完结|任务完成|任务已完结|已经完成|最终交付|已交付|交付完成"
-    r"|无需再调用工具|不再需要调用工具|所有子任务已完成|全部完成)"
+    r"|确认完成|无需再调用工具|不再需要调用工具|所有子任务已完成|全部完成)"
 )
 _COMPLETION_NEG_RE = re.compile(
     r"(无法|不能)\s*(完成|继续|连接|交付)"
@@ -1125,6 +1127,7 @@ class AgentRuntime:
         tool_fail_streak: dict[str, int] = {}
         last_tool_sig: str | None = None
         same_sig_run = 0
+        cached_reference_streak = 0
         tool_call_tally: dict[str, int] = {}  # explore-loop tally keyed on mcp:<tool>
         tool_materialize_seq = 0  # READ/SHELL oversized-result dump sequence (R2)
 
@@ -1279,7 +1282,13 @@ class AgentRuntime:
                     cur = _strip_reasoning_blocks(reply).strip()
                     if cur and _looks_like_completion_declaration(cur):
                         state.completion_signal_streak += 1
-                        if state.completion_signal_streak >= _COMPLETION_SIGNAL_CONFIRM_AT:
+                        if (
+                            (state.saved_paths or state.files_written > 0)
+                            and _is_duplicate_reply(_last_text_only_reply, cur)
+                            and state.completion_signal_streak >= _COMPLETION_SIGNAL_DUPLICATE_FINAL_AT
+                        ):
+                            completion_candidate = cur
+                        elif state.completion_signal_streak >= _COMPLETION_SIGNAL_CONFIRM_AT:
                             if await self._confirm_completion_signal(ctx, cur):
                                 completion_candidate = cur
                             else:
@@ -1553,7 +1562,9 @@ class AgentRuntime:
                             result_text = tool_result or ""
                             if desc is not None:
                                 state.query_cache[desc["key"]] = _dedup_entry(desc, action, result_text)
-                        cm.push_archive(_archive_type_for(action), result_text)
+                        if action == "mcp_tool_call" and _is_cached_reference(result_text):
+                            cache_hit = True
+                    cm.push_archive(_archive_type_for(action), result_text)
 
                     tool_call_count += 1
 
@@ -1573,6 +1584,7 @@ class AgentRuntime:
                     )
 
                     if bool(err) or _tool_result_failed(result_text):
+                        cached_reference_streak = 0
                         streak = tool_fail_streak.get(fail_key, 0) + 1
                         tool_fail_streak[fail_key] = streak
                         hint = _missing_dep_hint(action, result_text) or _tool_fail_hint(
@@ -1582,6 +1594,22 @@ class AgentRuntime:
                             cm.add_coach_hint(hint)
                     else:
                         tool_fail_streak[fail_key] = 0
+                        if cache_hit:
+                            cached_reference_streak += 1
+                            if cached_reference_streak >= _CACHED_REFERENCE_HARD_STOP_AT:
+                                reason = (
+                                    f"连续 {cached_reference_streak} 次重复请求已缓存的 MCP 结果，"
+                                    "自动停止避免资源浪费"
+                                )
+                                state.final = _forced_stop_reply(state, reason)
+                                _clear_run_state(ctx)
+                                logger.info(
+                                    "modular_loop cached_reference_converged agent=%s iter=%d/%d streak=%d",
+                                    ctx.agent.id, iteration, max_iters, cached_reference_streak,
+                                )
+                                return _ret(state.final)
+                        else:
+                            cached_reference_streak = 0
                         if not cache_hit:
                             made_progress = True  # react-engine-v14 R1: 工具执行成功
                             reflect_fail_count = 0  # real exec resets consecutive effective FAIL
@@ -2289,6 +2317,8 @@ def _is_duplicate_reply(prev: str, cur: str) -> bool:
     if not a or not b:
         return False
     if a == b:
+        return True
+    if len(a) > 40 and len(b) > 40 and a[:600] == b[:600]:
         return True
     # 短回复且互为子串，覆盖 "blocked" vs "tool_blocked"/"--blocked--" 等变体
     return len(a) <= 40 and len(b) <= 40 and (a in b or b in a)

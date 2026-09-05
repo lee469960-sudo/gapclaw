@@ -38,6 +38,12 @@ def test_is_duplicate_reply_distinct():
     assert _is_duplicate_reply("blocked", "正在查询数据") is False
 
 
+def test_is_duplicate_reply_long_same_prefix():
+    prev = "交付物确认完成。--- # 沪深300近5日涨停选股 " + "A" * 700
+    cur = "交付物确认完成。--- # 沪深300近5日涨停选股 " + "A" * 650 + "B" * 50
+    assert _is_duplicate_reply(prev, cur) is True
+
+
 def test_is_duplicate_reply_empty():
     assert _is_duplicate_reply("", "blocked") is False
     assert _is_duplicate_reply("blocked", "") is False

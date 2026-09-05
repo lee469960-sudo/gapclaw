@@ -11,6 +11,7 @@ from app.services.agent_runtime import run_agent
 logger = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
 _job_map: dict[str, str] = {}
+TICK_MISFIRE_GRACE_SECONDS = 2 * 60 * 60
 
 
 def _run_tick(tick_id: str):
@@ -63,6 +64,19 @@ def reload_all_ticks():
         db.close()
 
 
+def build_tick_trigger(cron: str) -> CronTrigger:
+    parts = cron.strip().split()
+    if len(parts) == 5:
+        return CronTrigger(
+            minute=parts[0],
+            hour=parts[1],
+            day=parts[2],
+            month=parts[3],
+            day_of_week=parts[4],
+        )
+    return CronTrigger.from_crontab(cron)
+
+
 def add_tick_job(tick_id: str, cron: str):
     if not _scheduler:
         return
@@ -72,15 +86,34 @@ def add_tick_job(tick_id: str, cron: str):
         except Exception:
             pass
     try:
-        parts = cron.strip().split()
-        if len(parts) == 5:
-            trigger = CronTrigger(minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=parts[4])
-        else:
-            trigger = CronTrigger.from_crontab(cron)
-        job = _scheduler.add_job(_run_tick, trigger, args=[tick_id], id=f"tick_{tick_id}", replace_existing=True)
+        trigger = build_tick_trigger(cron)
+        job = _scheduler.add_job(
+            _run_tick,
+            trigger,
+            args=[tick_id],
+            id=f"tick_{tick_id}",
+            replace_existing=True,
+            misfire_grace_time=TICK_MISFIRE_GRACE_SECONDS,
+            coalesce=True,
+        )
         _job_map[tick_id] = job.id
     except Exception as e:
         logger.warning("invalid cron for tick %s: %s", tick_id, e)
+
+
+def next_run_time(tick_id: str) -> str:
+    if not _scheduler or tick_id not in _job_map:
+        return ""
+    try:
+        job = _scheduler.get_job(_job_map[tick_id])
+    except Exception:
+        return ""
+    value = getattr(job, "next_run_time", None)
+    if value is None:
+        return ""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
 
 
 def remove_tick_job(tick_id: str):
