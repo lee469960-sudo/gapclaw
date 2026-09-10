@@ -134,7 +134,17 @@ def test_llm_step_preview_keeps_non_empty_for_collapse_guard():
     prev = AgentRuntime._llm_step_preview("FINAL: 完成导出\nMCP: list_ads_views {}")
     assert prev
     assert "MCP:" not in prev
-    assert AgentRuntime._llm_step_preview("") == "(empty)"
+    assert AgentRuntime._llm_step_preview("") == "模型返回空正文/不可执行工具调用"
+
+
+def test_native_tool_step_preview_lists_tool_actions():
+    steps = [
+        SimpleNamespace(action="mcp_tool_call"),
+        SimpleNamespace(action="shell"),
+    ]
+    prev = AgentRuntime._native_tool_step_preview(steps)
+    assert prev == "工具调用: [mcp_tool_call], [shell]"
+    assert "不可执行" not in prev
 
 
 def test_llm_step_preview_strips_final_meta_reasoning():

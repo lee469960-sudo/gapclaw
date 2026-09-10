@@ -30,6 +30,11 @@ class AgentLoopState:
     no_progress_streak: int = 0  # Consecutive no-progress rounds (v15 R1′ breakthrough-hint trigger, non-gating)
     completion_signal_streak: int = 0  # Consecutive positive completion-declaration rounds (v16 R1, soft — non-gating)
     fix_only_until_final: bool = False  # After an effective reflect FAIL, drop PLAN until the next FINAL
+    verifier_gaps: dict = field(default_factory=dict)  # {gap_id: {card, signatures, evidence}}
+    terminal_reason: str = ""  # Explicit bounded-finalization reason for resume/UI
+    selected_mcp_ids: list[str] = field(default_factory=list)  # LLM-routed subset for this run
+    mcp_route_attempts: int = 0  # Bounded in-run supplementary route attempts
+    mcp_route_events: list[dict] = field(default_factory=list)  # Redacted route audit records
 
     def add_progress(self, line: str) -> None:
         """Append a progress line, avoiding dupes and capping length."""

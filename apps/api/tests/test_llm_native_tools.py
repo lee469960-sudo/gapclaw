@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.llm_client import (
+    _clear_llm_throttle_circuit,
     chat_completion,
     extract_chat_response_text,
+    supports_native_tools,
 )
 from app.services.agent_runtime.runtime import _clear_run_state
 
@@ -121,6 +123,7 @@ class _CaptureClient:
 
 def _llm(base_url, provider="openai"):
     return SimpleNamespace(
+        id="leaf",
         type="llm",
         api_key_enc="encrypted",
         base_url=base_url,
@@ -132,6 +135,8 @@ def _llm(base_url, provider="openai"):
 
 
 def _run_chat(llm, tools=None):
+    _clear_llm_throttle_circuit()
+
     async def _run():
         with patch("app.services.llm_client.decrypt_secret", return_value="secret"):
             with patch("app.services.llm_client.httpx.AsyncClient", _CaptureClient):
@@ -171,6 +176,65 @@ def test_openai_request_sends_tools_without_reasoning_split():
 def test_openai_request_without_tools_omits_tools_key():
     _CaptureClient.body = None
     _run_chat(_llm("https://example.test/v1", provider="openai"))
+    assert "tools" not in _CaptureClient.body
+
+
+def test_ollama_request_omits_native_tools_for_text_protocol():
+    tools = [{"type": "function", "function": {"name": "shell", "parameters": {}}}]
+    _CaptureClient.body = None
+    _run_chat(_llm("http://127.0.0.1:11434/v1", provider="ollama"), tools=tools)
+    assert "tools" not in _CaptureClient.body
+
+
+def test_native_tools_support_is_decided_by_leaf_provider():
+    assert supports_native_tools(_llm("https://example.test/v1", provider="openai"))
+    assert not supports_native_tools(_llm("http://127.0.0.1:11434/v1", provider="ollama"))
+
+
+class _ResourceQuery:
+    def __init__(self, rows):
+        self._rows = rows
+        self._id = None
+
+    def filter(self, expr):
+        self._id = getattr(getattr(expr, "right", None), "value", None)
+        return self
+
+    def first(self):
+        return self._rows.get(self._id)
+
+
+class _ResourceDB:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, *_args):
+        return _ResourceQuery(self._rows)
+
+
+def test_group_ollama_child_omits_native_tools():
+    tools = [{"type": "function", "function": {"name": "shell", "parameters": {}}}]
+    group = SimpleNamespace(
+        id="group",
+        type="group",
+        members='["ollama-child"]',
+    )
+    child = _llm("http://127.0.0.1:11434/v1", provider="ollama")
+    child.id = "ollama-child"
+    _CaptureClient.body = None
+
+    async def _run():
+        with patch("app.services.llm_client.decrypt_secret", return_value="secret"):
+            with patch("app.services.llm_client.httpx.AsyncClient", _CaptureClient):
+                return await chat_completion(
+                    group,
+                    [{"role": "user", "content": "hello"}],
+                    db=_ResourceDB({"ollama-child": child}),
+                    tools=tools,
+                )
+
+    out = asyncio.run(_run())
+    assert out == "ok"
     assert "tools" not in _CaptureClient.body
 
 

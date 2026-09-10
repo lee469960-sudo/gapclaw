@@ -44,6 +44,7 @@ from app.routers.code_project import (
 )
 from app.routers.agent import AgentBody, agent_get, agent_post
 from app.routers.agent_chat import ChatBody, chat_get, chat_post
+from app.routers.agent_chat import _steps_tail_for_message
 from app.routers.system_role import BUILTIN_ROLES
 from app.security import encrypt_secret
 import app.services.code_agent.control_plane as control_plane
@@ -1197,6 +1198,35 @@ def test_agent_chat_exposes_redacted_code_runtime_events():
     assert "redact_code_output" in router
     assert "next_since" in router
     assert "since: int = Query(0)" in router
+
+
+def test_agent_chat_returns_redacted_details_for_successful_tool_steps():
+    raw = json.dumps({
+        "steps": [{
+            "type": "tool",
+            "action": "shell",
+            "title": "[shell] print result",
+            "status": "done",
+            "content": "answer=42\nAPI_KEY=super-secret-value",
+        }],
+    })
+
+    result = _steps_tail_for_message(raw)
+
+    assert result["steps"][0]["content"].startswith("answer=42")
+    assert "super-secret-value" not in result["steps"][0]["content"]
+    assert "[REDACTED:SECRET]" in result["steps"][0]["content"]
+
+
+def test_agent_chat_keeps_a_useful_bounded_tool_detail_length():
+    result = _steps_tail_for_message(json.dumps({
+        "steps": [{
+            "type": "tool", "action": "shell", "title": "[shell] output",
+            "status": "done", "content": "x" * 15_000,
+        }],
+    }))
+
+    assert len(result["steps"][0]["content"]) == 12_000
 
 
 def test_agent_chat_uses_code_workspace_panel_only_for_code_profile():

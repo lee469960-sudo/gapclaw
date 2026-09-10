@@ -20,9 +20,10 @@ from app.services.agent_runtime.utils import (
 
 
 class _FakeMCP:
-    def __init__(self, mid: str = "m1", name: str = "ads"):
+    def __init__(self, mid: str = "m1", name: str = "ads", modified_at: str = ""):
         self.id = mid
         self.name = name
+        self.modified_at = modified_at
 
 
 def test_get_mcp_tools_cached_success_returns_empty_error():
@@ -53,6 +54,17 @@ def test_get_mcp_tools_cached_detail_error_is_surfaced():
         tools, err = asyncio.run(_get_mcp_tools_cached(_FakeMCP("c")))
     assert tools == []
     assert err == "tools/list connect timeout"
+
+
+def test_get_mcp_tools_cache_invalidates_when_mcp_modified_at_changes():
+    _mcp_tools_cache.clear()
+    with patch("app.services.mcp_client.connect_mcp_detail", new=AsyncMock(side_effect=[
+        {"tools": [{"name": "old"}], "error": ""},
+        {"tools": [{"name": "new"}], "error": ""},
+    ])) as connect:
+        assert asyncio.run(_get_mcp_tools_cached(_FakeMCP("a", modified_at="v1")))[0][0]["name"] == "old"
+        assert asyncio.run(_get_mcp_tools_cached(_FakeMCP("a", modified_at="v2")))[0][0]["name"] == "new"
+    assert connect.await_count == 2
 
 
 def test_format_mcp_tools_for_prompt_is_neutral():

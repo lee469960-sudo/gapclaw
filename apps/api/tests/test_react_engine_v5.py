@@ -193,6 +193,38 @@ def test_native_skipped_backfills_final_first_result():
     assert any(m.get("tool_call_id") == "call_s" for m in tool_msgs)
 
 
+def test_native_final_rejected_by_reflect_backfills_tool_result():
+    db = _make_db()
+    ctx = _fake_ctx(db, allowed_actions=["shell"])
+    _save_run_state(ctx, AgentLoopState(
+        goal="导出报表", subtasks=[{"text": "步骤1", "status": "done"}],
+    ))
+    main_calls: list[list[dict]] = []
+    reflect_calls = 0
+
+    async def _chat(llm, messages, **kwargs):
+        nonlocal reflect_calls
+        if kwargs.get("collect_native"):
+            main_calls.append(list(messages))
+            if len(main_calls) == 1:
+                return ChatResult(content="", tool_calls=[
+                    {"id": "call_f", "function": {"name": "done", "arguments": '{"answer": "完成"}'}},
+                ])
+            return ChatResult(text="FINAL: 完成")
+        reflect_calls += 1
+        if reflect_calls == 1:
+            return "FAIL: 还缺校验\n修复清单：\n- 补校验"
+        return "PASS"
+
+    result = _run(ctx, _chat)
+
+    assert result == "完成"
+    second = main_calls[1]
+    tool_msgs = [m for m in second if m.get("role") == "tool"]
+    assert any(m.get("tool_call_id") == "call_f" for m in tool_msgs)
+    assert any("完成度复核未通过" in (m.get("content") or "") for m in tool_msgs)
+
+
 # ---- 9.3: dynamic-layer truncation protection (D3) ----
 
 

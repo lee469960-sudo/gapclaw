@@ -20,7 +20,7 @@ from app.services.channels.reply import (
     resolve_attach_paths,
     strip_attach_markers,
 )
-from app.services.agent_runtime import run_agent
+from app.services.agent_runtime import is_auto_start_blocked, run_agent
 from app.services.workplace import download_path
 
 logger = logging.getLogger(__name__)
@@ -312,6 +312,16 @@ async def process_inbound(channel_id: str, inbound: InboundMessage) -> None:
             agent = db.query(Agent).filter(Agent.id == channel.agent_id).first()
             if not agent:
                 raise RuntimeError("渠道未绑定有效 Agent")
+            if is_auto_start_blocked(agent.id, im_sess.agent_session_id):
+                log_event(
+                    db,
+                    channel.id,
+                    "会话已被手动停止，跳过自动拉起",
+                    "warn",
+                    f"agent={agent.id} session={im_sess.agent_session_id}",
+                )
+                db.commit()
+                return
 
             log_event(db, channel.id, f"收到消息 chat={inbound.chat_id} agent={agent.id}", "info", inbound.text[:1000])
             channel.last_event_at = now_str()

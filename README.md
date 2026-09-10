@@ -123,7 +123,7 @@ chmod +x build-local.sh
 2. 按当前 CPU 架构构建并打 tag（`gap-api-{arm|amd}:V0.0.1`、`gap-web-{arm|amd}:V0.0.1`）
 3. `docker compose up -d --no-build` 启动
 
-版本号在 `deploy/gap.version`（当前 `V1.0.7`）。构建双架构：
+版本号在 `deploy/gap.version`（当前 `V1.0.8`）。构建双架构：
 
 ```bash
 cd deploy

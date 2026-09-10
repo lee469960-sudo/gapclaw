@@ -50,6 +50,7 @@ class ChatStreamHub:
 
 hub = ChatStreamHub()
 _running: dict[str, bool] = {}
+_auto_start_blocked: set[str] = set()
 
 
 def chat_key(agent_id: str, session_id: str) -> str:
@@ -65,11 +66,23 @@ def is_running(agent_id: str, session_id: str) -> bool:
     return _running.get(chat_key(agent_id, session_id), False)
 
 
-def stop_chat(agent_id: str, session_id: str):
+def is_auto_start_blocked(agent_id: str, session_id: str) -> bool:
+    return chat_key(agent_id, session_id) in _auto_start_blocked
+
+
+def clear_auto_start_block(agent_id: str, session_id: str) -> None:
+    _auto_start_blocked.discard(chat_key(agent_id, session_id))
+
+
+def stop_chat(agent_id: str, session_id: str, *, block_auto_start: bool = True) -> bool:
     key = chat_key(agent_id, session_id)
+    was_running = _running.get(key, False)
     _running[key] = False
+    if block_auto_start:
+        _auto_start_blocked.add(key)
     try:
         from app.services.code_agent.lifecycle import request_code_termination
         request_code_termination(key, "cancelled")
     except Exception:
         pass
+    return was_running

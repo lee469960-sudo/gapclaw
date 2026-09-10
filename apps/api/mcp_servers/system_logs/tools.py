@@ -27,6 +27,9 @@ _LEVEL_RE = re.compile(
 )
 _STATUS_RE = re.compile(r'"\s([1-5]\d{2})\s')
 _EXC_TYPE_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Timeout))\b")
+_STRUCTURED_CLASS_RE = re.compile(
+    r"\bcomponent=(?P<component>[A-Za-z0-9_.-]+)\s+class=(?P<class>[A-Za-z0-9_.-]+)"
+)
 _TS_RE = re.compile(
     r"(?P<iso>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})"
     r"|(?P<clock>\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?)",
@@ -282,6 +285,7 @@ def log_stats(source: str = "api", minutes: int = 60) -> dict[str, Any]:
     level_counts: Counter[str] = Counter()
     status_counts: Counter[str] = Counter()
     exc_counts: Counter[str] = Counter()
+    structured_counts: Counter[str] = Counter()
     traceback_blocks = 0
     considered = 0
 
@@ -305,6 +309,9 @@ def log_stats(source: str = "api", minutes: int = 60) -> dict[str, Any]:
         em = _EXC_TYPE_RE.match(ln.strip())
         if em:
             exc_counts[em.group(1)] += 1
+        cm = _STRUCTURED_CLASS_RE.search(ln)
+        if cm:
+            structured_counts[f"{cm.group('component')}:{cm.group('class')}"] += 1
 
     return {
         "source": key,
@@ -315,6 +322,7 @@ def log_stats(source: str = "api", minutes: int = 60) -> dict[str, Any]:
         "level_counts": dict(level_counts.most_common(20)),
         "http_status_counts": dict(status_counts.most_common(20)),
         "top_exceptions": dict(exc_counts.most_common(15)),
+        "structured_class_counts": dict(structured_counts.most_common(20)),
         "traceback_mentions": level_counts.get("TRACEBACK", 0) + traceback_blocks,
         "size_bytes": path.stat().st_size,
         "log_dir": str(log_dir()),

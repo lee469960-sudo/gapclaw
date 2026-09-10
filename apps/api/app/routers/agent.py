@@ -43,6 +43,7 @@ class AgentBody(BaseModel):
     httpmcps: list[str] | None = None
     max_iterations: int = 150
     history_length: int = 30
+    summary_max_words: int = 5000
     proactivity: int = 2
     llm_timeout: int = 1800
     skill_timeout: int = 1800
@@ -349,6 +350,7 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
                     a.allowed_actions = json.dumps(actions)
         a.max_iterations = max(1, int(body.max_iterations or 150))
         a.history_length = body.history_length
+        a.summary_max_words = max(100, min(int(body.summary_max_words or 5000), 50000))
         a.proactivity = body.proactivity
         a.llm_timeout = body.llm_timeout
         a.skill_timeout = body.skill_timeout

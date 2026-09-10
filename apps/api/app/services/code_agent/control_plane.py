@@ -779,7 +779,7 @@ def create_code_run(
     llm = db.query(LLMResource).filter(LLMResource.id == agent.llm_id).first() if agent.llm_id else None
     model_ref = str(getattr(llm, "model", "") or "").strip() or str(agent.llm_id or "").strip()
     base_url = str(getattr(llm, "base_url", "") or "").strip()
-    policy["model_config"] = {
+    model_config = {
         "provider": "cloud_claude" if policy["coding_runtime"] == "claude_code" else "agent_llm",
         "model_ref": model_ref,
     }
@@ -790,17 +790,16 @@ def create_code_run(
 
         model_reason = claude_code_llm_binding_reason(db, str(agent.llm_id or ""))
         if model_reason:
-            policy["model_config"]["model_binding_reason"] = model_reason
+            model_config["model_binding_reason"] = model_reason
     if base_url:
-        policy["model_config"]["base_url"] = base_url
+        model_config["base_url"] = base_url
     policy.setdefault("policy_sources", {})["allowed_skills"] = "agent_binding"
     policy.setdefault("policy_sources", {})["authorized_mcp_servers"] = "agent_binding"
-    policy.setdefault("policy_sources", {})["model_config"] = "agent"
     contract = freeze_task_contract(
         manifest,
         objective,
         coding_runtime=policy["coding_runtime"],
-        model_config=policy["model_config"],
+        model_config=model_config,
         runtime_budgets=policy["runtime_budgets"],
         allowed_skills=frozen_skills,
         authorized_mcp_servers=frozen_mcps,

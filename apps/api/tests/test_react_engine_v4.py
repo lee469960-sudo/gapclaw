@@ -38,6 +38,12 @@ def test_agent_body_defaults_tool_result_clip():
     assert AgentBody().tool_result_clip == 6000
 
 
+def test_agent_summary_max_words_matches_create_form_default():
+    assert Agent.__table__.columns["summary_max_words"].default.arg == 5000
+    assert AgentBody().summary_max_words == 5000
+    assert Agent(id="a1", name="t").to_dict()["summary_max_words"] == 5000
+
+
 class _FakeDB:
     def __init__(self):
         self.row = None
@@ -71,6 +77,16 @@ def test_route_defaults_tool_result_clip_when_unset():
     body = AgentBody(action="create", name="x")  # omit tool_result_clip → default
     asyncio.run(agent_post(body, user, db))
     assert db.row.tool_result_clip == 6000
+
+
+def test_route_persists_and_clamps_summary_max_words():
+    assert _create_agent(6000).summary_max_words == 5000
+    db = _FakeDB()
+    asyncio.run(agent_post(
+        AgentBody(action="create", name="x", summary_max_words=999999),
+        SimpleNamespace(username="admin"), db,
+    ))
+    assert db.row.summary_max_words == 50000
 
 
 # ---- 6.2 leaked-token stripping ----

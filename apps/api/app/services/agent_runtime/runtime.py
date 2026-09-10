@@ -35,10 +35,14 @@ from app.services.tool_parser import (
     PROTOCOL_MARKERS,
     strip_leaked_tool_tokens,
 )
+from app.services.agent_runtime.observability import NoProgressHintLogAggregator
 from app.services.agent_runtime.utils import build_ads_view_catalog
 
 if TYPE_CHECKING:
     from app.services.agent_runtime.context import AgentContext
+
+
+_EXECUTION_DETAIL_LIMIT = 12_000
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +127,90 @@ def _effective_fix_list(fix_list: list | None) -> list[str]:
     """Drop empty/boilerplate bullets. Empty result means the FAIL is ignored."""
     items = [str(x).strip() for x in (fix_list or []) if str(x).strip()]
     return [x for x in items if not _is_boilerplate_fix_item(x)]
+
+
+def _parse_verifier_gap_cards(verdict: str) -> list[dict[str, str]]:
+    """Extract complete, machine-checkable evidence gaps from a verifier reply."""
+    text = (verdict or "").strip()
+    if not text:
+        return []
+    blocks = re.split(r"(?=^\s*GAP(?:\s+\d+)?\s*[:：])", text, flags=re.IGNORECASE | re.MULTILINE)
+    cards: list[dict[str, str]] = []
+    aliases = {
+        "requirement": "requirement", "需求": "requirement",
+        "missing_evidence": "missing_evidence", "缺失证据": "missing_evidence",
+        "action": "action", "动作": "action",
+        "criterion": "criterion", "判定条件": "criterion",
+    }
+    for block in blocks:
+        if not re.match(r"^\s*GAP(?:\s+\d+)?\s*[:：]", block, re.IGNORECASE):
+            continue
+        card: dict[str, str] = {}
+        for line in block.splitlines()[1:]:
+            key, sep, value = line.partition(":")
+            if not sep:
+                key, sep, value = line.partition("：")
+            canonical = aliases.get(key.strip().lower())
+            if canonical and value.strip():
+                card[canonical] = value.strip().strip("`")
+        if all(card.get(field) for field in ("requirement", "missing_evidence", "action", "criterion")):
+            cards.append(card)
+    return cards
+
+
+def _gap_action_signature(action: str) -> str:
+    return " ".join((action or "").strip().split()).lower()
+
+
+def _is_high_risk_gap_action(action: str) -> bool:
+    text = (action or "").strip()
+    if re.match(r"^(READ|MCP|SEARCH)\s*:", text, re.IGNORECASE):
+        return False
+    if not re.match(r"^SHELL\s*:", text, re.IGNORECASE):
+        return True
+    cmd = text.split(":", 1)[1].strip()
+    if re.search(r"(?:>|>>|\brm\b|\bmv\b|\bcp\b|\bcurl\b|\bwget\b|\bgit\s+push\b|\bdeploy\b)", cmd, re.IGNORECASE):
+        return True
+    return not bool(re.match(r"^(cat|ls|rg|grep|sed|head|tail|wc|find|echo)\b", cmd))
+
+
+def _exhausted_gap_cards(state, cards: list[dict] | None) -> list[dict]:
+    exhausted: list[dict] = []
+    for card in cards or []:
+        gap_id = "\x1f".join(str(card.get(k) or "").strip() for k in ("requirement", "missing_evidence", "criterion"))
+        prior = (getattr(state, "verifier_gaps", {}) or {}).get(gap_id, {})
+        if len(set(prior.get("signatures") or [])) >= 2:
+            exhausted.append(card)
+    return exhausted
+
+
+def _validated_gap_cards(state, cards: list[dict] | None) -> list[dict]:
+    """Keep only actionable gaps not already covered by persisted evidence."""
+    valid: list[dict] = []
+    cached_paths = {
+        str(entry.get("path") or "")
+        for entry in (getattr(state, "query_cache", {}) or {}).values()
+        if isinstance(entry, dict)
+    }
+    for card in cards or []:
+        action = str(card.get("action") or "").strip()
+        if not re.match(r"^(READ|SHELL|MCP|SEARCH)\s*:", action, re.IGNORECASE):
+            continue
+        signature = _gap_action_signature(action)
+        gap_id = "\x1f".join(str(card.get(k) or "").strip() for k in ("requirement", "missing_evidence", "criterion"))
+        prior = (getattr(state, "verifier_gaps", {}) or {}).get(gap_id, {})
+        if len(set(prior.get("signatures") or [])) >= 2:
+            continue
+        if signature in (prior.get("signatures") or []):
+            continue
+        read_path = action.split(":", 1)[1].strip() if action.upper().startswith("READ:") else ""
+        if read_path and read_path in cached_paths:
+            continue
+        accepted = dict(card)
+        accepted["gap_id"] = gap_id
+        accepted["signature"] = signature
+        valid.append(accepted)
+    return valid
 
 
 def _persist_code_profile_event(db, run_id: str, payload: dict) -> None:
@@ -402,7 +490,7 @@ class AgentRuntime:
 
     @staticmethod
     def _slim_steps_for_meta(steps: list[dict] | None) -> list[dict]:
-        """Keep title/status-oriented fields for ChatMessage.meta (no huge payloads)."""
+        """Keep bounded, user-visible execution details in ChatMessage.meta."""
         out: list[dict] = []
         for s in steps or []:
             if not isinstance(s, dict) or s.get("hidden"):
@@ -424,9 +512,10 @@ class AgentRuntime:
             if isinstance(content, str) and content.strip():
                 cleaned_content = AgentRuntime._sanitize_step_text(content)
                 if cleaned_content:
-                    limit = 400 if s.get("status") == "error" or str(s.get("action") or "").startswith("code_") else 0
-                    if limit:
-                        item["content"] = cleaned_content[:limit]
+                    # These are user-visible audit details.  Persist enough of a
+                    # successful tool result to make the history accordion useful;
+                    # the LLM context remains independently clipped elsewhere.
+                    item["content"] = cleaned_content[:_EXECUTION_DETAIL_LIMIT]
             snippet = s.get("snippet")
             if str(s.get("action") or "").startswith("code_") and isinstance(snippet, str) and snippet.strip():
                 cleaned_snippet = AgentRuntime._sanitize_step_text(snippet)
@@ -528,9 +617,18 @@ class AgentRuntime:
         """Short preview so consecutive LLM steps are not collapsed by the UI."""
         text = AgentRuntime._sanitize_step_text(reply)
         if not text:
-            return "(empty)"
+            return "模型返回空正文/不可执行工具调用"
         text = " ".join(text.split())
         return text[:200] if text else "(tool/empty)"
+
+    @staticmethod
+    def _native_tool_step_preview(tool_steps: list) -> str:
+        names = [getattr(s, "action", "") for s in tool_steps or [] if getattr(s, "action", "")]
+        if not names:
+            return "模型返回空正文/不可执行工具调用"
+        shown = ", ".join(f"[{n}]" for n in names[:6])
+        suffix = f" …共 {len(names)} 个" if len(names) > 6 else ""
+        return f"工具调用: {shown}{suffix}"
 
     @staticmethod
     def _sanitize_step_text(text: str) -> str:
@@ -635,7 +733,7 @@ class AgentRuntime:
             "iteration": iteration,
         }
         if content:
-            step["content"] = content[:400]
+            step["content"] = content[:_EXECUTION_DETAIL_LIMIT]
         await AgentRuntime._append_step(ctx, state, step)
 
     async def _run_conversational(self, ctx: AgentContext) -> str:
@@ -750,15 +848,13 @@ class AgentRuntime:
             f"子任务清单（[x]=已完成）：\n{subtask_block[:1500]}\n"
             f"最近进度：\n{recent_progress[:1500]}\n"
             f"候选最终回复：\n{candidate[:3000]}\n\n"
-            "只输出：若全部核对项 PASS，输出一行 `PASS`；否则按以下三段输出：\n"
-            "FAIL: <一句话说明哪些核对项缺失/错误>\n"
-            "修复清单：\n"
-            "- <只列失败项的可执行修正>\n"
-            "修订 PLAN：\n"
-            "- [x] <保留已完成的子任务>\n"
-            "- [ ] <仅追加失败项对应的待办>\n"
-            "修复清单与修订 PLAN 只针对失败项：已完成子任务一律保留为 [x]、已写文件不推翻；"
-            "不要输出工具调用、不要重新作答、不要输出其它内容。"
+            "只输出：若全部核对项 PASS，输出一行 `PASS`；否则输出 `FAIL: <原因>`，并为每个"
+            "真正阻塞项输出以下四行（缺任何一行都视为非阻塞备注）：\n"
+            "GAP:\nrequirement: <原始用户目标中的可验证需求>\n"
+            "missing_evidence: <当前尚未拥有的证据>\n"
+            "action: <一条尚未执行的具体工具协议行>\n"
+            "criterion: <该动作结果如何判定需求满足>\n"
+            "不得要求再检查/再推理；不得重复已完成动作；不要输出 PLAN 或其它内容。"
         )
         try:
             verdict = await chat_completion(
@@ -791,7 +887,13 @@ class AgentRuntime:
             ]
             if len(rp_parts) > 1:
                 revised_plan = rp_parts[1].strip()
-        return {"missing": missing, "fix_list": fix_list, "revised_plan": revised_plan}
+        return {
+            "missing": missing,
+            "fix_list": fix_list,
+            "revised_plan": revised_plan,
+            "gaps": _parse_verifier_gap_cards(verdict),
+            "raw_verdict": verdict,
+        }
 
     async def _confirm_completion_signal(self, ctx: AgentContext, text: str) -> bool:
         """One LLM check: is this text a task-completion declaration? (react-engine-v16 R1)
@@ -880,12 +982,17 @@ class AgentRuntime:
         from app.services.agent_runtime.system_prompt import SystemPromptBuilder
         from app.services.agent_tools import execute_action, dedup_descriptor, read_cache_key
         from app.services.llm_client import chat_completion, tool_steps_from_tool_calls
-        from app.services.llm_client import LLMTransportError
+        from app.services.llm_client import LLMProviderThrottled, LLMTransportError
         from app.services.mcp_client import McpSessionManager
+        from app.services.agent_runtime.mcp_routing import (
+            build_mcp_route_candidates,
+            route_mcp_candidates,
+        )
         from app.services.tool_parser import extract_tool_steps, _strip_reasoning_blocks
 
         state = AgentLoopState()
         state.goal = (ctx.user_message or "").strip()
+        no_progress_logs = NoProgressHintLogAggregator(logger)
         resume_state = _load_run_state(ctx)
         if resume_state is not None:
             state = resume_state
@@ -915,6 +1022,7 @@ class AgentRuntime:
             """
             if made_progress:
                 state.no_progress_streak = 0
+                no_progress_logs.reset(ctx.agent.id)
                 return
             state.no_progress_streak += 1
             streak = state.no_progress_streak
@@ -939,10 +1047,7 @@ class AgentRuntime:
                 "请二选一：1) 调用工具推进（无依赖可同轮多个）；"
                 "2) 输出一行 `FINAL: <当前结论>` 收尾。"
             )
-            logger.info(
-                "modular_loop no_progress_hint agent=%s iter=%d streak=%d",
-                ctx.agent.id, round_no, streak,
-            )
+            no_progress_logs.log_hint(ctx.agent.id, round_no, streak)
             cm.add_coach_hint(hint)
 
         if not ctx.llm:
@@ -976,7 +1081,18 @@ class AgentRuntime:
         if skill_snap:
             system_prompt += f"\n\n{skill_snap}"
         cm.set_base(system_prompt=system_prompt)
-        view_catalog = build_ads_view_catalog(ctx.mcp_ids)
+        candidates = build_mcp_route_candidates(
+            ctx.db, ctx.mcp_ids, ctx.allowed_actions
+        )
+        route_decision = await route_mcp_candidates(
+            llm=ctx.llm,
+            db=ctx.db,
+            user_message=state.goal or ctx.user_message,
+            candidates=candidates,
+            timeout=llm_timeout,
+        )
+        state.selected_mcp_ids = route_decision.selected_mcp_ids
+        view_catalog = build_ads_view_catalog(state.selected_mcp_ids)
         if state.resumed:
             # Resumed run: inject the rendered subtask list + raw plan (carries view_map)
             # so the model sees [x]/[ ] progress and the original bindings again.
@@ -994,21 +1110,31 @@ class AgentRuntime:
                 agent=ctx.agent,
                 allowed=ctx.allowed_actions,
                 skill_ids=ctx.skill_ids,
-                mcp_ids=ctx.mcp_ids,
+                mcp_ids=state.selected_mcp_ids,
                 rag_ids=ctx.rag_ids,
                 httpmcp_ids=ctx.httpmcp_ids,
                 save_dir=ctx.save_dir,
                 im_source=ctx.im_source,
             )
             cm.set_tools_catalog(tools_block)
+            _record_mcp_route_event(
+                state, user_message=state.goal or ctx.user_message, candidates=candidates,
+                decision=route_decision, trigger="initial", supplement_index=0,
+                mcp_load_results=getattr(tools_block, "mcp_load_results", []),
+            )
         except Exception:
             logger.warning("Failed to build tools catalog, using minimal block", exc_info=True)
             cm.set_tools_catalog(SystemPromptBuilder.build_minimal_tools_desc(
                 save_dir=ctx.save_dir,
                 allowed_actions=ctx.allowed_actions,
-                mcp_ids=ctx.mcp_ids,
+                mcp_ids=state.selected_mcp_ids,
                 db=ctx.db,
             ))
+            _record_mcp_route_event(
+                state, user_message=state.goal or ctx.user_message, candidates=candidates,
+                decision=route_decision, trigger="initial", supplement_index=0,
+                mcp_load_results=[], load_failure="catalog_unavailable",
+            )
 
         # ---- Establish dynamic system layers BEFORE any user/assistant message,
         # so coach_hint + progress_block stay in the leading system block and are
@@ -1181,8 +1307,13 @@ class AgentRuntime:
                     # R3: transport errors (self-healing) and HTTP/other errors use
                     # separate consecutive-failure thresholds — 3 vs 2 — so a transient
                     # network blip doesn't abort as fast as a parameter/request error.
+                    is_throttled = isinstance(exc, LLMProviderThrottled)
                     is_transport = isinstance(exc, LLMTransportError)
-                    if is_transport:
+                    if is_throttled:
+                        llm_failures += 1
+                        failures = llm_failures
+                        threshold = 1
+                    elif is_transport:
                         transport_failures += 1
                         failures = transport_failures
                         threshold = 3
@@ -1224,8 +1355,12 @@ class AgentRuntime:
                     tool_steps = extract_tool_steps(reply)
 
                 state.last_reply = reply
+                preview = (
+                    self._native_tool_step_preview(tool_steps)
+                    if native else self._llm_step_preview(reply)
+                )
                 await self._patch_last_step(
-                    ctx, state, status="done", preview=self._llm_step_preview(reply),
+                    ctx, state, status="done", preview=preview,
                 )
                 if native:
                     cm.push_assistant_native(result.content or "", result.tool_calls)
@@ -1296,42 +1431,9 @@ class AgentRuntime:
                     else:
                         state.completion_signal_streak = 0
 
-                # 2b. FINAL → evidence gate, then Verifier. Effective FAIL injects
-                # fix_list only (no revised PLAN). Vague/empty FAIL is treated as PASS.
+                # 2b. FINAL → Verifier. PLAN is LLM-owned progress context, not a
+                # delivery gate; only validated verifier evidence gaps can continue it.
                 final_step = next((s for s in tool_steps if getattr(s, "is_final", False)), None)
-                if (
-                    (final_step is not None or completion_candidate is not None)
-                    and not _subtasks_ready_for_final(state.subtasks)
-                ):
-                    open_texts = _open_subtask_texts(state.subtasks)
-                    lines = "\n".join(f"- {t}" for t in open_texts[:12]) or "- （未完成子任务）"
-                    await self._append_step(ctx, state, {
-                        "type": "info",
-                        "action": "final_blocked_open_subtasks",
-                        "iteration": round_no,
-                        "title": "完成度复核暂缓：仍有未完成子任务",
-                        "status": "done",
-                        "content": lines[:300],
-                    })
-                    cm.add_coach_hint(
-                        "【完成度复核暂缓】仍有未完成子任务，不能结束任务。请先执行：\n"
-                        + lines
-                        + "\n请调用工具推进上述子任务，完成后再输出 FINAL。"
-                    )
-                    for s in tool_steps:
-                        if getattr(s, "is_final", False) and s.tool_call_id:
-                            cm.push_native_tool_result(
-                                s.tool_call_id,
-                                "子任务未完成，FINAL 未送复核",
-                                clip=tool_result_clip,
-                            )
-                    tool_steps = [s for s in tool_steps if not getattr(s, "is_final", False)]
-                    final_step = None
-                    completion_candidate = None
-                    state.completion_signal_streak = 0
-                    if not tool_steps:
-                        _apply_no_progress_hint(made_progress, round_no)
-                        continue
 
                 if final_step is not None or completion_candidate is not None:
                     # FINAL wins over any same-round tool steps (silent drop). Surface
@@ -1376,18 +1478,40 @@ class AgentRuntime:
                         )
                         return _ret(state.final)
                     missing = (report.get("missing") or "任务尚未完成").strip()
-                    effective = _effective_fix_list(report.get("fix_list") or [])
-                    if not effective:
-                        # Empty / boilerplate fix_list is not an executable FAIL.
+                    cards = report.get("gaps") or []
+                    gaps = _validated_gap_cards(state, cards)
+                    if not gaps:
+                        # Prose/legacy FAILs and already-covered gaps are non-blocking.
                         state.fix_only_until_final = False
-                        state.final = candidate
+                        exhausted = _exhausted_gap_cards(state, cards)
+                        if exhausted:
+                            high_risk = any(_is_high_risk_gap_action(str(gap.get("action") or "")) for gap in exhausted)
+                            state.terminal_reason = "high_risk_gap_exhausted" if high_risk else "low_risk_gap_exhausted"
+                            suffix = (
+                                "\n\n未完成的高风险动作需要你的确认/授权后才能执行。"
+                                if high_risk else
+                                "\n\n以上为基于现有证据的条件性结论；仍有未验证项。"
+                            )
+                            state.final = candidate + suffix
+                        else:
+                            state.final = candidate
                         _clear_run_state(ctx)
                         logger.info(
                             "modular_loop finish agent=%s iter=%d/%d tools=%d vague_fail_as_pass=1",
                             ctx.agent.id, iteration, max_iters, tool_call_count,
                         )
                         return _ret(state.final)
+                    effective = [gap["action"] for gap in gaps]
+                    for gap in gaps:
+                        existing = state.verifier_gaps.setdefault(gap["gap_id"], {"card": gap, "signatures": [], "evidence": []})
+                        existing["card"] = gap
                     reflect_fail_count += 1
+                    if final_step is not None and final_step.tool_call_id:
+                        cm.push_native_tool_result(
+                            final_step.tool_call_id,
+                            "完成度复核未通过，FINAL 未接受；请按修复清单继续执行。",
+                            clip=tool_result_clip,
+                        )
                     if reflect_fail_count >= _REFLECT_FAIL_CONVERGE:
                         # Consecutive effective Verifier rejections → converge (D4).
                         state.fix_only_until_final = False
@@ -1495,6 +1619,50 @@ class AgentRuntime:
                     if not action or not normalized:
                         continue
 
+                    if action == "mcp_route_request":
+                        if state.mcp_route_attempts >= 2:
+                            result_text = "MCP 补选已达本次运行上限（2 次），请基于现有证据继续或向用户澄清。"
+                        else:
+                            state.mcp_route_attempts += 1
+                            decision = await route_mcp_candidates(
+                                llm=ctx.llm, db=ctx.db,
+                                user_message=state.goal or ctx.user_message,
+                                candidates=candidates,
+                                selected_mcp_ids=state.selected_mcp_ids,
+                                trigger=normalized[:500], timeout=llm_timeout,
+                            )
+                            newly_selected = [
+                                mid for mid in decision.selected_mcp_ids
+                                if mid not in state.selected_mcp_ids
+                            ]
+                            mcp_load_results = []
+                            if newly_selected:
+                                state.selected_mcp_ids.extend(newly_selected)
+                                tools_block = await SystemPromptBuilder.build_tools_desc(
+                                    db=ctx.db, agent=ctx.agent, allowed=ctx.allowed_actions,
+                                    skill_ids=ctx.skill_ids, mcp_ids=state.selected_mcp_ids,
+                                    rag_ids=ctx.rag_ids, httpmcp_ids=ctx.httpmcp_ids,
+                                    save_dir=ctx.save_dir, im_source=ctx.im_source,
+                                )
+                                cm.set_tools_catalog(tools_block)
+                                mcp_load_results = getattr(tools_block, "mcp_load_results", [])
+                                result_text = f"已补选并加载 MCP: {', '.join(newly_selected)}"
+                            else:
+                                result_text = "未找到可新增的 MCP 能力；请基于现有工具继续或向用户澄清。"
+                            _record_mcp_route_event(
+                                state, user_message=state.goal or ctx.user_message,
+                                candidates=candidates, decision=decision,
+                                trigger="agent_capability_request",
+                                supplement_index=state.mcp_route_attempts,
+                                mcp_load_results=mcp_load_results,
+                            )
+                        await self._append_tool_step(
+                            ctx, state, iteration=round_no, action=action,
+                            title="请求补选 MCP 能力", status="done", content=result_text,
+                        )
+                        cm.add_coach_hint(f"【MCP 补选】{result_text}")
+                        continue
+
                     if action not in ctx.allowed_actions:
                         cm.add_coach_hint(
                             f"工具 `{action}` 未启用，已阻止执行。请改用当前工具目录中的能力。"
@@ -1544,7 +1712,7 @@ class AgentRuntime:
                                     tool_result = await execute_action(
                                         action, normalized,
                                         ctx.db, ctx.agent, sandbox,
-                                        ctx.skill_ids, ctx.mcp_ids,
+                                        ctx.skill_ids, state.selected_mcp_ids,
                                         ctx.rag_ids,
                                         httpmcp_ids=ctx.httpmcp_ids,
                                         mcp_sessions=mcp_sessions,
@@ -1562,8 +1730,57 @@ class AgentRuntime:
                             result_text = tool_result or ""
                             if desc is not None:
                                 state.query_cache[desc["key"]] = _dedup_entry(desc, action, result_text)
-                        if action == "mcp_tool_call" and _is_cached_reference(result_text):
-                            cache_hit = True
+                    if (
+                        action == "mcp_tool_call"
+                        and state.mcp_route_attempts < 2
+                        and (
+                            "未在绑定 MCP 中找到工具" in result_text
+                            or _is_mcp_connect_failure(result_text)
+                        )
+                    ):
+                        state.mcp_route_attempts += 1
+                        decision = await route_mcp_candidates(
+                            llm=ctx.llm, db=ctx.db,
+                            user_message=state.goal or ctx.user_message,
+                            candidates=candidates,
+                            selected_mcp_ids=state.selected_mcp_ids,
+                            trigger=f"mcp_failure:{normalized}"[:500], timeout=llm_timeout,
+                        )
+                        newly_selected = [mid for mid in decision.selected_mcp_ids if mid not in state.selected_mcp_ids]
+                        if newly_selected:
+                            state.selected_mcp_ids.extend(newly_selected)
+                            tools_block = await SystemPromptBuilder.build_tools_desc(
+                                db=ctx.db, agent=ctx.agent, allowed=ctx.allowed_actions,
+                                skill_ids=ctx.skill_ids, mcp_ids=state.selected_mcp_ids,
+                                rag_ids=ctx.rag_ids, httpmcp_ids=ctx.httpmcp_ids,
+                                save_dir=ctx.save_dir, im_source=ctx.im_source,
+                            )
+                            cm.set_tools_catalog(tools_block)
+                            cm.add_coach_hint(
+                                f"【MCP 自动补选】已因工具不可用补充加载: {', '.join(newly_selected)}。"
+                            )
+                        _record_mcp_route_event(
+                            state, user_message=state.goal or ctx.user_message,
+                            candidates=candidates, decision=decision,
+                            trigger=(
+                                "selected_mcp_tool_missing"
+                                if "未在绑定 MCP 中找到工具" in result_text
+                                else "selected_mcp_unreachable"
+                            ),
+                            supplement_index=state.mcp_route_attempts,
+                            mcp_load_results=getattr(tools_block, "mcp_load_results", []) if newly_selected else [],
+                        )
+                    cached_mcp_reference = action == "mcp_tool_call" and _is_cached_reference(result_text)
+                    if cached_mcp_reference:
+                        cache_hit = True
+                    action_signature = _gap_action_signature(normalized)
+                    for gap in (state.verifier_gaps or {}).values():
+                        card = gap.get("card") if isinstance(gap, dict) else None
+                        if isinstance(card, dict) and card.get("signature") == action_signature and not cache_hit:
+                            signatures = gap.setdefault("signatures", [])
+                            if action_signature not in signatures:
+                                signatures.append(action_signature)
+                            gap.setdefault("evidence", []).append(result_text[:500])
                     cm.push_archive(_archive_type_for(action), result_text)
 
                     tool_call_count += 1
@@ -1594,8 +1811,11 @@ class AgentRuntime:
                             cm.add_coach_hint(hint)
                     else:
                         tool_fail_streak[fail_key] = 0
-                        if cache_hit:
+                        if cached_mcp_reference:
                             cached_reference_streak += 1
+                            hint = _cached_reference_recovery_hint(result_text, ctx.allowed_actions)
+                            if hint:
+                                cm.add_coach_hint(hint)
                             if cached_reference_streak >= _CACHED_REFERENCE_HARD_STOP_AT:
                                 reason = (
                                     f"连续 {cached_reference_streak} 次重复请求已缓存的 MCP 结果，"
@@ -1608,7 +1828,7 @@ class AgentRuntime:
                                     ctx.agent.id, iteration, max_iters, cached_reference_streak,
                                 )
                                 return _ret(state.final)
-                        else:
+                        elif not cache_hit:
                             cached_reference_streak = 0
                         if not cache_hit:
                             made_progress = True  # react-engine-v14 R1: 工具执行成功
@@ -1660,7 +1880,7 @@ class AgentRuntime:
                         action=action,
                         title=_tool_step_title(action, normalized),
                         status="error" if err else "done",
-                        content=err or result_text[:300],
+                        content=err or result_text[:_EXECUTION_DETAIL_LIMIT],
                     )
 
                 if state.progress_lines:
@@ -1822,7 +2042,82 @@ def _has_resumable_state(state) -> bool:
         or getattr(state, "query_cache", None)
         or state.progress_lines
         or state.saved_paths
+        or getattr(state, "verifier_gaps", None)
+        or getattr(state, "terminal_reason", "")
     )
+
+
+_ROUTE_SECRET_RE = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|api[_-]?key|token|password|secret)\b"
+    r"\s*[\"']?\s*[:=]\s*[\"']?\s*(?:bearer\s+)?[^\s,;}&\"']+"
+)
+_ROUTE_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+\-/=]+")
+
+
+def _redact_route_text(value: str, limit: int | None = 240) -> str:
+    """Produce a bounded route-audit summary without credential values."""
+    compact = " ".join(str(value or "").split())
+    compact = _ROUTE_SECRET_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", compact)
+    compact = _ROUTE_BEARER_RE.sub("Bearer [REDACTED]", compact)
+    return compact[:limit] if limit is not None else compact
+
+
+def _route_request_summary(value: str) -> str:
+    """Audit request shape without retaining any user-provided text."""
+    raw = str(value or "")
+    credential_markers = len(_ROUTE_SECRET_RE.findall(raw)) + len(_ROUTE_BEARER_RE.findall(raw))
+    nonempty_lines = sum(1 for line in raw.splitlines() if line.strip())
+    return (
+        f"user_request(chars={len(raw)}, nonempty_lines={nonempty_lines}, "
+        f"credential_markers={credential_markers})"
+    )
+
+
+def _route_reason_summary(reason: str, user_message: str) -> str:
+    """Redact a router reason without allowing it to echo the full request."""
+    compact_reason = _redact_route_text(reason, limit=None)
+    compact_request = _redact_route_text(user_message, limit=None)
+    if compact_request:
+        compact_reason = compact_reason.replace(compact_request, "[USER_REQUEST_REDACTED]")
+    return compact_reason[:4000]
+
+
+def _record_mcp_route_event(
+    state,
+    *,
+    user_message: str,
+    candidates,
+    decision,
+    trigger: str,
+    supplement_index: int,
+    mcp_load_results: list[dict],
+    load_failure: str = "",
+) -> None:
+    """Persist and log a redacted, metadata-only MCP route audit event."""
+    event = {
+        "request_summary": _route_request_summary(user_message),
+        "candidate_mcp_ids": [str(candidate.id) for candidate in candidates],
+        "selected_mcp_ids": list(decision.selected_mcp_ids),
+        "reason": _route_reason_summary(decision.reason, user_message),
+        "trigger": trigger,
+        "supplement_index": supplement_index,
+        "mcp_load_results": [
+            {"mcp_id": str(row.get("mcp_id") or ""), "status": str(row.get("status") or "unknown")}
+            for row in mcp_load_results if isinstance(row, dict) and row.get("mcp_id")
+        ],
+    }
+    event["loaded_mcp_ids"] = [
+        row["mcp_id"] for row in event["mcp_load_results"]
+        if row["status"] == "catalog_loaded"
+    ]
+    event["load_result"] = (
+        "catalog_loaded" if event["loaded_mcp_ids"]
+        else (load_failure or (event["mcp_load_results"][0]["status"] if event["mcp_load_results"] else "no_new_selection"))
+    )
+    state.mcp_route_events.append(event)
+    if len(state.mcp_route_events) > 20:
+        del state.mcp_route_events[:-20]
+    logger.info("mcp_route_event=%s", json.dumps(event, ensure_ascii=False))
 
 
 def _save_run_state(ctx, state) -> None:
@@ -1848,6 +2143,11 @@ def _save_run_state(ctx, state) -> None:
         "query_cache": getattr(state, "query_cache", {}) or {},
         "plan_text": getattr(state, "plan_text", "") or "",
         "fix_only_until_final": bool(getattr(state, "fix_only_until_final", False)),
+        "verifier_gaps": getattr(state, "verifier_gaps", {}) or {},
+        "terminal_reason": getattr(state, "terminal_reason", "") or "",
+        "selected_mcp_ids": getattr(state, "selected_mcp_ids", []) or [],
+        "mcp_route_attempts": int(getattr(state, "mcp_route_attempts", 0) or 0),
+        "mcp_route_events": (getattr(state, "mcp_route_events", []) or [])[-20:],
     }
     blob = json.dumps(payload, ensure_ascii=False)
     try:
@@ -1905,7 +2205,10 @@ def _load_run_state(ctx):
     query_cache = dict(data.get("query_cache") or {})
     progress_lines = list(data.get("progress_lines") or [])
     saved_paths = list(data.get("saved_paths") or [])
-    if not (subtasks or mcp_results or query_cache or progress_lines or saved_paths):
+    if not (
+        subtasks or mcp_results or query_cache or progress_lines or saved_paths
+        or data.get("verifier_gaps") or data.get("terminal_reason") or data.get("mcp_route_events")
+    ):
         return None
     state = AgentLoopState()
     state.subtasks = subtasks
@@ -1919,6 +2222,11 @@ def _load_run_state(ctx):
     state.query_cache = query_cache
     state.plan_text = str(data.get("plan_text") or "")
     state.fix_only_until_final = bool(data.get("fix_only_until_final"))
+    state.verifier_gaps = dict(data.get("verifier_gaps") or {})
+    state.terminal_reason = str(data.get("terminal_reason") or "")
+    state.selected_mcp_ids = list(data.get("selected_mcp_ids") or [])
+    state.mcp_route_attempts = int(data.get("mcp_route_attempts") or 0)
+    state.mcp_route_events = list(data.get("mcp_route_events") or [])[-20:]
     state.resumed = True
     return state
 
@@ -2205,6 +2513,45 @@ def _is_cached_reference(text: str) -> bool:
     """True when an MCP result is the dedup-hit reference emitted by
     ``McpSessionManager._cached_reference`` (a soft "已缓存/已落盘，请 READ" hint)."""
     return bool(text) and text.startswith("该结果已缓存/已落盘")
+
+
+def _cached_reference_path(text: str) -> str:
+    """Extract the materialized path from a cached-reference message."""
+    if not _is_cached_reference(text):
+        return ""
+    patterns = (
+        r"已缓存/已落盘\s+([^\s，。；;]+)",
+        r"读取\s+([^\s，。；;]+)",
+    )
+    for pattern in patterns:
+        m = re.search(pattern, text or "")
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _cached_reference_recovery_hint(text: str, allowed_actions: list[str]) -> str:
+    """High-priority recovery instruction after a cached MCP hit.
+
+    Weak ReAct models often read the prose "勿重跑" but still repeat the MCP call.
+    Give them one exact executable line for the next round while preserving the
+    hard-stop if they ignore it.
+    """
+    path = _cached_reference_path(text)
+    if not path:
+        return "【缓存命中】上一个 MCP 结果已落盘。不要重复调用同一 MCP；请改用 READ/SHELL 读取缓存文件，或基于已有结果输出 FINAL。"
+    allowed = set(allowed_actions or [])
+    if "file_read" in allowed:
+        action = f"READ: {path}"
+    elif "shell" in allowed:
+        action = f"SHELL: cat {path}"
+    else:
+        action = "FINAL: <基于已有缓存结果说明当前进度/缺口>"
+    return (
+        "【缓存命中·必须换路】上一个 MCP 查询已经命中缓存/落盘。"
+        "不要再次调用同一个 MCP tool+args；下一轮请直接输出下面这一行可执行指令：\n"
+        f"{action}"
+    )
 
 
 # react-engine-v10 R2/R3: READ/SHELL/SEARCH result dedup (mirrors MCP query_cache).

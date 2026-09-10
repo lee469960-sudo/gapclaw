@@ -47,6 +47,57 @@ def test_protocol_example_in_prose_is_not_a_tool_call():
     assert steps == []
 
 
+def test_whole_json_mcp_wrapper_is_normalized():
+    steps = extract_tool_steps(
+        '{"name":"MCP","arguments":{"tool_name":"get_note_quick_note","id":"09月04日录音笔记ID"}}'
+    )
+
+    assert len(steps) == 1
+    assert steps[0].action == "mcp_tool_call"
+    assert steps[0].reply == 'MCP: get_note_quick_note {"id": "09月04日录音笔记ID"}'
+
+
+def test_whole_json_direct_mcp_tool_name_is_normalized():
+    steps = extract_tool_steps(
+        '{"name":"get_note_quick_note","arguments":{"id":"0904_recording_notes"}}'
+    )
+
+    assert len(steps) == 1
+    assert steps[0].action == "mcp_tool_call"
+    assert steps[0].reply == 'MCP: get_note_quick_note {"id": "0904_recording_notes"}'
+
+
+def test_fenced_json_tool_object_is_normalized():
+    steps = extract_tool_steps(
+        '```json\n{"name":"MCP","arguments":{"tool_name":"list_log_sources"}}\n```'
+    )
+
+    assert len(steps) == 1
+    assert steps[0].action == "mcp_tool_call"
+    assert steps[0].reply == "MCP: list_log_sources {}"
+
+
+def test_multiple_json_tool_objects_are_normalized():
+    steps = extract_tool_steps(
+        '{"name":"MCP","arguments":{}}\n'
+        '{"name":"log_stats","arguments":{"source":"api","minutes":60}}\n'
+        '{"name":"search_log","arguments":{"source":"api","level":"ERROR","limit":80}}'
+    )
+
+    assert [s.reply for s in steps] == [
+        'MCP: log_stats {"source": "api", "minutes": 60}',
+        'MCP: search_log {"source": "api", "level": "ERROR", "limit": 80}',
+    ]
+
+
+def test_json_tool_object_embedded_in_prose_is_not_executed():
+    steps = extract_tool_steps(
+        '示例：{"name":"MCP","arguments":{"tool_name":"get_note_quick_note","id":"x"}}'
+    )
+
+    assert steps == []
+
+
 def test_shell_inside_think_block_is_never_executed():
     reply = "<think>\nSHELL: Actually I think the prior turn is complete\n</think>\nFINAL: 完成"
 

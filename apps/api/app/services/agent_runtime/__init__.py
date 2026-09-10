@@ -5,7 +5,9 @@ from app.services.agent_runtime.context import AgentContext, CodeExecutionContex
 from app.services.agent_runtime.context_manager import ContextManager
 from app.services.agent_runtime.hub import (
     ChatStreamHub,
+    clear_auto_start_block,
     hub,
+    is_auto_start_blocked,
     is_running,
     stop_chat,
     _running,
@@ -20,7 +22,9 @@ __all__ = [
     "run_agent",
     # Hub
     "ChatStreamHub",
+    "clear_auto_start_block",
     "hub",
+    "is_auto_start_blocked",
     "is_running",
     "stop_chat",
     "_running",

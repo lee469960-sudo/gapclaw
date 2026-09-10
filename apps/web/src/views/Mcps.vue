@@ -42,6 +42,9 @@
           <el-tag size="small" :type="row.visibility === 'public' ? 'success' : 'info'">
             {{ row.visibility === 'public' ? '公共' : '私有' }}
           </el-tag>
+          <el-tag v-if="row.routing_eligible === false" size="small" type="warning">
+            不参与自动路由：请补充描述或标签
+          </el-tag>
         </div>
         <div class="card-actions">
           <el-button size="small" type="warning" plain :loading="connectingId === row.id" @click="openTools(row)">

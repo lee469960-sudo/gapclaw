@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import LLMResource
 from app.routers.llm import LLMBody, llm_post
-from app.services.llm_client import LLMGroupCycleError, chat_completion
+from app.services.llm_client import LLMGroupCycleError, _clear_llm_throttle_circuit, chat_completion
 
 
 def _make_db():
@@ -179,6 +179,7 @@ class _StatusClient:
 
 
 def test_group_flat_failures_single_layer_message():
+    _clear_llm_throttle_circuit()
     db = _make_db()
     _leaf(db, "leaf1")
     _leaf(db, "leaf2")
@@ -203,3 +204,54 @@ def test_group_flat_failures_single_layer_message():
     msg = asyncio.run(_run())
     assert msg.count("模型组全部失败") == 1  # 单层，不嵌套爆炸
     assert "529" in msg
+
+
+def test_group_throttling_skips_same_endpoint_but_reaches_local_fallback():
+    _clear_llm_throttle_circuit()
+    db = _make_db()
+    _leaf(db, "leaf1")
+    _leaf(db, "leaf2")
+    db.add(
+        LLMResource(
+            id="local",
+            type="llm",
+            name="local",
+            provider="ollama",
+            base_url="http://127.0.0.1:11434/v1",
+            api_key_enc="enc",
+            model="qwen2.5-coder:7b",
+        )
+    )
+    db.commit()
+    _group(db, "g1", ["leaf1", "leaf2", "local"])
+    llm = db.query(LLMResource).filter(LLMResource.id == "g1").first()
+    endpoints = []
+
+    class _OkResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "LOCAL OK"}}]}
+
+    class CountingStatusClient(_StatusClient):
+        async def post(self, url, *_args, **_kwargs):
+            endpoints.append(str(url))
+            if "127.0.0.1:11434" in str(url):
+                return _OkResponse()
+            return _StatusResponse(429)
+
+    async def _run():
+        with patch("app.services.llm_client.decrypt_secret", return_value="secret"):
+            with patch(
+                "app.services.llm_client.httpx.AsyncClient",
+                lambda **kw: CountingStatusClient(status=429),
+            ):
+                with patch("app.services.llm_client.asyncio.sleep", new=AsyncMock()):
+                    return await chat_completion(llm, [{"role": "user", "content": "hi"}], db=db)
+
+    assert asyncio.run(_run()) == "LOCAL OK"
+    assert endpoints == [
+        "https://example.test/v1/chat/completions",
+        "http://127.0.0.1:11434/v1/chat/completions",
+    ]

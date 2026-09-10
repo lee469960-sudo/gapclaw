@@ -6,7 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.database import SessionLocal
 from app.models import Agent, AgentTick
-from app.services.agent_runtime import run_agent
+from app.services.agent_runtime import is_auto_start_blocked, is_running, run_agent
 
 logger = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
@@ -22,6 +22,18 @@ def _run_tick(tick_id: str):
             return
         agent = db.query(Agent).filter(Agent.id == tick.agent_id).first()
         if not agent:
+            return
+        if is_auto_start_blocked(tick.agent_id, tick.session_id):
+            logger.info(
+                "tick %s skipped because chat is manually stopped agent=%s session=%s",
+                tick_id, tick.agent_id, tick.session_id,
+            )
+            return
+        if is_running(tick.agent_id, tick.session_id):
+            logger.info(
+                "tick %s skipped because chat is already running agent=%s session=%s",
+                tick_id, tick.agent_id, tick.session_id,
+            )
             return
         asyncio.run(run_agent(db, agent, tick.session_id, tick.message or "定时任务"))
     except Exception as e:

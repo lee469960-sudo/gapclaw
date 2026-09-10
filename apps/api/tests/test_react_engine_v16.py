@@ -260,6 +260,83 @@ def test_repeated_cached_mcp_reference_hard_stops_before_budget_exhaustion():
     assert "200" not in result
 
 
+def test_cached_mcp_reference_injects_exact_read_recovery_hint():
+    calls = 0
+    seen_messages: list[list[dict]] = []
+
+    async def _tool_executor(action, normalized):
+        nonlocal calls
+        calls += 1
+        if action == "mcp_tool_call":
+            return "该结果已缓存/已落盘，请直接读取 task/1/mcp_result_1.json，勿重复调用。"
+        if action == "file_read":
+            assert normalized == "READ: task/1/mcp_result_1.json"
+            return '{"rows":[{"ok":true}]}'
+        raise AssertionError(action)
+
+    ctx = _fake_ctx(
+        allowed_actions=["mcp_tool_call", "file_read"],
+        tool_executor=_tool_executor,
+    )
+    ctx.agent.max_iterations = 5
+
+    async def _chat(llm, messages, **_kw):
+        seen_messages.append([dict(m) for m in messages])
+        if len(seen_messages) == 1:
+            return ChatResult(text='MCP: daily {"ts_code":"600519.SH","trade_date":"20260901"}')
+        joined = "\n".join(str(m.get("content", "")) for m in messages)
+        if len(seen_messages) == 2:
+            assert "READ: task/1/mcp_result_1.json" in joined
+            return ChatResult(text="READ: task/1/mcp_result_1.json")
+        assert '{"rows":[{"ok":true}]}' in joined
+        return ChatResult(text="FINAL: 已读取缓存结果并完成")
+
+    async def _run():
+        with _patched_runtime(
+            _chat,
+            distill=AsyncMock(return_value="不应走到预算耗尽"),
+        ):
+            return await AgentRuntime().run(ctx)
+
+    result = asyncio.run(_run())
+
+    assert calls == 2
+    assert result == "已读取缓存结果并完成"
+    assert "连续 3 次重复请求已缓存的 MCP 结果" not in result
+
+
+def test_repeated_file_read_cache_hit_does_not_trigger_mcp_cached_hard_stop():
+    calls = 0
+
+    async def _tool_executor(action, normalized):
+        nonlocal calls
+        calls += 1
+        assert action == "file_read"
+        return "cached file content"
+
+    ctx = _fake_ctx(
+        allowed_actions=["file_read"],
+        tool_executor=_tool_executor,
+    )
+    ctx.agent.max_iterations = 4
+
+    async def _chat(llm, messages, **_kw):
+        return ChatResult(text="READ: task/1/mcp_result_1.json")
+
+    async def _run():
+        with _patched_runtime(
+            _chat,
+            distill=AsyncMock(return_value="达到预算但不是 MCP 缓存硬停"),
+        ):
+            return await AgentRuntime().run(ctx)
+
+    result = asyncio.run(_run())
+
+    assert calls == 1
+    assert result == "达到预算但不是 MCP 缓存硬停"
+    assert "连续 3 次重复请求已缓存的 MCP 结果" not in result
+
+
 # ---- R2 需求感知完成度复核 ----
 
 

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 # ---- MCP tool metadata cache ----
 
-_mcp_tools_cache: dict[str, tuple[float, list[dict], str]] = {}
+_mcp_tools_cache: dict[tuple[str, str], tuple[float, list[dict], str]] = {}
 _MCP_TOOLS_TTL_SEC: float = 600.0
 _MCP_TOOLS_PROMPT_LIMIT: int = 30
 
@@ -75,8 +75,9 @@ async def _get_mcp_tools_cached(mcp: MCP) -> tuple[list[dict], str]:
     as a soft "数据源不可达" warning instead of hardcoding tool names.
     """
     mid = mcp.id or ""
+    cache_key = (mid, str(getattr(mcp, "modified_at", "") or ""))
     now = time.monotonic()
-    hit = _mcp_tools_cache.get(mid)
+    hit = _mcp_tools_cache.get(cache_key)
     if hit and now - hit[0] < _MCP_TOOLS_TTL_SEC:
         return hit[1], hit[2]
     try:
@@ -84,11 +85,11 @@ async def _get_mcp_tools_cached(mcp: MCP) -> tuple[list[dict], str]:
         detail = await connect_mcp_detail(mcp)
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"[:200]
-        _mcp_tools_cache[mid] = (now, [], err)
+        _mcp_tools_cache[cache_key] = (now, [], err)
         return [], err
     tools = detail.get("tools") or []
     err = str(detail.get("error") or "").strip()
-    _mcp_tools_cache[mid] = (now, tools, err)
+    _mcp_tools_cache[cache_key] = (now, tools, err)
     return tools, err
 
 

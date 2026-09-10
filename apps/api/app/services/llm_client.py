@@ -3,8 +3,10 @@ import json
 import logging
 import random
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.orm import Session
@@ -89,6 +91,17 @@ def is_minimax_llm(llm) -> bool:
     return "minimax" in (getattr(llm, "base_url", "") or "").lower()
 
 
+def supports_native_tools(llm) -> bool:
+    """Whether this leaf provider should receive OpenAI-style ``tools``.
+
+    Local Ollama models are more reliable in this runtime via the text protocol
+    prompt (MCP:/SHELL:/FINAL:) than via OpenAI-compatible native tool schemas.
+    The check runs on the resolved leaf model, so an OpenAI-flavored group does
+    not force native tools onto an Ollama child.
+    """
+    return (getattr(llm, "provider", "") or "").strip().lower() != "ollama"
+
+
 def normalize_chat_messages(messages: list[dict]) -> list[dict]:
     """Prepare messages for strict OpenAI-compatible providers (e.g. MiniMax).
 
@@ -161,6 +174,10 @@ class LLMHTTPError(RuntimeError):
     """HTTP-status LLM failure (e.g. 400 — parameter/request error, needs fixing)."""
 
 
+class LLMProviderThrottled(LLMHTTPError):
+    """Provider/account is rate-limited. Do not fan out or retry aggressively."""
+
+
 class LLMGroupCycleError(RuntimeError):
     """模型组成员解析成环或嵌套过深（react-engine-v11 R2）。
 
@@ -179,6 +196,33 @@ _MIN_RETRY_ALLOWED_OUT = 2048
 # Max continuation rounds inside a single chat_completion when finish_reason=length.
 _MAX_LENGTH_CONTINUATIONS = 2
 _LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens"})
+_THROTTLE_CIRCUIT_SECONDS = 5 * 60
+_throttle_circuit_open_until: dict[str, float] = {}
+
+
+def _llm_throttle_key(llm) -> str:
+    return f"{getattr(llm, 'provider', '') or '-'}:{_safe_endpoint_category(getattr(llm, 'base_url', '') or '')}"
+
+
+def _clear_llm_throttle_circuit() -> None:
+    _throttle_circuit_open_until.clear()
+
+
+def _open_llm_throttle_circuit(llm, *, seconds: int = _THROTTLE_CIRCUIT_SECONDS) -> None:
+    _throttle_circuit_open_until[_llm_throttle_key(llm)] = time.time() + max(1, seconds)
+
+
+def _raise_if_llm_throttle_circuit_open(llm) -> None:
+    key = _llm_throttle_key(llm)
+    until = _throttle_circuit_open_until.get(key, 0.0)
+    now = time.time()
+    if until <= now:
+        _throttle_circuit_open_until.pop(key, None)
+        return
+    remaining = max(1, int(until - now))
+    raise LLMProviderThrottled(
+        f"LLM provider 已因 429 限流进入熔断，{remaining}s 后再试（endpoint={key}）"
+    )
 
 
 @dataclass
@@ -261,6 +305,10 @@ def _tool_call_to_step(call: dict) -> ToolStep | None:
             )
             norm = tool_args.strip() if isinstance(tool_args, str) else json.dumps(tool_args or {}, ensure_ascii=False)
             step = ToolStep("mcp_tool_call", f"MCP: {tool_name} {norm}")
+    elif lower_name == "mcp_route_request":
+        need = _tool_arg(args_obj, "need")
+        if need:
+            step = ToolStep("mcp_route_request", f"MCP_ROUTE: {need}")
     elif lower_name == "httpmcp_call":
         tool_name = _tool_arg(args_obj, "tool_name", "tool", "name")
         if tool_name:
@@ -589,15 +637,59 @@ def _extract_api_error_text(response: httpx.Response | None) -> str:
 def _retryable_status_attempts(status: int) -> int:
     """Retry budget for transient HTTP statuses; 0 means not retryable.
 
-    react-engine-v10 R5: 529 (overload) / 429 (rate-limit) → 3 attempts;
-    502/503/504 (transient 5xx) → 5 attempts. Deterministic failures (400/401/
+    react-engine-v10 R5: 529 (overload) → 3 attempts; 429 (rate-limit) → 1
+    attempt plus provider circuit-breaker; 502/503/504 (transient 5xx) → 5 attempts.
+    Deterministic failures (400/401/
     2013/1026/1027) return 0 so they re-raise straight to the caller.
     """
-    if status in (529, 429):
+    if status == 429:
+        return 1
+    if status == 529:
         return 3
     if status in (502, 503, 504):
         return 5
     return 0
+
+
+def _safe_endpoint_category(base_url: str) -> str:
+    parsed = urlparse(base_url or "")
+    if not parsed.netloc:
+        return "unknown"
+    path = (parsed.path or "").rstrip("/") or "/"
+    return f"{parsed.netloc}{path}"
+
+
+def _llm_http_failure_class(status: int) -> str:
+    if status in (429, 529):
+        return "throttling"
+    if status in (502, 503, 504):
+        return "transient_http"
+    return "http_error"
+
+
+def _log_llm_retry(
+    *,
+    llm,
+    failure_class: str,
+    status: int | None,
+    attempt: int,
+    max_attempts: int,
+    backoff_s: float,
+    exception_type: str,
+) -> None:
+    logger.warning(
+        "LLM retry component=llm class=%s provider=%s model=%s status=%s "
+        "attempt=%d max_attempts=%d backoff_s=%.2f exception=%s endpoint=%s",
+        failure_class,
+        getattr(llm, "provider", "") or "-",
+        getattr(llm, "model", "") or "-",
+        status if status is not None else "-",
+        attempt,
+        max_attempts,
+        backoff_s,
+        exception_type,
+        _safe_endpoint_category(getattr(llm, "base_url", "") or ""),
+    )
 
 
 def format_llm_http_error(exc: httpx.HTTPStatusError) -> str:
@@ -901,6 +993,9 @@ async def chat_completion(
                     collect_native=collect_native,
                     _visited=visited, _depth=_depth + 1,
                 )
+            except LLMProviderThrottled as e:
+                last_err = e
+                continue
             except LLMGroupCycleError:
                 raise
             except Exception as e:
@@ -914,6 +1009,7 @@ async def chat_completion(
     if is_masked_secret(api_key):
         raise RuntimeError("API Key 无效（保存了脱敏占位符），请在 LLM 管理中重新填写完整密钥")
     endpoint = openai_chat_completions_url(llm.base_url, llm.provider)
+    _raise_if_llm_throttle_circuit_open(llm)
     # Prefer explicit timeout (e.g. Agent.llm_timeout) over LLM resource default
     resolved_timeout = timeout if timeout is not None else getattr(llm, "llm_timeout", None)
     resolved_timeout = int(resolved_timeout) if resolved_timeout else 120
@@ -933,7 +1029,7 @@ async def chat_completion(
             "messages": payload_messages,
             "max_tokens": out_tokens,
         }
-        if tools:
+        if tools and supports_native_tools(llm):
             body["tools"] = tools
         if is_minimax_llm(llm):
             # Keep M3 thinking out of `content` (separate reasoning_details field),
@@ -989,6 +1085,7 @@ async def chat_completion(
         attempt = 0
         while attempt < max(1, budget if budget is not None else attempts):
             _raise_if_stopped()
+            next_delay = 0.0
             try:
                 return await _post(payload_messages, out_tokens)
             except ChatStopped:
@@ -997,27 +1094,54 @@ async def chat_completion(
                 last_error = exc
                 if budget is None:
                     budget = attempts
-                logger.warning(
-                    "LLM transport failed model=%s attempt=%d/%d type=%s error=%r",
-                    llm.model, attempt + 1, budget, type(exc).__name__, exc,
+                if attempt + 1 < budget:
+                    base = 2.0 * (2 ** attempt)
+                    next_delay = base + random.uniform(0.0, 0.25) * base
+                _log_llm_retry(
+                    llm=llm,
+                    failure_class="network_connectivity",
+                    status=None,
+                    attempt=attempt + 1,
+                    max_attempts=budget,
+                    backoff_s=next_delay,
+                    exception_type=type(exc).__name__,
                 )
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
+                if status == 429:
+                    _open_llm_throttle_circuit(llm)
+                    _log_llm_retry(
+                        llm=llm,
+                        failure_class=_llm_http_failure_class(status),
+                        status=status,
+                        attempt=attempt + 1,
+                        max_attempts=1,
+                        backoff_s=0.0,
+                        exception_type=type(exc).__name__,
+                    )
+                    raise LLMProviderThrottled(
+                        f"{format_llm_http_error(exc)}（端点 {llm.base_url}）"
+                    ) from exc
                 n = _retryable_status_attempts(status)
                 if n <= 0:
                     raise  # deterministic → caller's sensitive-input / error path
                 last_error = exc
                 if budget is None:
                     budget = n
-                logger.warning(
-                    "LLM HTTP retryable failed model=%s status=%d attempt=%d/%d",
-                    llm.model, status, attempt + 1, budget,
+                if attempt + 1 < budget:
+                    base = 2.0 * (2 ** attempt)
+                    next_delay = base + random.uniform(0.0, 0.25) * base
+                _log_llm_retry(
+                    llm=llm,
+                    failure_class=_llm_http_failure_class(status),
+                    status=status,
+                    attempt=attempt + 1,
+                    max_attempts=budget,
+                    backoff_s=next_delay,
+                    exception_type=type(exc).__name__,
                 )
-            if attempt + 1 < (budget if budget is not None else attempts):
-                # Exponential backoff 2/4/8/16s + random jitter (up to +25%).
-                base = 2.0 * (2 ** attempt)
-                jitter = random.uniform(0.0, 0.25) * base
-                await asyncio.sleep(base + jitter)
+            if next_delay > 0:
+                await asyncio.sleep(next_delay)
             attempt += 1
         assert last_error is not None
         if isinstance(last_error, httpx.HTTPStatusError):

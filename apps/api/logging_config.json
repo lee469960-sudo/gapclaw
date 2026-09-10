@@ -11,6 +11,11 @@
       "datefmt": "%Y-%m-%d %H:%M:%S"
     }
   },
+  "filters": {
+    "suppress_check_status_304": {
+      "()": "app.logging_filters.SuppressCheckStatus304Filter"
+    }
+  },
   "handlers": {
     "default": {
       "class": "logging.StreamHandler",
@@ -20,6 +25,7 @@
     "access": {
       "class": "logging.StreamHandler",
       "formatter": "access",
+      "filters": ["suppress_check_status_304"],
       "stream": "ext://sys.stdout"
     }
   },

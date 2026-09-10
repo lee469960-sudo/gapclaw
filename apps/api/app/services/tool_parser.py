@@ -1,5 +1,6 @@
 """Parse LLM tool invocations (plain WRITE:/SHELL: and MiniMax XML tool_call)."""
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -27,7 +28,7 @@ def _norm_path(path: str) -> str:
 # Canonical protocol marker list — single source of truth for parsing boundaries,
 # history-trimming, and display cleanup. Import this instead of re-listing markers.
 PROTOCOL_MARKERS = (
-    r"SHELL:|WRITE:|READ:|PATCH:|FINAL:|THINK:|MCP:|SKILL_MD:|RAG:|PLAN:|RECALL:|RUN_SKILL:|HTTPMCP:|SEARCH:"
+    r"SHELL:|WRITE:|READ:|PATCH:|FINAL:|THINK:|MCP_ROUTE:|MCP:|SKILL_MD:|RAG:|PLAN:|RECALL:|RUN_SKILL:|HTTPMCP:|SEARCH:"
 )
 
 # Leaked native tool-call special tokens (e.g. MiniMax <|tool_call|>) that pollute
@@ -63,6 +64,118 @@ def _parse_mcp_command(text: str) -> ToolStep | None:
     return _normalize_mcp_step(match.group(1), match.group(2))
 
 
+def _json_dumps(obj) -> str:
+    return json.dumps(obj or {}, ensure_ascii=False)
+
+
+def _json_tool_objects(text: str) -> list[dict]:
+    raw = (text or "").strip()
+    fenced = re.match(r"(?is)^```(?:json)?\s*([\s\S]*?)\s*```$", raw)
+    if fenced:
+        raw = fenced.group(1).strip()
+    if not raw.startswith("{"):
+        return []
+
+    decoder = json.JSONDecoder()
+    pos = 0
+    out: list[dict] = []
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace():
+            pos += 1
+        if pos >= len(raw):
+            break
+        if raw[pos] != "{":
+            return []
+        try:
+            obj, pos = decoder.raw_decode(raw, pos)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(obj, dict):
+            return []
+        out.append(obj)
+    return out
+
+
+def _tool_steps_from_json_object(obj: dict) -> list[ToolStep]:
+    if not isinstance(obj, dict):
+        return []
+    name = str(obj.get("name") or obj.get("tool") or "").strip()
+    args = obj.get("arguments", obj.get("args", obj.get("input", {})))
+    if isinstance(args, str):
+        try:
+            args_obj = json.loads(args)
+        except (TypeError, ValueError):
+            args_obj = None
+    elif isinstance(args, dict):
+        args_obj = args
+    else:
+        args_obj = None
+
+    lower_name = name.lower()
+    if lower_name in ("mcp", "mcp_tool_call"):
+        if not isinstance(args_obj, dict):
+            return []
+        tool_name = str(
+            args_obj.get("tool_name") or args_obj.get("tool") or args_obj.get("name") or ""
+        ).strip()
+        if not tool_name:
+            return []
+        if "arguments" in args_obj:
+            payload = args_obj.get("arguments")
+        elif "args" in args_obj:
+            payload = args_obj.get("args")
+        elif "input" in args_obj:
+            payload = args_obj.get("input")
+        else:
+            payload = {
+                k: v for k, v in args_obj.items()
+                if k not in {"tool_name", "tool", "name"}
+            }
+        payload_text = payload.strip() if isinstance(payload, str) else _json_dumps(payload)
+        return [_normalize_mcp_step(tool_name, payload_text)] if tool_name else []
+
+    if lower_name == "httpmcp_call":
+        if not isinstance(args_obj, dict):
+            return []
+        tool_name = str(
+            args_obj.get("tool_name") or args_obj.get("tool") or args_obj.get("name") or ""
+        ).strip()
+        if not tool_name:
+            return []
+        payload = args_obj.get("arguments", args_obj.get("args", args_obj.get("input", {})))
+        payload_text = payload.strip() if isinstance(payload, str) else _json_dumps(payload)
+        return [ToolStep("httpmcp_call", f"HTTPMCP: {tool_name} {payload_text}")]
+
+    if lower_name in ("done", "final"):
+        if isinstance(args_obj, dict):
+            answer = str(args_obj.get("answer") or "").strip()
+        else:
+            answer = args.strip() if isinstance(args, str) else ""
+        return [ToolStep("done", f"FINAL: {answer}", True)] if answer else []
+
+    # Unknown JSON tool name → assume it is a real bound MCP tool name, matching
+    # native tool_call normalization in llm_client._tool_call_to_step().
+    if name:
+        payload_text = args.strip() if isinstance(args, str) else _json_dumps(args_obj or args)
+        return [_normalize_mcp_step(name, payload_text)]
+
+    return []
+
+
+def _parse_json_tool_object(text: str) -> list[ToolStep]:
+    """Parse a whole-reply JSON tool object.
+
+    Some non-native providers emit the OpenAI tool-call shape as assistant text,
+    for example ``{"name":"MCP","arguments":{"tool_name":"x","id":"1"}}``.
+    Only parse when the *entire* cleaned reply is a JSON object; embedded JSON in
+    prose/docs must remain inert.
+    """
+    steps: list[ToolStep] = []
+    for obj in _json_tool_objects(text):
+        steps.extend(_tool_steps_from_json_object(obj))
+    return steps
+
+
 _SHELL_META_RE = re.compile(
     r"</?\s*(?:think|tool_call|action|parameter)\b|"
     r"^(?:actually|wait[, ]|looking at|let me|i (?:think|notice|need)|"
@@ -85,6 +198,7 @@ def _is_executable_shell_payload(value: str) -> bool:
 def _parse_plain_steps(text: str) -> list[ToolStep]:
     steps: list[ToolStep] = []
     patterns = [
+        (rf"^\s*MCP_ROUTE\s*[:：]\s*(.+?)(?=\n\s*(?:{_TOOL_BOUNDARY})|\Z)", "mcp_route_request", False),
         (rf"^\s*MCP\s*[:：]\s*(\S+)\s*([\s\S]*?)(?=\n\s*(?:{_TOOL_BOUNDARY})|\Z)", "mcp_tool_call", False),
         (r"^\s*SKILL_MD\s*[:：]\s*(.+?)(?=\n|$)", "skill_read_md", False),
         (r"^\s*RUN_SKILL\s*[:：]\s*(.+?)(?=\n|$)", "skill_run_script", False),
@@ -156,6 +270,10 @@ def _parse_plain_steps(text: str) -> list[ToolStep]:
                 args_raw = (m.group(2) or "").strip()
                 if tool_name:
                     steps.append(ToolStep(action, f"MCP: {tool_name} {args_raw}".strip(), is_final))
+            elif action == "mcp_route_request":
+                need = m.group(1).strip()
+                if need:
+                    steps.append(ToolStep(action, f"MCP_ROUTE: {need}", is_final))
             elif action == "skill_read_md":
                 sid = m.group(1).strip()
                 if sid:
@@ -382,7 +500,11 @@ def extract_tool_steps(reply: str) -> list[ToolStep]:
     # XML is parsed from the original envelope. Plain protocol is parsed only
     # after removing think/tool_call blocks so examples and hidden reasoning
     # cannot become executable actions.
-    for step in _parse_minimax_xml(reply) + _parse_plain_steps(cleaned):
+    for step in (
+        _parse_minimax_xml(reply)
+        + _parse_json_tool_object(cleaned)
+        + _parse_plain_steps(cleaned)
+    ):
         key = (step.action, step.reply[:120])
         if key in seen:
             continue

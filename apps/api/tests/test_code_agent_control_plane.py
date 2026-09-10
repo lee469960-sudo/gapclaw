@@ -268,7 +268,7 @@ def test_published_manifest_freezes_contract_and_policy_snapshot(monkeypatch):
         "test",
     ]
     assert effective_policy["coding_runtime"] == "legacy"
-    assert effective_policy["model_config"] == {"model_ref": "", "provider": "agent_llm"}
+    assert "model_config" not in effective_policy
     assert effective_policy["network"] is True
     assert effective_policy["policy_sources"]["network"] == "sandbox_binding"
     assert effective_policy["policy_sources"]["coding_runtime"] == "agent_profile"

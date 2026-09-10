@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -21,6 +22,89 @@ _task: asyncio.Task | None = None
 _offsets: dict[str, int] = {}
 _poll_error_at: dict[str, float] = {}
 _POLL_ERROR_THROTTLE_SEC = 60.0
+_POLL_RETRY_DELAY_SEC = 1.0
+
+
+@dataclass
+class _PollFailureStreak:
+    failure_class: str
+    exception_type: str
+    count: int = 0
+    first_seen: float = 0.0
+    last_seen: float = 0.0
+
+
+_poll_failure_streaks: dict[str, _PollFailureStreak] = {}
+
+
+def _poll_failure_class(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.TransportError):
+        return "network_connectivity"
+    return "polling_error"
+
+
+def _record_poll_failure(
+    channel_id: str,
+    exc: BaseException,
+    *,
+    retry_delay_s: float = _POLL_RETRY_DELAY_SEC,
+    exc_info: bool = True,
+) -> None:
+    now = time.monotonic()
+    failure_class = _poll_failure_class(exc)
+    exception_type = type(exc).__name__
+    prev = _poll_failure_streaks.get(channel_id)
+    changed = prev is None or prev.failure_class != failure_class
+    if changed:
+        streak = _PollFailureStreak(
+            failure_class=failure_class,
+            exception_type=exception_type,
+            count=1,
+            first_seen=now,
+            last_seen=now,
+        )
+        _poll_failure_streaks[channel_id] = streak
+        logger.error(
+            "telegram poll failed component=telegram class=%s channel=%s "
+            "exception=%s repeat_count=%d retry_delay_s=%.1f",
+            failure_class,
+            channel_id,
+            exception_type,
+            streak.count,
+            retry_delay_s,
+            exc_info=exc_info,
+        )
+        return
+
+    prev.count += 1
+    prev.last_seen = now
+    logger.warning(
+        "telegram poll failed aggregate component=telegram class=%s channel=%s "
+        "exception=%s repeat_count=%d retry_delay_s=%.1f duration_s=%.1f",
+        prev.failure_class,
+        channel_id,
+        prev.exception_type,
+        prev.count,
+        retry_delay_s,
+        prev.last_seen - prev.first_seen,
+    )
+
+
+def _record_poll_success(channel_id: str) -> None:
+    streak = _poll_failure_streaks.pop(channel_id, None)
+    if not streak:
+        return
+    logger.info(
+        "telegram poll recovered component=telegram channel=%s "
+        "previous_class=%s exception=%s repeat_count=%d duration_s=%.1f",
+        channel_id,
+        streak.failure_class,
+        streak.exception_type,
+        streak.count,
+        time.monotonic() - streak.first_seen,
+    )
 
 
 def _record_poll_error(channel_id: str, message: str) -> None:
@@ -46,14 +130,14 @@ def _record_poll_error(channel_id: str, message: str) -> None:
         db.close()
 
 
-async def _poll_once(channel: ImChannel) -> None:
+async def _poll_once(channel: ImChannel) -> bool:
     cfg = channel.get_config()
     # Default must match sync/UI (polling), not webhook — otherwise missing mode = dead channel
     if (cfg.get("mode") or "polling") != "polling":
-        return
+        return False
     token = cfg.get("bot_token") or ""
     if not token:
-        return
+        return False
     offset = _offsets.get(channel.id, 0)
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     async with httpx.AsyncClient(timeout=35) as client:
@@ -62,7 +146,12 @@ async def _poll_once(channel: ImChannel) -> None:
     if not data.get("ok"):
         desc = data.get("description") or str(data)
         _record_poll_error(channel.id, str(desc))
-        return
+        _record_poll_failure(
+            channel.id,
+            RuntimeError("telegram getUpdates returned ok=false"),
+            exc_info=False,
+        )
+        return False
     adapter = TelegramAdapter(channel.id, cfg)
     for upd in data.get("result") or []:
         _offsets[channel.id] = int(upd["update_id"]) + 1
@@ -74,6 +163,7 @@ async def _poll_once(channel: ImChannel) -> None:
         )
         if parsed.inbound and not parsed.skip_agent:
             await process_inbound(channel.id, parsed.inbound)
+    return True
 
 
 async def _loop() -> None:
@@ -96,11 +186,12 @@ async def _loop() -> None:
                     try:
                         fresh = db2.query(ImChannel).filter(ImChannel.id == ch.id).first()
                         if fresh:
-                            await _poll_once(fresh)
+                            if await _poll_once(fresh):
+                                _record_poll_success(ch.id)
                     finally:
                         db2.close()
-                except Exception:
-                    logger.exception("telegram poll failed for %s", ch.id)
+                except Exception as exc:
+                    _record_poll_failure(ch.id, exc)
         except Exception:
             logger.exception("telegram poller loop error")
         await asyncio.sleep(1)

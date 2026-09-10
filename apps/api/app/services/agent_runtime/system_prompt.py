@@ -21,6 +21,18 @@ if TYPE_CHECKING:
     from sqlmodel import Session
 
 
+class McpToolsCatalog(str):
+    """Prompt text plus the actual per-MCP discovery outcome.
+
+    It remains a ``str`` so existing prompt consumers retain their contract.
+    """
+
+    def __new__(cls, text: str, mcp_load_results: list[dict] | None = None):
+        value = super().__new__(cls, text)
+        value.mcp_load_results = list(mcp_load_results or [])
+        return value
+
+
 def _proactivity_hint(agent) -> str:
     """Soft clarify-vs-act instruction from agent.proactivity (1 conservative → 3 autonomous)."""
     try:
@@ -139,30 +151,36 @@ class SystemPromptBuilder:
         # live tool names when the endpoint answers, a soft "不可达" warning when
         # it doesn't — never a hardcoded per-MCP SOP (that lives in Skill references).
         mcp_lines: list[str] = []
+        mcp_load_results: list[dict] = []
         mcp_reachable = False
         if mcp_ids and "mcp_tool_call" in allowed:
             for mid in mcp_ids:
                 try:
                     mcp = db.query(MCP).filter(MCP.id == mid).first()
                     if not mcp:
+                        mcp_load_results.append({"mcp_id": str(mid), "status": "mcp_not_found"})
                         continue
                     tools, err = await _get_mcp_tools_cached(mcp)
                     name = mcp.name or mid
                     if err:
+                        mcp_load_results.append({"mcp_id": str(mid), "status": "tools_list_failed"})
                         mcp_lines.append(
                             f"- mcp {name}: 端点不可达 / tools/list 失败（{err[:160]}）。"
                             "本轮请勿反复重试 MCP 工具；确需该数据源时直接 `FINAL` 说明无法连接，"
                             "由用户检查 MCP 服务后重试。"
                         )
                     elif tools:
+                        mcp_load_results.append({"mcp_id": str(mid), "status": "catalog_loaded"})
                         mcp_reachable = True
                         mcp_lines.extend(_format_mcp_tools_for_prompt(name, tools))
                     else:
+                        mcp_load_results.append({"mcp_id": str(mid), "status": "catalog_empty"})
                         mcp_lines.append(
                             f"- mcp {name}: 已绑定，但 tools/list 返回空（该地址可能不是 MCP 端点）。"
                         )
                 except Exception:
                     logger.warning("Failed to load MCP tools for mid=%s", mid, exc_info=True)
+                    mcp_load_results.append({"mcp_id": str(mid), "status": "connection_failed"})
                     mcp_lines.append(f"- mcp (id={mid[:12]}): 连接失败，暂时不可用。")
 
         # HttpMcp catalog: local tool list (no network call), flattened to name+desc+args.
@@ -348,7 +366,7 @@ class SystemPromptBuilder:
         lines.append("- 大结果落盘：READ/SHELL 结果过大（超 4000 字符）或 MCP 查询返回超大结果时，引擎会自动把全量结果写入 task/<ts>/（如 shell_result_N.txt、read_result_N.txt、mcp_result_N.json），上下文只回显「路径 + 前几行预览 + 总长度」；请用 READ/SEARCH 按需取回所需片段，不要在上下文粘贴原始大结果。")
         lines.append("- 去重复用：重复的 READ/SHELL/SEARCH（同一路径 / 同一命令 / 同一 query）会命中缓存并回显「该结果已缓存」指针；请直接引用之前结果，不要重读 / 重跑相同动作。")
         lines.append("- done: 任务完成时调用 done(answer=…) 或输出 `FINAL: <answer>`（二者等效，二选一）")
-        return "\n".join(lines)
+        return McpToolsCatalog("\n".join(lines), mcp_load_results)
 
     @staticmethod
     def build_tool_schemas(allowed_actions: list[str]) -> list[dict]:
@@ -450,6 +468,11 @@ class SystemPromptBuilder:
                     "arguments": {"type": "object", "description": "Tool arguments object."},
                 },
                 ["tool_name"],
+            ))
+            tools.append(fn(
+                "mcp_route_request", "Request one additional MCP capability when selected MCPs are insufficient.",
+                {"need": {"type": "string", "description": "Missing capability and why it is needed."}},
+                ["need"],
             ))
         if "httpmcp_call" in allowed:
             tools.append(fn(

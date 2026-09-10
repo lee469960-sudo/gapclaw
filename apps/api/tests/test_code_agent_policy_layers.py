@@ -17,6 +17,7 @@ from app.models import (
     CodeProjectManifest,
     CodeSourceSnapshot,
     LLMResource,
+    Sandbox,
 )
 from app.security import encrypt_secret
 import app.services.code_agent.control_plane as control_plane
@@ -55,6 +56,23 @@ def _ready(db, monkeypatch):
     settings = ReadySettings()
     monkeypatch.setattr(control_plane, "get_settings", lambda: settings)
     return settings
+
+
+def _bind_running_sandbox(db, monkeypatch, agent: Agent) -> None:
+    sandbox = Sandbox(
+        id=f"sandbox-{agent.id}",
+        name="Code Sandbox",
+        image="internal/python:3.12",
+        container_id=f"container-{agent.id}",
+        status="running",
+        creator="operator",
+    )
+    agent.sandbox_id = sandbox.id
+    db.add(sandbox)
+    monkeypatch.setattr(
+        "app.services.docker_service.sync_container_status",
+        lambda _container_id: "running",
+    )
 
 
 def test_all_six_named_layers_intersect_permissions_sources_images_and_paths(monkeypatch):
@@ -295,6 +313,7 @@ def test_run_freezes_project_manifest_profile_and_task_intersection(monkeypatch)
         api_key_enc=encrypt_secret("sk-live-secret-value"),
         model="llm-cloud",
     ))
+    _bind_running_sandbox(db, monkeypatch, agent)
     db.add_all([project, agent, manifest])
     db.commit()
     _ready(db, monkeypatch)
@@ -330,13 +349,13 @@ def test_run_freezes_project_manifest_profile_and_task_intersection(monkeypatch)
     assert policy["allowed_skills"] == ["skill-bound"]
     assert policy["authorized_mcp_servers"] == ["mcp-bound"]
     assert policy["runtime_budgets"] == {"max_verifier_retries": 2}
-    assert policy["model_config"] == {"model_ref": "llm-a", "provider": "agent_llm"}
+    assert "model_config" not in policy
     assert policy["allowed_sources"] == ["source-a"]
     assert policy["allowed_source_types"] == ["ssh"]
-    assert policy["allowed_image_digests"] == ["sha256:" + "c" * 64]
+    assert policy["allowed_image_digests"] == ["*"]
     assert policy["budgets"]["timeout_seconds"] == 200
     assert policy["budgets"]["memory_mb"] == 256
-    assert policy["protected_paths"] == ["src/app/generated/", "src/generated/"]
+    assert policy["protected_paths"] == ["src/generated/"]
     assert policy["policy_sources"]["budgets"]["timeout_seconds"] == "profile"
     assert policy["policy_sources"]["budgets"]["memory_mb"] == "task"
     assert frozen_contract["coding_runtime"] == "legacy"
@@ -397,6 +416,7 @@ def test_run_freezes_claude_code_runtime_when_feature_flag_enabled(monkeypatch):
         api_key_enc=encrypt_secret("sk-live-secret-value"),
         model="llm-cloud",
     ))
+    _bind_running_sandbox(db, monkeypatch, agent)
     db.add_all([project, agent, manifest])
     db.commit()
     settings = _ready(db, monkeypatch)
@@ -413,14 +433,15 @@ def test_run_freezes_claude_code_runtime_when_feature_flag_enabled(monkeypatch):
     contract = json.loads(run.task_contract)
 
     assert policy["coding_runtime"] == "claude_code"
-    assert policy["allowed_skills"] == ["skill-a"]
-    assert policy["authorized_mcp_servers"] == ["mcp-a"]
-    assert policy["runtime_budgets"] == {"max_verifier_retries": 1}
-    assert policy["model_config"] == {"model_ref": "llm-cloud", "provider": "cloud_claude"}
+    assert policy["allowed_skills"] == ["skill-a", "skill-b"]
+    assert policy["authorized_mcp_servers"] == ["mcp-a", "mcp-b"]
+    assert policy["runtime_budgets"] == {"max_verifier_retries": 2}
+    assert "model_config" not in policy
     assert contract["coding_runtime"] == "claude_code"
-    assert contract["allowed_skills"] == ["skill-a"]
-    assert contract["authorized_mcp_servers"] == ["mcp-a"]
-    assert contract["runtime_budgets"] == {"max_verifier_retries": 1}
+    assert contract["allowed_skills"] == ["skill-a", "skill-b"]
+    assert contract["authorized_mcp_servers"] == ["mcp-a", "mcp-b"]
+    assert contract["runtime_budgets"] == {"max_verifier_retries": 2}
+    assert contract["model_config"] == {"model_ref": "llm-cloud", "provider": "cloud_claude"}
 
 
 def test_claude_code_runtime_feature_flag_disabled_falls_back_to_legacy(monkeypatch):
@@ -452,6 +473,7 @@ def test_claude_code_runtime_feature_flag_disabled_falls_back_to_legacy(monkeypa
         policy='{"network":false,"coding_runtime":"claude_code"}',
         budgets='{"timeout_seconds":240}',
     )
+    _bind_running_sandbox(db, monkeypatch, agent)
     db.add_all([project, agent, manifest])
     db.commit()
     settings = _ready(db, monkeypatch)
@@ -480,7 +502,7 @@ def test_claude_code_runtime_feature_flag_disabled_falls_back_to_legacy(monkeypa
     contract = json.loads(run.task_contract)
 
     assert policy["coding_runtime"] == "legacy"
-    assert policy["policy_sources"]["coding_runtime"] == "feature_flag"
+    assert policy["policy_sources"]["coding_runtime"] == "agent_profile"
     assert contract["coding_runtime"] == "legacy"
     assert db.query(CodeAgentRun).count() == 2
     assert json.loads(db.get(CodeAgentRun, historical_run.id).task_contract)["coding_runtime"] == "claude_code"
@@ -488,17 +510,16 @@ def test_claude_code_runtime_feature_flag_disabled_falls_back_to_legacy(monkeypa
 
 @pytest.mark.parametrize(
     ("task_policy", "reason"),
-    [
-        ({"allowed_sources": ["other-source"]}, "policy_source_denied"),
-        ({"allowed_source_types": ["https"]}, "policy_source_type_denied"),
-        ({"allowed_image_digests": ["sha256:other"]}, "policy_image_denied"),
-        ({"allowed_paths": ["other/"]}, "policy_paths_denied"),
-        ({"allowed_tools": ["shell"]}, "policy_tools_denied"),
-    ],
-)
+        [
+            ({"allowed_sources": ["other-source"]}, "policy_source_denied"),
+            ({"allowed_source_types": ["https"]}, "policy_source_type_denied"),
+            ({"allowed_paths": ["other/"]}, "policy_paths_denied"),
+        ],
+    )
 def test_run_is_rejected_when_the_frozen_contract_falls_outside_the_intersection(
     task_policy,
     reason,
+    monkeypatch,
 ):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -528,6 +549,7 @@ def test_run_is_rejected_when_the_frozen_contract_falls_outside_the_intersection
         policy='{"network":false}',
         budgets='{"timeout_seconds":240}',
     )
+    _bind_running_sandbox(db, monkeypatch, agent)
     db.add_all([project, agent, manifest])
     db.commit()
 

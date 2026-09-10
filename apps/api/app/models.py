@@ -149,6 +149,7 @@ class MCP(Base):
     modified_at: Mapped[str] = mapped_column(String(32), default="")
 
     def to_dict(self) -> dict:
+        routing_eligible = bool((self.description or "").strip() or (self.tags or "").strip())
         env = {}
         try:
             env = json.loads(self.command_env or "{}")
@@ -171,6 +172,8 @@ class MCP(Base):
             "allowed_users": _json_list(self.allowed_users),
             "creator": self.creator,
             "modified_at": self.modified_at,
+            "routing_eligible": routing_eligible,
+            "routing_status": "eligible" if routing_eligible else "missing_capability_metadata",
         }
 
 
@@ -253,6 +256,7 @@ class Agent(Base):
     httpmcps: Mapped[str] = mapped_column(Text, default="[]")
     max_iterations: Mapped[int] = mapped_column(Integer, default=150)
     history_length: Mapped[int] = mapped_column(Integer, default=30)
+    summary_max_words: Mapped[int] = mapped_column(Integer, default=5000)
     proactivity: Mapped[int] = mapped_column(Integer, default=2)
     llm_timeout: Mapped[int] = mapped_column(Integer, default=1800)
     skill_timeout: Mapped[int] = mapped_column(Integer, default=1800)
@@ -284,6 +288,7 @@ class Agent(Base):
             "httpmcps": _json_list(self.httpmcps),
             "max_iterations": self.max_iterations,
             "history_length": self.history_length,
+            "summary_max_words": self.summary_max_words or 5000,
             "proactivity": self.proactivity,
             "llm_timeout": self.llm_timeout,
             "skill_timeout": self.skill_timeout,

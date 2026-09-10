@@ -28,6 +28,7 @@ from app.services.agent_runtime.runtime import (
 )
 from app.services.llm_client import (
     LLMHTTPError,
+    _clear_llm_throttle_circuit,
     _retryable_status_attempts,
     chat_completion,
     format_llm_http_error,
@@ -207,7 +208,7 @@ def test_reflect_final_prompt_includes_deliverable_evidence(tmp_path):
 
 def test_retryable_status_attempts():
     assert _retryable_status_attempts(529) == 3
-    assert _retryable_status_attempts(429) == 3
+    assert _retryable_status_attempts(429) == 1
     assert _retryable_status_attempts(502) == 5
     assert _retryable_status_attempts(503) == 5
     assert _retryable_status_attempts(504) == 5
@@ -269,7 +270,8 @@ def _llm():
 
 
 def test_chat_completion_retries_retryable_http_status():
-    for status, expected in ((529, 3), (429, 3), (502, 5), (503, 5), (504, 5)):
+    for status, expected in ((529, 3), (429, 1), (502, 5), (503, 5), (504, 5)):
+        _clear_llm_throttle_circuit()
         _StatusClient.calls = 0
         llm = _llm()
 

@@ -72,7 +72,7 @@
           <div
             v-for="item in displayMessages"
             :key="item.key"
-            v-memo="[item.key, item.m.content, item.stepCount, isExecOpen(item.execKey), item.stepsLoading, item.steps.length, item.steps[0]?.title, item.steps[item.steps.length - 1]?.title]"
+            v-memo="[item.key, item.m.content, item.stepCount, isExecOpen(item.execKey), item.stepsLoading, item.steps.length, item.steps[0]?.title, item.steps[item.steps.length - 1]?.title, toolDetailRevision]"
             :class="['msg-row', item.m.role === 'user' ? 'user-row' : 'assistant-row']"
           >
             <div v-if="item.m.role !== 'user'" class="agent-avatar">
@@ -128,21 +128,32 @@
                     <div
                       v-for="(step, si) in (item.steps.length ? item.steps : [NO_TOOL_PLACEHOLDER_STEP])"
                       :key="si"
-                      class="exec-step"
+                      :class="['exec-step', { 'is-expandable': isToolStep(step) }]"
+                      :role="isToolStep(step) ? 'button' : undefined"
+                      :tabindex="isToolStep(step) ? 0 : undefined"
+                      @click="isToolStep(step) && toggleToolDetail(toolStepKey(item.execKey, si))"
+                      @keydown.enter.prevent="isToolStep(step) && toggleToolDetail(toolStepKey(item.execKey, si))"
                     >
                       <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
                       <div class="step-body">
                         <div class="step-title">
                           <span>{{ stepTitle(step) }}</span>
-                          <span v-if="stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
+                          <span v-if="!isToolStep(step) && stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
                         </div>
-                        <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
-                        <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
+                        <template v-if="isToolStep(step) && isToolDetailOpen(toolStepKey(item.execKey, si))">
+                          <pre class="step-snippet">{{ toolStepDetail(step) }}</pre>
+                          <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
+                        </template>
+                        <template v-else>
+                          <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
+                          <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
+                        </template>
                         <div v-if="step.checkpoint_path || step.sql_checkpoint_path" class="step-checkpoints">
                           <button v-if="step.checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.checkpoint_path)">轮次记录</button>
                           <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
                         </div>
                       </div>
+                      <el-icon v-if="isToolStep(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey(item.execKey, si)) }"><ArrowRight /></el-icon>
                       <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
                       <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
                       <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
@@ -206,22 +217,33 @@
                     <div
                       v-for="(step, si) in liveStepsView.steps"
                       :key="`${step.type}-${step.iteration || si}-${step.action || ''}-${si}`"
-                      v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length, step.snippet?.length]"
-                      class="exec-step"
+                      v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length, step.snippet?.length, toolDetailRevision]"
+                      :class="['exec-step', { 'is-expandable': isToolStep(step) }]"
+                      :role="isToolStep(step) ? 'button' : undefined"
+                      :tabindex="isToolStep(step) ? 0 : undefined"
+                      @click="isToolStep(step) && toggleToolDetail(toolStepKey('live', si))"
+                      @keydown.enter.prevent="isToolStep(step) && toggleToolDetail(toolStepKey('live', si))"
                     >
                       <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
                       <div class="step-body">
                         <div class="step-title">
                           <span>{{ stepTitle(step) }}</span>
-                          <span v-if="stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
+                          <span v-if="!isToolStep(step) && stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
                         </div>
-                        <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
-                        <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
+                        <template v-if="isToolStep(step) && isToolDetailOpen(toolStepKey('live', si))">
+                          <pre class="step-snippet">{{ toolStepDetail(step) }}</pre>
+                          <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
+                        </template>
+                        <template v-else>
+                          <div v-if="(step.status === 'error' || step.action === 'cte_attempt') && stepErrorDetail(step)" class="step-content">{{ stepErrorDetail(step) }}</div>
+                          <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
+                        </template>
                         <div v-if="step.checkpoint_path || step.sql_checkpoint_path" class="step-checkpoints">
                           <button v-if="step.checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.checkpoint_path)">轮次记录</button>
                           <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
                         </div>
                       </div>
+                      <el-icon v-if="isToolStep(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey('live', si)) }"><ArrowRight /></el-icon>
                       <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
                       <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
                       <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
@@ -313,6 +335,8 @@ const scrollRef = ref(null)
 const wpRef = ref(null)
 const codeWpRef = ref(null)
 const execOpen = ref({})
+const toolDetailOpen = ref({})
+const toolDetailRevision = ref(0)
 const unreadSessions = ref({})
 const inboundNotice = ref(null)
 let ws = null
@@ -702,6 +726,14 @@ function stepDetail(step) {
   return ''
 }
 
+function toolStepDetail(step) {
+  const detail = stepDetail(step)
+  if (detail) return detail
+  // Earlier messages stored only the action title.  Make the expansion
+  // visibly meaningful instead of leaving a rotated arrow with an empty pane.
+  return '此历史步骤未保存工具输出；后续执行会显示已脱敏、限长的执行结果。'
+}
+
 function sanitizeStepDetail(text) {
   let cleaned = String(text || '')
   if (!cleaned) return ''
@@ -867,6 +899,27 @@ function execKey(m, i) {
 function isExecOpen(key) {
   // Default collapsed — only open when explicitly set true
   return execOpen.value[String(key)] === true
+}
+
+function isToolStep(step) {
+  return step?.type === 'tool'
+}
+
+function toolStepKey(execKey, index) {
+  return `${String(execKey)}:${index}`
+}
+
+function isToolDetailOpen(key) {
+  return toolDetailOpen.value[String(key)] === true
+}
+
+function toggleToolDetail(key) {
+  const normalized = String(key)
+  toolDetailOpen.value = {
+    ...toolDetailOpen.value,
+    [normalized]: !isToolDetailOpen(normalized),
+  }
+  toolDetailRevision.value += 1
 }
 
 function toggleExec(key) {
@@ -1994,6 +2047,12 @@ onUnmounted(() => {
   padding: 10px 0;
   border-bottom: 1px solid var(--gap-card-border);
 }
+.exec-step.is-expandable { cursor: pointer; }
+.exec-step.is-expandable:hover { background: var(--gap-hover-bg); }
+.exec-step.is-expandable:focus-visible {
+  outline: 2px solid var(--gap-primary);
+  outline-offset: -2px;
+}
 .exec-step:last-child { border-bottom: none; }
 .step-glyph {
   flex-shrink: 0;
@@ -2010,6 +2069,13 @@ onUnmounted(() => {
 .step-status.done { color: #67c23a; }
 .step-status.error { color: #f56c6c; }
 .step-status.running { color: #409eff; }
+.step-detail-arrow {
+  flex-shrink: 0;
+  color: var(--gap-text-muted);
+  font-size: 13px;
+  transition: transform 0.2s;
+}
+.step-detail-arrow.open { transform: rotate(90deg); }
 .step-title {
   font-size: 13px;
   color: var(--gap-text);
@@ -2038,7 +2104,7 @@ onUnmounted(() => {
 .step-snippet {
   box-sizing: border-box;
   margin: 6px 0 0;
-  max-height: 220px;
+  max-height: min(420px, 55vh);
   overflow: auto;
   padding: 8px 10px;
   border: 1px solid var(--gap-card-border);

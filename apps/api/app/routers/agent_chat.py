@@ -15,7 +15,7 @@ from app.models import (
 )
 from app.schemas import ok, fail
 from app.security import new_id, now_str
-from app.services.agent_runtime import stop_chat, hub, is_running, run_agent
+from app.services.agent_runtime import clear_auto_start_block, stop_chat, hub, is_running, run_agent
 from app.services.session_summary import generate_session_summary
 from app.services import tick_scheduler
 from app.services.code_agent.control_plane import (
@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pages/page_agent_chat.cgi", tags=["agent-chat"])
 
 _HISTORY_STEPS_LIMIT = 0  # 0 = return all steps (no display cap)
+_EXECUTION_DETAIL_LIMIT = 12_000
 
 
 def _slim_meta_for_history(raw: str | None) -> dict:
@@ -130,10 +131,12 @@ def _steps_tail_for_message(raw: str | None, limit: int | None = None) -> dict:
         if isinstance(preview, str) and preview.strip():
             item["preview"] = preview[:300]
         content = s.get("content")
-        if isinstance(content, str) and content.strip() and (
-            s.get("status") == "error" or str(s.get("action") or "").startswith("code_")
-        ):
-            item["content"] = content[:400]
+        if isinstance(content, str) and content.strip():
+            # The execution accordion is the user's audit trail.  Returning
+            # only error/CodeAgent content made ordinary successful tools look
+            # expandable while their detail area was empty.  Keep the existing
+            # bounded payload, but redact it before it crosses the API boundary.
+            item["content"] = redact_code_output(content).text[:_EXECUTION_DETAIL_LIMIT]
         snippet = s.get("snippet")
         if str(s.get("action") or "").startswith("code_") and isinstance(snippet, str) and snippet.strip():
             item["snippet"] = snippet[:1200]
@@ -231,7 +234,7 @@ def _run_chat_bg(
                 )
             )
     finally:
-        stop_chat(agent_id or "", session_id or "")
+        stop_chat(agent_id or "", session_id or "", block_auto_start=False)
         db.close()
 
 
@@ -599,6 +602,7 @@ async def chat_post(
             body.message or "",
             (body.workplace_dir or "").strip(),
         )
+        clear_auto_start_block(body.agent_id or "", body.session_id or "")
         return ok({"status": "started"}, "已提交")
 
     if act == "stop_chat":
@@ -622,7 +626,7 @@ async def chat_post(
                 require_project_operator(user, project, db=db, resource=run)
             except CodeAuthorizationError as exc:
                 return fail(exc.reason)
-        stop_chat(aid, sid)
+        was_running = stop_chat(aid, sid)
         try:
             await hub.publish(f"{aid}:{sid}", {
                 "type": "done",
@@ -633,7 +637,7 @@ async def chat_post(
             })
         except Exception:
             logger.exception("stop_chat publish failed agent=%s session=%s", aid, sid)
-        return ok(None, "已停止")
+        return ok({"was_running": bool(was_running)}, "已停止")
 
     if act == "accept_code_artifact":
         artifact = db.query(CodeArtifact).filter(CodeArtifact.id == body.artifact_id).first()

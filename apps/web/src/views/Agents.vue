@@ -469,7 +469,10 @@
     <el-dialog v-model="mcpPickerVisible" title="选择 MCP" width="480px">
       <el-checkbox-group v-model="pickerMcps">
         <div v-for="m in mcps" :key="m.id" class="picker-item">
-          <el-checkbox :value="m.id">{{ m.name }} ({{ m.id }})</el-checkbox>
+          <el-checkbox :value="m.id">
+            {{ m.name }} ({{ m.id }})
+            <span v-if="m.routing_eligible === false" class="muted">— 不参与自动路由，请补充描述或标签</span>
+          </el-checkbox>
         </div>
       </el-checkbox-group>
       <template #footer>
