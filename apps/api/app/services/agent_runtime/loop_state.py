@@ -35,6 +35,9 @@ class AgentLoopState:
     selected_mcp_ids: list[str] = field(default_factory=list)  # LLM-routed subset for this run
     mcp_route_attempts: int = 0  # Bounded in-run supplementary route attempts
     mcp_route_events: list[dict] = field(default_factory=list)  # Redacted route audit records
+    model_route_decision_id: str = ""  # Persisted task-level route decision
+    frozen_llm_id: str = ""  # Single leaf model reused throughout this task
+    model_route_events: list[dict] = field(default_factory=list)  # Redacted decision/fallback audit records
 
     def add_progress(self, line: str) -> None:
         """Append a progress line, avoiding dupes and capping length."""

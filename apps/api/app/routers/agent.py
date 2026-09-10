@@ -12,6 +12,7 @@ from app.models import (
     CodeProject,
     CodeProjectManifest,
     LLMResource,
+    ModelRoutingPolicy,
     Sandbox,
     Skill,
     MCP,
@@ -36,6 +37,7 @@ class AgentBody(BaseModel):
     profile: str | None = None
     code_project_id: str | None = None
     llm: str | None = None
+    routing_policy_id: str | None = None
     sandbox: str | None = None
     skills: list[str] | None = None
     mcps: list[str] | None = None
@@ -168,6 +170,8 @@ def _agent_dict(a: Agent, db: Session, user: User) -> dict:
         d["llm_name"] = llm.name if llm else ""
     else:
         d["llm_name"] = ""
+    policy = db.get(ModelRoutingPolicy, a.routing_policy_id) if a.routing_policy_id else None
+    d["routing_policy_name"] = policy.name if policy else ""
     if a.sandbox_id:
         sb = db.query(Sandbox).filter(Sandbox.id == a.sandbox_id).first()
         d["sandbox_name"] = sb.name if sb else ""
@@ -232,6 +236,11 @@ def _agent_form_refs(db: Session, user: User) -> dict:
         for h in db.query(HttpMcp).all()
         if can_access_resource(user, h.visibility, h.allowed_users, h.creator)
     ]
+    routing_policies = [
+        {"id": policy.id, "name": policy.name}
+        for policy in db.query(ModelRoutingPolicy).all()
+        if can_access_resource(user, policy.visibility, policy.allowed_users, policy.creator)
+    ]
     code_projects = [
         {"id": p.id, "name": p.name, "availability": project_availability(db, p)}
         for p in db.query(CodeProject).filter(CodeProject.enabled == True).all()
@@ -240,6 +249,7 @@ def _agent_form_refs(db: Session, user: User) -> dict:
     return {
         "sandboxes": sandboxes, "llms": llms, "skills": skills, "mcps": mcps,
         "rags": rags, "httpmcps": httpmcps, "code_projects": code_projects,
+        "routing_policies": routing_policies,
     }
 
 
@@ -248,6 +258,8 @@ def _validate_refs(db: Session, body: AgentBody) -> str | None:
         return f"LLM 不存在: {body.llm}"
     if body.sandbox and not db.query(Sandbox).filter(Sandbox.id == body.sandbox).first():
         return f"沙箱不存在: {body.sandbox}"
+    if body.routing_policy_id and not db.get(ModelRoutingPolicy, body.routing_policy_id):
+        return f"路由策略不存在: {body.routing_policy_id}"
     if body.rags is not None:
         for rid in body.rags:
             if not db.query(RagCorpus).filter(RagCorpus.id == rid).first():
@@ -295,6 +307,9 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
         selected_profile = body.profile if body.profile is not None else (a.profile if a else "standard")
         selected_project_id = body.code_project_id if body.code_project_id is not None else (a.code_project_id if a else "")
         selected_llm_id = body.llm if body.llm is not None else (a.llm_id if a else "")
+        selected_policy_id = body.routing_policy_id if body.routing_policy_id is not None else (a.routing_policy_id if a else "")
+        if not err and (selected_profile or "standard") == "code" and selected_policy_id:
+            err = "routing_policy_not_supported_for_code_profile"
         if not err:
             err = _validate_code_profile_selection(
                 db,
@@ -303,6 +318,10 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
                 selected_project_id,
                 selected_llm_id,
             )
+        if not err and selected_policy_id:
+            policy = db.get(ModelRoutingPolicy, selected_policy_id)
+            if policy is None or not can_access_resource(user, policy.visibility, policy.allowed_users, policy.creator):
+                err = "routing_policy_unauthorized"
         if err:
             guidance = claude_code_llm_repair_guidance(err)
             return fail(err, data={"reason": err, **guidance} if guidance else None)
@@ -329,6 +348,8 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
             a.code_project_id = body.code_project_id
         if body.llm:
             a.llm_id = body.llm
+        if body.routing_policy_id is not None:
+            a.routing_policy_id = body.routing_policy_id
         if body.sandbox:
             a.sandbox_id = body.sandbox
         if body.skills is not None:

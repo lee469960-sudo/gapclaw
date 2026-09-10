@@ -39,6 +39,8 @@ def _valid_spec(**overrides):
         "workspace_mount_target": "/workspace",
         "network_mode": "none",
         "network_targets": [],
+        "run_as_root": False,
+        "dependency_bootstrap": False,
         "privileged": False,
         "cap_drop": ["ALL"],
         "no_new_privileges": True,

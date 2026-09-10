@@ -158,7 +158,7 @@ def test_native_blocked_backfills_synthetic_result():
     assert any(m.get("tool_call_id") == "call_1" for m in tool_msgs)
 
 
-def test_native_skipped_backfills_final_first_result():
+def test_native_final_skips_same_round_tools_without_reinvoking_the_model():
     db = _make_db()
     ctx = _fake_ctx(db, allowed_actions=["shell"])
     # Completed subtasks so FINAL still reaches the Verifier; this test
@@ -187,13 +187,10 @@ def test_native_skipped_backfills_final_first_result():
     result = _run(ctx, _chat)
     assert result == "完成"
 
-    second = main_calls[1]
-    tool_msgs = [m for m in second if m.get("role") == "tool"]
-    assert any("FINAL 优先，未执行" in (m.get("content") or "") for m in tool_msgs)
-    assert any(m.get("tool_call_id") == "call_s" for m in tool_msgs)
+    assert len(main_calls) == 1
 
 
-def test_native_final_rejected_by_reflect_backfills_tool_result():
+def test_native_final_reflection_does_not_replay_the_task():
     db = _make_db()
     ctx = _fake_ctx(db, allowed_actions=["shell"])
     _save_run_state(ctx, AgentLoopState(
@@ -219,10 +216,7 @@ def test_native_final_rejected_by_reflect_backfills_tool_result():
     result = _run(ctx, _chat)
 
     assert result == "完成"
-    second = main_calls[1]
-    tool_msgs = [m for m in second if m.get("role") == "tool"]
-    assert any(m.get("tool_call_id") == "call_f" for m in tool_msgs)
-    assert any("完成度复核未通过" in (m.get("content") or "") for m in tool_msgs)
+    assert len(main_calls) == 1
 
 
 # ---- 9.3: dynamic-layer truncation protection (D3) ----
@@ -283,13 +277,9 @@ def test_reject_convergence_and_fix_list_backfill():
     result = _run(ctx, _chat)
 
     assert result == "完成"
-    assert len(main_calls) == 3  # 3 consecutive rejects → converge, accept candidate
-    # fix_list carried into the coach hint on the following rounds.
-    round2_system = "\n".join(
-        m["content"] for m in main_calls[1] if m["role"] == "system"
-    )
-    assert "补最终 SQL" in round2_system
-    assert "修复清单" in round2_system
+    # Completion review is advisory: it must not replay a completed task and
+    # risk duplicate tool execution or repeated inference.
+    assert len(main_calls) == 1
 
 
 # ---- 9.5: mcp_results bounded + native in-loop trim (D6/D7) ----

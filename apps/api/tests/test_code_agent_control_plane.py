@@ -20,6 +20,7 @@ from app.models import (
     CodeDeployCredential,
     CodeProject,
     CodeProjectManifest,
+    CodeSourceSnapshot,
     Sandbox,
 )
 import app.services.code_agent.control_plane as control_plane
@@ -75,15 +76,15 @@ def _manifest(db, *, status="published", requested_ref="main"):
         credential_ref="deploy-token-ref",
         requested_ref=requested_ref,
         repository="ssh://git.internal/example/repo.git",
-        base_commit="",
-        resolved_commit="",
-        snapshot_id="",
-        snapshot_hash="",
-        source_scan_report_id="",
+        base_commit="a" * 40,
+        resolved_commit="a" * 40,
+        snapshot_id="snapshot1",
+        snapshot_hash="b" * 64,
+        source_scan_report_id="scan1",
         allowed_paths="[]",
         validation_plan='[{"command": "pytest -q"}]',
         trusted_image="internal/python:3.12",
-        image_digest="",
+        image_digest="sha256:" + "c" * 64,
         security_schema_version=1,
         allowed_tools='["read", "search", "edit", "test"]',
         policy='{"network": false}',
@@ -98,8 +99,7 @@ def _secure_fixture(db, monkeypatch):
     """Seed active deploy credential and mock ready settings.
 
     ``create_code_run`` requires a published Git config, a visible credential,
-    and a running bound Sandbox. The actual commit is resolved later by runtime
-    Git sync inside that Sandbox.
+    a sealed immutable source snapshot, and a running bound Sandbox.
     """
     db.add(CodeDeployCredential(
         id="deploy-token-ref",
@@ -110,6 +110,17 @@ def _secure_fixture(db, monkeypatch):
         allowed_project_ids='["project1"]',
         read_only=True,
         status="active",
+    ))
+    db.add(CodeSourceSnapshot(
+        id="snapshot1",
+        source_id="source1",
+        resolved_commit="a" * 40,
+        content_hash="b" * 64,
+        storage_path="/tmp/snapshot1",
+        scan_report_id="scan1",
+        importer_version="1",
+        policy_hash="p" * 64,
+        status="sealed",
     ))
     db.commit()
 
@@ -232,22 +243,22 @@ def test_published_manifest_freezes_contract_and_policy_snapshot(monkeypatch):
     assert run.workspace_retention_hours == 24
     assert run.manifest_version == 1
     assert frozen_contract["repository"] == "ssh://git.internal/example/repo.git"
-    assert frozen_contract["base_commit"] == "main"
+    assert frozen_contract["base_commit"] == "a" * 40
     assert frozen_contract["source_id"] == "source1"
     assert frozen_contract["source_type"] == "ssh"
     assert frozen_contract["credential_ref"] == "deploy-token-ref"
     assert frozen_contract["requested_ref"] == "main"
-    assert frozen_contract["resolved_commit"] == ""
-    assert frozen_contract["snapshot_id"] == ""
-    assert frozen_contract["snapshot_hash"] == ""
-    assert frozen_contract["source_scan_report_id"] == ""
+    assert frozen_contract["resolved_commit"] == "a" * 40
+    assert frozen_contract["snapshot_id"] == "snapshot1"
+    assert frozen_contract["snapshot_hash"] == "b" * 64
+    assert frozen_contract["source_scan_report_id"] == "scan1"
     assert frozen_contract["security_schema_version"] == 1
     assert run.source_id == frozen_contract["source_id"]
     assert run.resolved_commit == frozen_contract["resolved_commit"]
     assert run.snapshot_id == frozen_contract["snapshot_id"]
     assert run.snapshot_hash == frozen_contract["snapshot_hash"]
     assert run.image == "internal/python:3.12"
-    assert run.image_digest == ""
+    assert run.image_digest == "sha256:" + "c" * 64
     assert run.security_schema_version == 1
     assert frozen_contract["allowed_paths"] == ["**"]
     assert frozen_contract["coding_runtime"] == "legacy"
@@ -281,8 +292,8 @@ def test_published_manifest_freezes_contract_and_policy_snapshot(monkeypatch):
     manifest.resolved_commit = "d" * 40
     db.commit()
     assert json.loads(run.task_contract)["allowed_paths"] == ["**"]
-    assert run.snapshot_id == ""
-    assert run.resolved_commit == ""
+    assert run.snapshot_id == "snapshot1"
+    assert run.resolved_commit == "a" * 40
 
 
 def test_secure_draft_publish_and_run_copy_keep_one_immutable_contract(monkeypatch):
@@ -326,16 +337,16 @@ def test_secure_draft_publish_and_run_copy_keep_one_immutable_contract(monkeypat
     assert frozen["source_id"] == manifest.source_id
     assert frozen["credential_ref"] == manifest.credential_ref
     assert frozen["requested_ref"] == manifest.requested_ref
-    assert frozen["snapshot_id"] == ""
-    assert frozen["resolved_commit"] == ""
+    assert frozen["snapshot_id"] == "snapshot1"
+    assert frozen["resolved_commit"] == "a" * 40
     assert run.image == "internal/python:3.12"
-    assert run.image_digest == ""
+    assert run.image_digest == "sha256:" + "c" * 64
 
     manifest.snapshot_id = "changed-after-publish"
     manifest.resolved_commit = "e" * 40
     db.commit()
-    assert run.snapshot_id == ""
-    assert run.resolved_commit == ""
+    assert run.snapshot_id == "snapshot1"
+    assert run.resolved_commit == "a" * 40
 
 
 def test_policy_layers_exclude_lower_level_expansion_attempts():

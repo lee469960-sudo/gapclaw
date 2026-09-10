@@ -21,7 +21,7 @@ from app.routers import (
     auth, system_me, system_user, system_role,
     llm, skills, mcp, sandbox, agent, agent_chat, group, group_chat,
     sql, terminal, files, rag, httpmcp, site, monitor, docker_page, websockets,
-    channel, channel_hooks, console_log, ops_alert, code_project,
+    channel, channel_hooks, console_log, ops_alert, code_project, model_routing,
 )
 
 logger = logging.getLogger("app.main")
@@ -82,7 +82,7 @@ def create_app() -> FastAPI:
         auth, system_me, system_user, system_role,
         llm, skills, mcp, sandbox, agent, agent_chat, group, group_chat,
         sql, terminal, files, rag, httpmcp, site, monitor, docker_page, websockets,
-        channel, channel_hooks, console_log, ops_alert, code_project,
+        channel, channel_hooks, console_log, ops_alert, code_project, model_routing,
     ]
     for r in routers:
         app.include_router(r.router)

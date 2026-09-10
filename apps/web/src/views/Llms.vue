@@ -32,6 +32,9 @@
           <el-tag size="small" :type="row.visibility === 'public' ? 'success' : 'info'">
             {{ row.visibility === 'public' ? '公开' : '私有' }}
           </el-tag>
+          <el-tag v-if="row.type === 'llm'" size="small" :type="routingStatus(row).eligible ? 'success' : 'info'">
+            {{ routingStatus(row).eligible ? '可自动路由' : routingStatus(row).reason }}
+          </el-tag>
         </div>
         <div class="card-actions">
           <el-button size="small" @click="testLlm(row)">测试</el-button>
@@ -72,6 +75,14 @@
             />
           </el-form-item>
           <el-form-item label="Model"><el-input v-model="form.model" /></el-form-item>
+          <el-divider content-position="left">自动路由能力</el-divider>
+          <el-form-item label="启用自动路由"><el-switch v-model="form.routingCapabilities.enabled" /></el-form-item>
+          <template v-if="form.routingCapabilities.enabled">
+            <el-form-item label="角色"><el-checkbox-group v-model="form.routingCapabilities.roles"><el-checkbox v-for="role in ROUTING_ROLES" :key="role" :value="role">{{ role }}</el-checkbox></el-checkbox-group></el-form-item>
+            <el-form-item label="模态"><el-checkbox-group v-model="form.routingCapabilities.modalities"><el-checkbox v-for="modality in ROUTING_MODALITIES" :key="modality" :value="modality">{{ modality }}</el-checkbox></el-checkbox-group></el-form-item>
+            <el-form-item label="运行时"><el-checkbox-group v-model="form.routingCapabilities.runtimes"><el-checkbox value="react">react</el-checkbox></el-checkbox-group></el-form-item>
+            <div class="field-hint">{{ routingStatus({ type: 'llm', routing_capabilities: form.routingCapabilities }).eligible ? '此模型满足自动路由的基础声明，可加入角色模型组。' : routingStatus({ type: 'llm', routing_capabilities: form.routingCapabilities }).reason }}</div>
+          </template>
         </template>
         <el-form-item v-else label="成员 ID">
           <el-input v-model="form.membersStr" placeholder="逗号分隔 LLM ID" />
@@ -104,6 +115,18 @@ const keyword = ref('')
 const searchKw = ref('')
 const visible = ref(false)
 const form = reactive({})
+const ROUTING_ROLES = ['general', 'react_code', 'planner', 'multimodal', 'fast']
+const ROUTING_MODALITIES = ['text', 'image', 'audio', 'video']
+
+function routingStatus(row) {
+  if (row.type !== 'llm') return { eligible: false, reason: 'LLM组不可路由' }
+  const cap = row.routing_capabilities || {}
+  if (!cap.enabled) return { eligible: false, reason: '未启用自动路由' }
+  if (!Array.isArray(cap.roles) || !cap.roles.length) return { eligible: false, reason: '缺少角色' }
+  if (!Array.isArray(cap.modalities) || !cap.modalities.length) return { eligible: false, reason: '缺少模态' }
+  if (!Array.isArray(cap.runtimes) || !cap.runtimes.includes('react')) return { eligible: false, reason: '未声明 react 运行时' }
+  return { eligible: true, reason: '' }
+}
 
 const filtered = computed(() => {
   const kw = searchKw.value.trim().toLowerCase()
@@ -158,6 +181,7 @@ function openForm(row) {
       ...row,
       api_key: '',
       membersStr: (row.members || []).join(','),
+      routingCapabilities: { enabled: false, roles: [], modalities: [], runtimes: [], ...(row.routing_capabilities || {}) },
     })
   } else {
     Object.assign(form, {
@@ -171,6 +195,7 @@ function openForm(row) {
       membersStr: '',
       description: '',
       visibility: 'private',
+      routingCapabilities: { enabled: false, roles: [], modalities: [], runtimes: ['react'] },
     })
   }
   visible.value = true
@@ -193,6 +218,7 @@ async function save() {
     base_url: form.base_url,
     model: form.model,
     members,
+    routing_capabilities: form.type === 'llm' ? form.routingCapabilities : undefined,
     description: form.description,
     visibility: form.visibility,
   }

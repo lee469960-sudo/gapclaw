@@ -23,6 +23,7 @@ class LLMBody(BaseModel):
     api_key: str = ""
     model: str = ""
     members: list[str] | None = None
+    routing_capabilities: dict | None = None
     description: str = ""
     max_context_tokens: int = 128000
     max_output_tokens: int = 4096
@@ -89,6 +90,13 @@ async def llm_post(body: LLMBody, user: User = Depends(get_session_user), db: Se
         elif action == "create" and body.type == "llm":
             return fail("请填写 API Key")
         item.model = body.model
+        if body.type == "llm" and body.routing_capabilities is not None:
+            capabilities = body.routing_capabilities
+            if not isinstance(capabilities, dict):
+                return fail("路由能力必须是对象")
+            item.routing_capabilities = json.dumps(capabilities, ensure_ascii=False)
+        elif body.type != "llm":
+            item.routing_capabilities = "{}"
         # react-engine-v11 R1: 写入时校验模型组成员，拦截自引用 / 组套组 / 不存在成员
         # （运行时 R2 环检测兜底旧坏数据 / 直接改库）。叶子模型无成员概念，清空 members。
         if body.type == "group":

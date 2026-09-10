@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.database
 import app.startup
-from app.models import CodeProject
+from app.models import CodeProject, ModelRoleGroup, ModelRoutingPolicy, ModelRouteDecision
 from app.routers.agent import agent_get
 
 
@@ -116,6 +116,60 @@ def test_existing_users_receive_default_organization_scope(monkeypatch, tmp_path
         assert db.execute(text(
             "SELECT organization_id FROM users WHERE username = 'admin'"
         )).scalar_one() == "default"
+    finally:
+        db.close()
+
+
+def test_model_routing_schema_upgrade_preserves_legacy_llm_and_agent_bindings(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE llm_resources (
+                id VARCHAR(16) PRIMARY KEY, type VARCHAR(16), name VARCHAR(255),
+                members TEXT DEFAULT '[]'
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO llm_resources (id, type, name, members)
+            VALUES ('group1', 'group', 'Legacy group', '[\"leaf1\", \"leaf2\"]')
+        """))
+        conn.execute(text("""
+            CREATE TABLE agents (
+                id VARCHAR(16) PRIMARY KEY, name VARCHAR(255), llm_id VARCHAR(16)
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO agents (id, name, llm_id) VALUES ('agent1', 'Legacy Agent', 'group1')
+        """))
+
+    monkeypatch.setattr(app.database, "engine", engine)
+    monkeypatch.setattr(
+        app.startup,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ensure_dirs=lambda: None,
+            admin_username="admin", admin_password="password", data_dir=str(tmp_path / "data"),
+        ),
+    )
+    db = sessionmaker(bind=engine)()
+    try:
+        app.startup.init_db(db)
+        assert "routing_capabilities" in {
+            column["name"] for column in inspect(engine).get_columns("llm_resources")
+        }
+        assert "routing_policy_id" in {
+            column["name"] for column in inspect(engine).get_columns("agents")
+        }
+        assert db.execute(text("SELECT members FROM llm_resources WHERE id = 'group1'")).scalar_one() == '["leaf1", "leaf2"]'
+        assert db.execute(text("SELECT llm_id FROM agents WHERE id = 'agent1'")).scalar_one() == "group1"
+        assert {"model_role_groups", "model_routing_policies", "model_route_decisions"} <= set(inspect(engine).get_table_names())
+        db.add_all([
+            ModelRoleGroup(id="role1", name="General", role="general", preferred_llm_id="leaf1"),
+            ModelRoutingPolicy(id="policy1", name="Default", router_llm_id="leaf1", role_group_ids='["role1"]'),
+            ModelRouteDecision(id="route1", agent_id="agent1", session_id="session1", policy_id="policy1", policy_version=1, role="general", llm_id="leaf1"),
+        ])
+        db.commit()
+        assert db.get(ModelRouteDecision, "route1").llm_id == "leaf1"
     finally:
         db.close()
 

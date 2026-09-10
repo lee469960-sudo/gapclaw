@@ -70,6 +70,7 @@ class LLMResource(Base):
     api_key_enc: Mapped[str] = mapped_column(Text, default="")
     model: Mapped[str] = mapped_column(String(128), default="")
     members: Mapped[str] = mapped_column(Text, default="[]")
+    routing_capabilities: Mapped[str] = mapped_column(Text, default="{}")
     description: Mapped[str] = mapped_column(Text, default="")
     max_context_tokens: Mapped[int] = mapped_column(Integer, default=128000)
     max_output_tokens: Mapped[int] = mapped_column(Integer, default=4096)
@@ -90,6 +91,7 @@ class LLMResource(Base):
             "api_key": mask_secret(key) if mask_key else key,
             "model": self.model,
             "members": _json_list(self.members),
+            "routing_capabilities": _json_dict(self.routing_capabilities),
             "description": self.description,
             "max_context_tokens": self.max_context_tokens,
             "max_output_tokens": self.max_output_tokens,
@@ -99,6 +101,88 @@ class LLMResource(Base):
             "modified_at": self.modified_at,
         }
         return d
+
+
+def _json_dict(v):
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+class ModelRoleGroup(Base):
+    __tablename__ = "model_role_groups"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(32))
+    preferred_llm_id: Mapped[str] = mapped_column(String(16), default="")
+    fallback_llm_ids: Mapped[str] = mapped_column(Text, default="[]")
+    budget: Mapped[int] = mapped_column(Integer, default=0)
+    timeout: Mapped[int] = mapped_column(Integer, default=0)
+    visibility: Mapped[str] = mapped_column(String(16), default="private")
+    allowed_users: Mapped[str] = mapped_column(Text, default="[]")
+    creator: Mapped[str] = mapped_column(String(64), default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    modified_at: Mapped[str] = mapped_column(String(32), default="")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "name": self.name, "role": self.role,
+            "preferred_llm_id": self.preferred_llm_id,
+            "fallback_llm_ids": _json_list(self.fallback_llm_ids),
+            "budget": self.budget, "timeout": self.timeout,
+            "visibility": self.visibility,
+            "allowed_users": _json_list(self.allowed_users),
+            "creator": self.creator, "version": self.version,
+            "modified_at": self.modified_at,
+        }
+
+
+class ModelRoutingPolicy(Base):
+    __tablename__ = "model_routing_policies"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    router_llm_id: Mapped[str] = mapped_column(String(16), default="")
+    role_group_ids: Mapped[str] = mapped_column(Text, default="[]")
+    default_role: Mapped[str] = mapped_column(String(32), default="general")
+    visibility: Mapped[str] = mapped_column(String(16), default="private")
+    allowed_users: Mapped[str] = mapped_column(Text, default="[]")
+    creator: Mapped[str] = mapped_column(String(64), default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    modified_at: Mapped[str] = mapped_column(String(32), default="")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "name": self.name,
+            "router_llm_id": self.router_llm_id,
+            "role_group_ids": _json_list(self.role_group_ids),
+            "default_role": self.default_role,
+            "visibility": self.visibility,
+            "allowed_users": _json_list(self.allowed_users),
+            "creator": self.creator, "version": self.version,
+            "modified_at": self.modified_at,
+        }
+
+
+class ModelRouteDecision(Base):
+    __tablename__ = "model_route_decisions"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(16), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    policy_id: Mapped[str] = mapped_column(String(16), default="")
+    policy_version: Mapped[int] = mapped_column(Integer, default=1)
+    role: Mapped[str] = mapped_column(String(32), default="")
+    llm_id: Mapped[str] = mapped_column(String(16), default="")
+    detail: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
 
 
 class Skill(Base):
@@ -249,6 +333,7 @@ class Agent(Base):
     profile: Mapped[str] = mapped_column(String(16), default="standard")
     code_project_id: Mapped[str] = mapped_column(String(16), default="")
     llm_id: Mapped[str] = mapped_column(String(16), default="")
+    routing_policy_id: Mapped[str] = mapped_column(String(16), default="")
     sandbox_id: Mapped[str] = mapped_column(String(16), default="")
     skills: Mapped[str] = mapped_column(Text, default="[]")
     mcps: Mapped[str] = mapped_column(Text, default="[]")
@@ -281,6 +366,7 @@ class Agent(Base):
             "profile": self.profile or "standard",
             "code_project_id": self.code_project_id or "",
             "llm": self.llm_id,
+            "routing_policy_id": self.routing_policy_id or "",
             "sandbox": self.sandbox_id,
             "skills": _json_list(self.skills),
             "mcps": _json_list(self.mcps),

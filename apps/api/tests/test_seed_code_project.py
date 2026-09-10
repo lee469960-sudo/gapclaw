@@ -39,7 +39,8 @@ def _ready_settings(tmp_path):
             "registry.test/code-runner@sha256:" + "c" * 64,
         ]),
         code_workspace_api_root=str(workspace_root),
-        code_workspace_host_root="/srv/code-workspaces",
+        docker_data_host_path="/srv/gap-data",
+        code_workspace_host_root="/srv/gap-data/workspaces",
     )
 
 
@@ -92,10 +93,12 @@ def test_seed_code_project_publishes_and_is_idempotent(tmp_path, monkeypatch):
         .first()
     )
     assert published is not None
-    assert published.snapshot_id
-    assert published.snapshot_hash
-    assert published.resolved_commit
-    assert published.source_scan_report_id
+    # Publishing records approved source configuration only. The immutable
+    # commit/snapshot/scan evidence is produced by the later controlled import.
+    assert published.snapshot_id == ""
+    assert published.snapshot_hash == ""
+    assert published.resolved_commit == ""
+    assert published.source_scan_report_id == ""
     assert published.security_schema_version >= 1
 
     agent = db.query(Agent).filter(Agent.name == CODE_AGENT_DEMO_AGENT).first()

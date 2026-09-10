@@ -552,6 +552,7 @@ def test_run_is_rejected_when_the_frozen_contract_falls_outside_the_intersection
     _bind_running_sandbox(db, monkeypatch, agent)
     db.add_all([project, agent, manifest])
     db.commit()
+    _ready(db, monkeypatch)
 
     with pytest.raises(PolicyRejectedError, match=reason):
         create_code_run(

@@ -104,9 +104,9 @@ def test_slim_and_save_assistant_meta_includes_steps():
     actions = {s.get("action") for s in meta["steps"]}
     assert "skill_loaded" in actions
     assert any(s.get("type") == "llm" for s in meta["steps"])
-    # successful tool payload not bloated into meta
+    # Successful tool payload is retained for the expandable execution audit.
     tool = next(s for s in meta["steps"] if s.get("action") == "mcp_tool_call")
-    assert "content" not in tool or len(tool.get("content") or "") <= 400
+    assert "content" not in tool or len(tool.get("content") or "") <= 4_000
 
 
 def test_save_assistant_empty_reply_and_zero_steps_gets_placeholder():

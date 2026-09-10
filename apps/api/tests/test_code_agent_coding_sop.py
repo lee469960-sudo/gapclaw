@@ -213,6 +213,16 @@ def _claude_project(db, monkeypatch, *, enabled=True):
             return {"ready": True, "status": "ready", "reason": "ready", "errors": {}}
 
     monkeypatch.setattr(control_plane, "get_settings", lambda: ReadySettings())
+    # These cases exercise chat objective/runtime selection, not Docker
+    # admission. Provide the already-validated sandbox binding expected by the
+    # current CodeAgent control plane without starting a container.
+    monkeypatch.setattr(
+        control_plane,
+        "_running_bound_sandbox",
+        lambda _db, _agent: SimpleNamespace(
+            id="sandbox1", image="internal/python:3.12", network_mode="none"
+        ),
+    )
 
 
 def test_claude_code_first_message_creates_run_without_prefix(monkeypatch):

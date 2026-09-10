@@ -48,6 +48,11 @@ class AgentContext:
     # Resolved entities (computed once at startup)
     llm: LLMResource | None = field(compare=False, hash=False)
     sandbox: Sandbox | None = field(compare=False, hash=False)
+    model_route_decision_id: str = ""
+    model_route_policy_id: str = ""
+    model_route_policy_version: int = 0
+    model_route_duration_ms: int = 0
+    model_route_fallbacks: list[Any] = field(default_factory=list, compare=False, hash=False)
     allowed_actions: list[str] = field(default_factory=list)
     profile: str = "standard"
     code_execution: CodeExecutionContext | None = None
@@ -87,6 +92,11 @@ class AgentContext:
         user_message: str,
         message_meta: dict | None = None,
         llm: LLMResource | None = None,
+        model_route_decision_id: str = "",
+        model_route_policy_id: str = "",
+        model_route_policy_version: int = 0,
+        model_route_duration_ms: int = 0,
+        model_route_fallbacks: list[Any] | None = None,
         sandbox: Sandbox | None = None,
         allowed_actions: list[str] | None = None,
         profile: str = "standard",
@@ -110,6 +120,11 @@ class AgentContext:
             session_id=session_id,
             user_message=user_message,
             llm=llm,
+            model_route_decision_id=model_route_decision_id,
+            model_route_policy_id=model_route_policy_id,
+            model_route_policy_version=model_route_policy_version,
+            model_route_duration_ms=model_route_duration_ms,
+            model_route_fallbacks=list(model_route_fallbacks or []),
             sandbox=sandbox,
             allowed_actions=list(allowed_actions or []),
             profile=profile,

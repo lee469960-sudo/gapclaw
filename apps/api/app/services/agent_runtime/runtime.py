@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import logging
 import re
@@ -503,6 +504,25 @@ class AgentRuntime:
             }
             if s.get("iteration") is not None:
                 item["iteration"] = s.get("iteration")
+            if s.get("type") == "model_route" and isinstance(s.get("detail"), dict):
+                detail = s["detail"]
+                item["collapsed"] = bool(s.get("collapsed", True))
+                item["detail"] = {
+                    "version": int(detail.get("version") or 1),
+                    "kind": str(detail.get("kind") or "")[:64],
+                    "decision_id": str(detail.get("decision_id") or "")[:64],
+                    "policy_id": str(detail.get("policy_id") or "")[:64],
+                    "policy_version": int(detail.get("policy_version") or 0),
+                    "role": str(detail.get("role") or "")[:64],
+                    "frozen_model_id": str(detail.get("frozen_model_id") or "")[:64],
+                    "candidate_ids": [str(v)[:64] for v in (detail.get("candidate_ids") or [])[:20]],
+                    "exclusions": [
+                        {"model_id": str(v.get("model_id") or "")[:64], "reason": str(v.get("reason") or "")[:80]}
+                        for v in (detail.get("exclusions") or [])[:40] if isinstance(v, dict)
+                    ],
+                    "failure": str(detail.get("failure") or "")[:80],
+                    "duration_ms": max(0, int(detail.get("duration_ms") or 0)),
+                }
             preview = s.get("preview")
             if isinstance(preview, str) and preview.strip():
                 cleaned_preview = AgentRuntime._sanitize_step_text(preview)
@@ -991,6 +1011,8 @@ class AgentRuntime:
         from app.services.tool_parser import extract_tool_steps, _strip_reasoning_blocks
 
         state = AgentLoopState()
+        state.model_route_decision_id = getattr(ctx, "model_route_decision_id", "")
+        state.frozen_llm_id = getattr(ctx.llm, "id", "") or ""
         state.goal = (ctx.user_message or "").strip()
         no_progress_logs = NoProgressHintLogAggregator(logger)
         resume_state = _load_run_state(ctx)
@@ -998,6 +1020,8 @@ class AgentRuntime:
             state = resume_state
             if not state.goal:
                 state.goal = (ctx.user_message or "").strip()
+            state.model_route_decision_id = getattr(ctx, "model_route_decision_id", "")
+            state.frozen_llm_id = getattr(ctx.llm, "id", "") or ""
         cm = ContextManager()
         sp_builder = SystemPromptBuilder()
         # Reuse the resumed run's output dir so old mcp_result_*.json stay addressable;
@@ -1230,6 +1254,19 @@ class AgentRuntime:
                 "title": f"已加载 MCPs: {', '.join(mcp_names)}",
                 "status": "done",
             })
+        initial_model_route_event = _model_route_event(
+            ctx, state, duration_ms=getattr(ctx, "model_route_duration_ms", 0),
+        )
+        if initial_model_route_event:
+            state.model_route_events.append(initial_model_route_event)
+            await self._append_step(ctx, state, {
+                "type": "model_route",
+                "action": "model_route",
+                "title": "模型路由",
+                "status": "done",
+                "detail": initial_model_route_event,
+                "collapsed": True,
+            })
         if getattr(state, "resumed", False) and state.subtasks:
             done_count = sum(1 for s in state.subtasks if s.get("status") == "done")
             await self._append_step(ctx, state, {
@@ -1256,6 +1293,8 @@ class AgentRuntime:
         cached_reference_streak = 0
         tool_call_tally: dict[str, int] = {}  # explore-loop tally keyed on mcp:<tool>
         tool_materialize_seq = 0  # READ/SHELL oversized-result dump sequence (R2)
+        route_fallbacks = list(getattr(ctx, "model_route_fallbacks", []) or [])
+        route_fallback_used = False
 
         async with McpSessionManager(
             query_cache=state.query_cache,
@@ -1288,6 +1327,7 @@ class AgentRuntime:
                 })
 
                 # 1. Call LLM
+                llm_call_started = time.monotonic()
                 try:
                     result = await chat_completion(
                         ctx.llm,
@@ -1304,6 +1344,70 @@ class AgentRuntime:
                         await self._patch_last_step(ctx, state, status="error", content="已停止")
                         _clear_run_state(ctx)
                         return _ret(state.final or "[已停止]")
+                    fallback_eligible = (
+                        not route_fallback_used
+                        and iteration == 0
+                        and not state.resumed
+                        and not state.last_reply
+                        and tool_call_count == 0
+                        and bool(getattr(ctx, "model_route_decision_id", ""))
+                        and isinstance(exc, (asyncio.TimeoutError, LLMTransportError, LLMProviderThrottled))
+                        and bool(route_fallbacks)
+                    )
+                    if fallback_eligible:
+                        fallback = route_fallbacks.pop(0)
+                        from app.models import LLMResource
+
+                        fallback_llm = ctx.db.get(LLMResource, fallback.llm_id)
+                        if fallback_llm is not None:
+                            from dataclasses import replace
+                            from app.services.model_router import persist_fallback_route_decision
+
+                            decision = persist_fallback_route_decision(
+                                ctx.db,
+                                agent_id=ctx.agent.id,
+                                session_id=ctx.session_id,
+                                policy_id=ctx.model_route_policy_id,
+                                policy_version=ctx.model_route_policy_version,
+                                parent_decision_id=ctx.model_route_decision_id,
+                                candidate=fallback,
+                                failure_class=type(exc).__name__,
+                            )
+                            ctx = replace(
+                                ctx,
+                                llm=fallback_llm,
+                                model_route_decision_id=decision.id,
+                                model_route_fallbacks=[],
+                            )
+                            state.model_route_decision_id = decision.id
+                            state.frozen_llm_id = fallback_llm.id
+                            route_fallback_used = True
+                            fallback_event = _model_route_event(
+                                ctx,
+                                state,
+                                duration_ms=int((time.monotonic() - llm_call_started) * 1000),
+                            )
+                            if fallback_event:
+                                state.model_route_events.append(fallback_event)
+                            logger.warning(
+                                "model route pre-output fallback agent=%s session=%s failure=%s",
+                                ctx.agent.id, ctx.session_id, type(exc).__name__,
+                            )
+                            await self._patch_last_step(
+                                ctx, state, status="error", content=(
+                                    f"{type(exc).__name__}: 首次模型请求失败，已切换到配置的回退模型。"
+                                ),
+                            )
+                            if fallback_event:
+                                await self._append_step(ctx, state, {
+                                    "type": "model_route",
+                                    "action": "model_route_fallback",
+                                    "title": "模型路由回退",
+                                    "status": "done",
+                                    "detail": fallback_event,
+                                    "collapsed": True,
+                                })
+                            continue
                     # R3: transport errors (self-healing) and HTTP/other errors use
                     # separate consecutive-failure thresholds — 3 vs 2 — so a transient
                     # network blip doesn't abort as fast as a parameter/request error.
@@ -2082,6 +2186,44 @@ def _route_reason_summary(reason: str, user_message: str) -> str:
     return compact_reason[:4000]
 
 
+def _model_route_event(ctx, state, *, duration_ms: int = 0) -> dict | None:
+    """Return a strict-whitelist model-routing audit event for the execution UI."""
+    decision_id = str(getattr(state, "model_route_decision_id", "") or "").strip()
+    if not decision_id:
+        return None
+    try:
+        from app.models import ModelRouteDecision
+
+        decision = ctx.db.get(ModelRouteDecision, decision_id)
+        if decision is None:
+            return None
+        detail = json.loads(decision.detail or "{}")
+        if not isinstance(detail, dict):
+            detail = {}
+    except Exception:
+        return None
+    exclusions = []
+    for item in detail.get("exclusions") or []:
+        if isinstance(item, dict):
+            exclusions.append({
+                "model_id": str(item.get("model_id") or "")[:64],
+                "reason": str(item.get("reason") or "")[:80],
+            })
+    return {
+        "version": 1,
+        "kind": str(detail.get("kind") or "selection")[:64],
+        "decision_id": decision.id,
+        "policy_id": decision.policy_id,
+        "policy_version": decision.policy_version,
+        "role": decision.role,
+        "frozen_model_id": decision.llm_id,
+        "candidate_ids": [str(item)[:64] for item in (detail.get("candidate_ids") or [])[:20]],
+        "exclusions": exclusions[:40],
+        "failure": str(detail.get("failure") or detail.get("failure_class") or "")[:80],
+        "duration_ms": max(0, int(duration_ms or 0)),
+    }
+
+
 def _record_mcp_route_event(
     state,
     *,
@@ -2148,6 +2290,7 @@ def _save_run_state(ctx, state) -> None:
         "selected_mcp_ids": getattr(state, "selected_mcp_ids", []) or [],
         "mcp_route_attempts": int(getattr(state, "mcp_route_attempts", 0) or 0),
         "mcp_route_events": (getattr(state, "mcp_route_events", []) or [])[-20:],
+        "model_route_events": (getattr(state, "model_route_events", []) or [])[-10:],
     }
     blob = json.dumps(payload, ensure_ascii=False)
     try:
@@ -2227,6 +2370,7 @@ def _load_run_state(ctx):
     state.selected_mcp_ids = list(data.get("selected_mcp_ids") or [])
     state.mcp_route_attempts = int(data.get("mcp_route_attempts") or 0)
     state.mcp_route_events = list(data.get("mcp_route_events") or [])[-20:]
+    state.model_route_events = list(data.get("model_route_events") or [])[-10:]
     state.resumed = True
     return state
 
@@ -3080,12 +3224,14 @@ async def _run_agent_impl(
     code_artifact_sealer=None,
 ) -> str:
     """Resolve agent config from the DB, build an AgentContext, run the loop."""
-    from app.models import CodeAgentRun, LLMResource, Sandbox, ChatNote
+    from app.models import CodeAgentRun, LLMResource, ModelRoutingPolicy, Sandbox, ChatNote, User
     from app.services.agent_runtime.context import AgentContext, CodeExecutionContext
     from app.services.agent_runtime.utils import _bound_mcp_names
     from app.services.skill_loader import load_skill_mds
 
     profile = getattr(agent, "profile", None) or "standard"
+    if profile == "code" and getattr(agent, "routing_policy_id", ""):
+        raise ValueError("routing_policy_not_supported_for_code_profile")
     code_execution = None
     sandbox = None
     allowed = json.loads(agent.allowed_actions or "[]")
@@ -3117,6 +3263,20 @@ async def _run_agent_impl(
                 raise ValueError("code_run_unavailable")
             if code_run.status != "pending":
                 raise ValueError("code_run_not_pending")
+            # Revalidate sealed source evidence before allocating any writable
+            # workspace or starting a runner. A failed scan must be terminal
+            # for this run and must not leave partially created resources.
+            from app.services.code_agent.scanner import (
+                SourceScanValidationError,
+                validate_source_scan_report,
+            )
+            try:
+                validate_source_scan_report(db, code_run)
+            except SourceScanValidationError as exc:
+                code_run.status = "policy_rejected"
+                code_run.failure_reason = exc.reason
+                db.commit()
+                raise
             chat_key = f"{agent.id}:{session_id}"
             from app.services.code_agent.lifecycle import bind_code_run, register_code_cleanup
             sandbox = db.query(Sandbox).filter(Sandbox.id == agent.sandbox_id).first()
@@ -3390,6 +3550,39 @@ async def _run_agent_impl(
         raise ValueError("code_run_not_allowed_for_standard_profile")
 
     llm = db.query(LLMResource).filter(LLMResource.id == agent.llm_id).first()
+    model_route_decision_id = ""
+    model_route_policy_id = ""
+    model_route_policy_version = 0
+    model_route_fallbacks = []
+    model_route_duration_ms = 0
+    if profile == "standard" and getattr(agent, "routing_policy_id", ""):
+        policy = db.get(ModelRoutingPolicy, agent.routing_policy_id)
+        owner = db.query(User).filter(User.username == agent.creator).first()
+        if policy is not None and owner is not None:
+            from app.services.model_router import (
+                build_ordered_fallback_candidates,
+                build_route_candidates,
+                persist_route_decision,
+                required_modalities_for_message,
+                route_model,
+            )
+            required_modalities = required_modalities_for_message(message_meta)
+            built = build_route_candidates(
+                db, policy, owner, modalities=required_modalities,
+            )
+            route_started = time.monotonic()
+            selected = await route_model(db, policy, user_message, built.candidates, timeout=getattr(agent, "llm_timeout", None) or 60)
+            model_route_duration_ms = int((time.monotonic() - route_started) * 1000)
+            decision = persist_route_decision(db, agent_id=agent.id, session_id=session_id, policy=policy, selection=selected, candidates=built.candidates, exclusions=built.exclusions)
+            if decision is not None:
+                llm = db.get(LLMResource, decision.llm_id)
+                model_route_decision_id = decision.id
+                model_route_policy_id = policy.id
+                model_route_policy_version = policy.version
+                model_route_fallbacks = build_ordered_fallback_candidates(
+                    db, policy, owner, selected.candidate,
+                    modalities=required_modalities,
+                )
     if sandbox is None:
         sandbox = db.query(Sandbox).filter(Sandbox.id == agent.sandbox_id).first()
 
@@ -3437,6 +3630,11 @@ async def _run_agent_impl(
         user_message=user_message,
         message_meta=message_meta,
         llm=llm,
+        model_route_decision_id=model_route_decision_id,
+        model_route_policy_id=model_route_policy_id,
+        model_route_policy_version=model_route_policy_version,
+        model_route_duration_ms=model_route_duration_ms,
+        model_route_fallbacks=model_route_fallbacks,
         sandbox=sandbox,
         allowed_actions=allowed,
         profile=profile,

@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.models import Agent
 from app.routers.agent import AgentBody, agent_post
+from app.services.agent_runtime.runtime import _run_agent_impl
 
 
 class _FakeDB:
@@ -53,3 +56,25 @@ def test_agent_profile_rejects_unknown_value():
     ))
     assert response["code"] == 1
     assert db.row is None
+
+
+def test_code_profile_rejects_role_policy_before_any_model_substitution(monkeypatch):
+    db = _FakeDB()
+    monkeypatch.setattr("app.routers.agent._validate_refs", lambda *_args: None)
+    response = asyncio.run(agent_post(
+        AgentBody(action="create", name="code", profile="code", routing_policy_id="policy"),
+        SimpleNamespace(username="admin"),
+        db,
+    ))
+    assert response["code"] == 1
+    assert response["msg"] == "routing_policy_not_supported_for_code_profile"
+    assert db.row is None
+
+
+def test_code_profile_runtime_rejects_legacy_role_policy_before_execution():
+    agent = Agent(
+        id="code", name="code", profile="code", llm_id="claude",
+        routing_policy_id="policy",
+    )
+    with pytest.raises(ValueError, match="routing_policy_not_supported_for_code_profile"):
+        asyncio.run(_run_agent_impl(None, agent, "session", "fix it"))

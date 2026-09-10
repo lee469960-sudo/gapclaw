@@ -128,20 +128,20 @@
                     <div
                       v-for="(step, si) in (item.steps.length ? item.steps : [NO_TOOL_PLACEHOLDER_STEP])"
                       :key="si"
-                      :class="['exec-step', { 'is-expandable': isToolStep(step) }]"
-                      :role="isToolStep(step) ? 'button' : undefined"
-                      :tabindex="isToolStep(step) ? 0 : undefined"
-                      @click="isToolStep(step) && toggleToolDetail(toolStepKey(item.execKey, si))"
-                      @keydown.enter.prevent="isToolStep(step) && toggleToolDetail(toolStepKey(item.execKey, si))"
+                      :class="['exec-step', { 'is-expandable': isStepDetailExpandable(step) }]"
+                      :role="isStepDetailExpandable(step) ? 'button' : undefined"
+                      :tabindex="isStepDetailExpandable(step) ? 0 : undefined"
+                      @click="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey(item.execKey, si))"
+                      @keydown.enter.prevent="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey(item.execKey, si))"
                     >
                       <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
                       <div class="step-body">
                         <div class="step-title">
                           <span>{{ stepTitle(step) }}</span>
-                          <span v-if="!isToolStep(step) && stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
+                          <span v-if="!isStepDetailExpandable(step) && stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
                         </div>
-                        <template v-if="isToolStep(step) && isToolDetailOpen(toolStepKey(item.execKey, si))">
-                          <pre class="step-snippet">{{ toolStepDetail(step) }}</pre>
+                        <template v-if="isStepDetailExpandable(step) && isToolDetailOpen(toolStepKey(item.execKey, si))">
+                          <pre class="step-snippet">{{ executionStepDetail(step) }}</pre>
                           <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
                         </template>
                         <template v-else>
@@ -153,7 +153,7 @@
                           <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
                         </div>
                       </div>
-                      <el-icon v-if="isToolStep(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey(item.execKey, si)) }"><ArrowRight /></el-icon>
+                      <el-icon v-if="isStepDetailExpandable(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey(item.execKey, si)) }"><ArrowRight /></el-icon>
                       <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
                       <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
                       <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
@@ -218,20 +218,20 @@
                       v-for="(step, si) in liveStepsView.steps"
                       :key="`${step.type}-${step.iteration || si}-${step.action || ''}-${si}`"
                       v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length, step.snippet?.length, toolDetailRevision]"
-                      :class="['exec-step', { 'is-expandable': isToolStep(step) }]"
-                      :role="isToolStep(step) ? 'button' : undefined"
-                      :tabindex="isToolStep(step) ? 0 : undefined"
-                      @click="isToolStep(step) && toggleToolDetail(toolStepKey('live', si))"
-                      @keydown.enter.prevent="isToolStep(step) && toggleToolDetail(toolStepKey('live', si))"
+                      :class="['exec-step', { 'is-expandable': isStepDetailExpandable(step) }]"
+                      :role="isStepDetailExpandable(step) ? 'button' : undefined"
+                      :tabindex="isStepDetailExpandable(step) ? 0 : undefined"
+                      @click="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey('live', si))"
+                      @keydown.enter.prevent="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey('live', si))"
                     >
                       <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
                       <div class="step-body">
                         <div class="step-title">
                           <span>{{ stepTitle(step) }}</span>
-                          <span v-if="!isToolStep(step) && stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
+                          <span v-if="!isStepDetailExpandable(step) && stepInlineDetail(step)" class="step-inline-detail"> · {{ stepInlineDetail(step) }}</span>
                         </div>
-                        <template v-if="isToolStep(step) && isToolDetailOpen(toolStepKey('live', si))">
-                          <pre class="step-snippet">{{ toolStepDetail(step) }}</pre>
+                        <template v-if="isStepDetailExpandable(step) && isToolDetailOpen(toolStepKey('live', si))">
+                          <pre class="step-snippet">{{ executionStepDetail(step) }}</pre>
                           <pre v-if="step.snippet" class="step-snippet">{{ step.snippet }}</pre>
                         </template>
                         <template v-else>
@@ -243,7 +243,7 @@
                           <button v-if="step.sql_checkpoint_path" type="button" @click.stop="downloadWorkplaceFile(step.sql_checkpoint_path)">SQL 草稿</button>
                         </div>
                       </div>
-                      <el-icon v-if="isToolStep(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey('live', si)) }"><ArrowRight /></el-icon>
+                      <el-icon v-if="isStepDetailExpandable(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey('live', si)) }"><ArrowRight /></el-icon>
                       <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
                       <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
                       <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
@@ -681,6 +681,7 @@ function collapseLlmSteps(steps) {
 
 function stepLabel(step) {
   if (step.type === 'llm') return `LLM 推理 (第 ${step.iteration || '?'} 轮)`
+  if (step.type === 'model_route') return step.title || '模型路由'
   if (step.action === 'skill_loaded') return step.title || '已加载 Skills'
   if (step.type === 'info' || step.action === 'mcp_loaded') return step.title || '已加载 MCPs'
   if (step.type === 'tool') return step.title || `工具 · ${step.action || ''}`
@@ -702,6 +703,7 @@ function stepInlineDetail(step) {
 
 function stepGlyph(step) {
   if (step.type === 'llm') return '🤖'
+  if (step.type === 'model_route') return '🧭'
   if (step.action === 'skill_loaded' || step.action === 'skill_read_md') return '📘'
   if ((step.action || '').startsWith('code_')) return '🧰'
   if (step.action === 'no_tools' || step.action === 'no_tools_export' || step.action === 'conversational_reply') return '💬'
@@ -732,6 +734,35 @@ function toolStepDetail(step) {
   // Earlier messages stored only the action title.  Make the expansion
   // visibly meaningful instead of leaving a rotated arrow with an empty pane.
   return '此历史步骤未保存工具输出；后续执行会显示已脱敏、限长的执行结果。'
+}
+
+function modelRouteStepDetail(step) {
+  const detail = step?.detail
+  if (!detail || typeof detail !== 'object') {
+    return '此历史模型路由步骤未保存审计详情。'
+  }
+  // The API has already allowlisted this object. Keep a second allowlist at
+  // render time so a future wire-format expansion cannot expose prompts/keys.
+  const safe = {
+    version: Number(detail.version || 1),
+    kind: String(detail.kind || ''),
+    decision_id: String(detail.decision_id || ''),
+    policy_id: String(detail.policy_id || ''),
+    policy_version: Number(detail.policy_version || 0),
+    role: String(detail.role || ''),
+    frozen_model_id: String(detail.frozen_model_id || ''),
+    candidate_ids: Array.isArray(detail.candidate_ids) ? detail.candidate_ids.map((id) => String(id)) : [],
+    exclusions: Array.isArray(detail.exclusions)
+      ? detail.exclusions.map((item) => ({ model_id: String(item?.model_id || ''), reason: String(item?.reason || '') }))
+      : [],
+    failure: String(detail.failure || ''),
+    duration_ms: Number(detail.duration_ms || 0),
+  }
+  return JSON.stringify(safe, null, 2)
+}
+
+function executionStepDetail(step) {
+  return step?.type === 'model_route' ? modelRouteStepDetail(step) : toolStepDetail(step)
 }
 
 function sanitizeStepDetail(text) {
@@ -901,8 +932,8 @@ function isExecOpen(key) {
   return execOpen.value[String(key)] === true
 }
 
-function isToolStep(step) {
-  return step?.type === 'tool'
+function isStepDetailExpandable(step) {
+  return step?.type === 'tool' || step?.type === 'model_route'
 }
 
 function toolStepKey(execKey, index) {

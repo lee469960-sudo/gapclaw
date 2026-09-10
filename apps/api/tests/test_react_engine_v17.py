@@ -11,15 +11,26 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.models import LLMResource
 from app.services.agent_runtime.runtime import AgentRuntime
 from app.services.llm_client import (
     ChatResult,
+    _clear_llm_throttle_circuit,
     _build_chat_result,
     chat_completion,
     extract_chat_response_text,
     fit_messages_to_context,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_throttle_circuit():
+    """Keep mocked transport tests independent from prior group-throttle cases."""
+    _clear_llm_throttle_circuit()
+    yield
+    _clear_llm_throttle_circuit()
 
 
 # ---- helpers ----

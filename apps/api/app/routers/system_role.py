@@ -23,6 +23,7 @@ BUILTIN_ROLES = [
             "/pages/page_skills.cgi",
             "/pages/page_mcp.cgi",
             "/pages/page_llm.cgi",
+            "/pages/page_model_routing.cgi",
             "/pages/page_files.cgi",
         ],
         "builtin": True,

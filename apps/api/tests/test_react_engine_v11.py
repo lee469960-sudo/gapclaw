@@ -117,6 +117,18 @@ def test_llm_members_cleared():
     assert json.loads(row.members) == []
 
 
+def test_leaf_routing_capabilities_persist_and_group_clears_them():
+    db = _make_db()
+    _leaf(db, "leaf1")
+    capabilities = {"enabled": True, "roles": ["general"], "modalities": ["text"], "runtimes": ["react"]}
+    leaf = _post(db, LLMBody(action="update", id="leaf1", type="llm", name="leaf1", routing_capabilities=capabilities))
+    assert leaf["code"] == 0
+    assert leaf["data"]["routing_capabilities"] == capabilities
+    group = _post(db, LLMBody(action="update", id="leaf1", type="group", name="group", members=[]))
+    assert group["code"] == 0
+    assert group["data"]["routing_capabilities"] == {}
+
+
 # ---------------------------------------------------------------------------
 # 3.2 环检测 (R2)
 # ---------------------------------------------------------------------------

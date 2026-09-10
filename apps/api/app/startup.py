@@ -43,6 +43,9 @@ def init_db(db: Session) -> None:
         if "code_project_id" not in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agents ADD COLUMN code_project_id VARCHAR(16) DEFAULT ''"))
+        if "routing_policy_id" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE agents ADD COLUMN routing_policy_id VARCHAR(16) DEFAULT ''"))
         if "rags" not in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agents ADD COLUMN rags TEXT DEFAULT '[]'"))
@@ -58,6 +61,11 @@ def init_db(db: Session) -> None:
         if "engine" in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agents DROP COLUMN engine"))
+    if "llm_resources" in insp.get_table_names():
+        llm_cols = {c["name"] for c in insp.get_columns("llm_resources")}
+        if "routing_capabilities" not in llm_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE llm_resources ADD COLUMN routing_capabilities TEXT DEFAULT '{}'"))
     if "agent_groups" in insp.get_table_names():
         gcols = {c["name"] for c in insp.get_columns("agent_groups")}
         if "history_length" not in gcols:

@@ -29,6 +29,7 @@ const routes = [
       { path: 'skills', name: 'skills', component: () => import('./views/Skills.vue'), meta: { route: '/skills' } },
       { path: 'mcps', name: 'mcps', component: () => import('./views/Mcps.vue'), meta: { route: '/mcps' } },
       { path: 'llms', name: 'llms', component: () => import('./views/Llms.vue'), meta: { route: '/llms' } },
+      { path: 'model-routing', name: 'model-routing', component: () => import('./views/ModelRouting.vue'), meta: { route: '/model-routing' } },
       { path: 'files', name: 'files', component: () => import('./views/Files.vue'), meta: { route: '/files' } },
       { path: 'rag', name: 'rag', component: () => import('./views/Rag.vue'), meta: { route: '/rag' } },
       { path: 'httpmcp', name: 'httpmcp', component: () => import('./views/HttpMcp.vue'), meta: { route: '/httpmcp' } },

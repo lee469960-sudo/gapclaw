@@ -113,6 +113,13 @@ def _seed_ready(db, monkeypatch):
             return {"ready": True, "status": "ready", "reason": "ready", "errors": {}}
 
     monkeypatch.setattr(control_plane, "get_settings", lambda: ReadySettings())
+    monkeypatch.setattr(
+        control_plane,
+        "_running_bound_sandbox",
+        lambda _db, _agent: SimpleNamespace(
+            id="sandbox1", image="internal/python:3.12", network_mode="none"
+        ),
+    )
 
 
 def _actor():

@@ -95,7 +95,8 @@ def _security_settings(tmp_path):
             "registry.test/code-runner@sha256:" + "c" * 64,
         ]),
         code_workspace_api_root=str(workspace_root),
-        code_workspace_host_root="/srv/code-workspaces",
+        code_workspace_host_root="/srv/gap-data/workspaces",
+        docker_data_host_path="/srv/gap-data",
     )
 
 
@@ -112,7 +113,8 @@ def _local_publish_settings(tmp_path, repository_root):
             "registry.test/code-runner@sha256:" + "c" * 64,
         ]),
         code_workspace_api_root=str(workspace_root),
-        code_workspace_host_root="/srv/code-workspaces",
+        code_workspace_host_root="/srv/gap-data/workspaces",
+        docker_data_host_path="/srv/gap-data",
     )
 
 
@@ -1030,7 +1032,7 @@ def test_control_plane_writes_are_audited_without_mutating_frozen_runs(monkeypat
     assert run_audit_details["resolved_commit"] == run.resolved_commit
     assert run_audit_details["snapshot_id"] == run.snapshot_id
     assert run_audit_details["snapshot_hash"] == run.snapshot_hash
-    assert "image_digest" not in run_audit_details
+    assert run_audit_details["image_digest"] == run.image_digest
     assert run_audit_details["effective_policy_hash"] == run.effective_policy_hash
     db.refresh(run)
     assert run.task_contract == frozen_contract
@@ -1930,6 +1932,29 @@ def test_control_plane_end_to_end_enables_existing_agent_and_fails_closed(
         admin,
         db,
     ))
+    manifest = db.get(CodeProjectManifest, published["data"]["id"])
+    resolved_commit = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    manifest.base_commit = resolved_commit
+    manifest.resolved_commit = resolved_commit
+    manifest.snapshot_id = "snapshot-e2e"
+    manifest.snapshot_hash = "b" * 64
+    manifest.source_scan_report_id = "scan-e2e"
+    manifest.image_digest = "registry.test/code-runner@sha256:" + "c" * 64
+    db.add(CodeSourceSnapshot(
+        id=manifest.snapshot_id,
+        source_id=manifest.source_id,
+        resolved_commit=resolved_commit,
+        content_hash=manifest.snapshot_hash,
+        storage_path=str(repository),
+        scan_report_id=manifest.source_scan_report_id,
+        importer_version="1",
+        policy_hash="p" * 64,
+        status="sealed",
+    ))
+    db.commit()
     switched = asyncio.run(agent_post(
         AgentBody(
             action="update",
@@ -1960,6 +1985,7 @@ def test_control_plane_end_to_end_enables_existing_agent_and_fails_closed(
     assert created["data"]["availability"]["reason"] == "manifest_missing"
     assert draft["data"]["status"] == "draft"
     assert published["data"]["status"] == "published"
+    assert switched["code"] == 0, switched
     assert switched["data"]["profile"] == "code"
     assert switched["data"]["code_project_id"] == project_id
     assert submitted["code"] == 0

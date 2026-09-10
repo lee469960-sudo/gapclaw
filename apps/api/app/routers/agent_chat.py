@@ -130,6 +130,25 @@ def _steps_tail_for_message(raw: str | None, limit: int | None = None) -> dict:
         preview = s.get("preview")
         if isinstance(preview, str) and preview.strip():
             item["preview"] = preview[:300]
+        if s.get("type") == "model_route" and isinstance(s.get("detail"), dict):
+            detail = s["detail"]
+            item["collapsed"] = bool(s.get("collapsed", True))
+            item["detail"] = {
+                "version": int(detail.get("version") or 1),
+                "kind": str(detail.get("kind") or "")[:64],
+                "decision_id": str(detail.get("decision_id") or "")[:64],
+                "policy_id": str(detail.get("policy_id") or "")[:64],
+                "policy_version": int(detail.get("policy_version") or 0),
+                "role": str(detail.get("role") or "")[:64],
+                "frozen_model_id": str(detail.get("frozen_model_id") or "")[:64],
+                "candidate_ids": [str(v)[:64] for v in (detail.get("candidate_ids") or [])[:20]],
+                "exclusions": [
+                    {"model_id": str(v.get("model_id") or "")[:64], "reason": str(v.get("reason") or "")[:80]}
+                    for v in (detail.get("exclusions") or [])[:40] if isinstance(v, dict)
+                ],
+                "failure": str(detail.get("failure") or "")[:80],
+                "duration_ms": max(0, int(detail.get("duration_ms") or 0)),
+            }
         content = s.get("content")
         if isinstance(content, str) and content.strip():
             # The execution accordion is the user's audit trail.  Returning

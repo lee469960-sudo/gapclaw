@@ -202,6 +202,17 @@
                 </div>
               </div>
 
+              <div class="res-item">
+                <div class="res-head res-head-static">
+                  <el-icon class="res-ico"><Setting /></el-icon>
+                  <span class="res-label">模型路由策略</span>
+                  <el-select v-model="form.routing_policy_id" clearable filterable class="res-inline-select" :disabled="form.profile === 'code'" placeholder="不选择则使用直接 LLM">
+                    <el-option v-for="policy in routingPolicies" :key="policy.id" :label="policy.name" :value="policy.id" />
+                  </el-select>
+                  <span v-if="form.profile === 'code'" class="res-meta">Code Agent 仅支持直接兼容 LLM</span>
+                </div>
+              </div>
+
               <!-- LLM -->
               <div class="res-item">
                 <div class="res-head res-head-static">
@@ -578,6 +589,7 @@ const mcps = ref([])
 const rags = ref([])
 const httpmcps = ref([])
 const codeProjects = ref([])
+const routingPolicies = ref([])
 const pickerSkills = ref([])
 const pickerMcps = ref([])
 const pickerRags = ref([])
@@ -695,6 +707,7 @@ async function loadResources({ force = false } = {}) {
   rags.value = data.rags || []
   httpmcps.value = data.httpmcps || []
   codeProjects.value = data.code_projects || []
+  routingPolicies.value = data.routing_policies || []
   resourcesLoaded.value = true
 }
 
@@ -758,6 +771,7 @@ async function openForm(row) {
       allowed_actions: sanitizeAllowedActions(currentRow.allowed_actions),
       profile: currentRow.profile || 'standard',
       code_project_id: currentRow.code_project_id || '',
+      routing_policy_id: currentRow.routing_policy_id || '',
       allowedUsersStr: (currentRow.allowed_users || []).join(','),
       max_iterations: currentRow.max_iterations ?? ADV_DEFAULTS.max_iterations,
       history_length: currentRow.history_length ?? ADV_DEFAULTS.history_length,
@@ -783,6 +797,7 @@ async function openForm(row) {
       allowed_actions: [...ALL_TOGGLEABLE_ACTIONS],
       profile: 'standard',
       code_project_id: '',
+      routing_policy_id: '',
       proactivity: 2,
       visibility: 'private',
       allowedUsersStr: '',
@@ -819,6 +834,7 @@ async function save() {
     code_project_id: form.profile === 'code' ? form.code_project_id : '',
     prompt: form.prompt,
     llm: form.llm || undefined,
+    routing_policy_id: form.profile === 'code' ? '' : (form.routing_policy_id || ''),
     sandbox: form.sandbox || undefined,
     skills: form.skills,
     mcps: form.mcps,

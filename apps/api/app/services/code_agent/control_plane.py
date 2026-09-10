@@ -589,6 +589,27 @@ def secure_readiness_reason(
     if not (manifest.requested_ref or "").strip():
         return "repository_ref_invalid"
 
+    resolved_commit = str(manifest.resolved_commit or "").strip().lower()
+    if not _COMMIT_SHA.fullmatch(resolved_commit):
+        return "repository_ref_invalid"
+
+    snapshot = db.get(CodeSourceSnapshot, str(manifest.snapshot_id or "").strip())
+    if (
+        snapshot is None
+        or snapshot.status != "sealed"
+        or snapshot.resolved_commit != resolved_commit
+        or snapshot.content_hash != str(manifest.snapshot_hash or "").strip()
+    ):
+        return "snapshot_invalid"
+
+    trusted_digests = _settings_list(getattr(settings, "code_trusted_image_digests", "[]"))
+    if str(manifest.image_digest or "").strip() not in trusted_digests:
+        return "image_digest_invalid"
+
+    readiness = settings.code_agent_security_readiness()
+    if not isinstance(readiness, dict) or not readiness.get("ready", False):
+        return "workspace_mount_invalid"
+
     return ""
 
 
@@ -735,6 +756,14 @@ def create_code_run(
     _require_secure_manifest_evidence(manifest)
     settings = get_settings()
     contract = freeze_task_contract(manifest, objective)
+    readiness_reason = secure_readiness_reason(
+        db,
+        manifest,
+        project=project,
+        settings=settings,
+    )
+    if readiness_reason:
+        raise ManifestUnavailableError(readiness_reason)
     sandbox = _running_bound_sandbox(db, agent)
     allowed_tools = list(PLATFORM_POLICY["allowed_tools"])
     from app.services.code_agent.kill_switch import enforce_code_kill_switches
@@ -814,14 +843,6 @@ def create_code_run(
         model=agent.llm_id,
         runtime=policy["coding_runtime"],
     )
-    readiness_reason = secure_readiness_reason(
-        db,
-        manifest,
-        project=project,
-        settings=settings,
-    )
-    if readiness_reason:
-        raise ManifestUnavailableError(readiness_reason)
     policy_json = json.dumps(policy, sort_keys=True, separators=(",", ":"))
     policy_hash = hashlib.sha256(policy_json.encode("utf-8")).hexdigest()
 
@@ -853,7 +874,7 @@ def create_code_run(
         repository=contract.repository,
         base_commit=contract.base_commit,
         image=sandbox.image,
-        image_digest="",
+        image_digest=manifest.image_digest,
         security_schema_version=contract.security_schema_version,
         task_contract=json.dumps(contract.to_dict(), sort_keys=True),
         effective_policy=policy_json,
@@ -887,6 +908,7 @@ def create_code_run(
         "resolved_commit": contract.resolved_commit,
         "snapshot_id": contract.snapshot_id,
         "snapshot_hash": contract.snapshot_hash,
+        "image_digest": manifest.image_digest,
         "sandbox_id": sandbox.id,
         "sandbox_image": sandbox.image,
         "security_schema_version": contract.security_schema_version,

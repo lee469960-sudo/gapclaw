@@ -162,6 +162,12 @@ def build_mcp_route_candidates(
     """Return authorized, describable bound MCPs without performing MCP I/O."""
     if "mcp_tool_call" not in set(allowed_actions or []):
         return []
+    # Lightweight unit-test/runtime adapters may provide only persistence
+    # methods (for saving chat messages) rather than the SQLAlchemy query API.
+    # Candidate routing is an optional optimisation; retain the normal tool
+    # path instead of making those adapters fail before the first LLM call.
+    if not hasattr(db, "query"):
+        return []
 
     candidates: list[McpRouteCandidate] = []
     seen: set[str] = set()

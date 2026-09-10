@@ -59,6 +59,14 @@ run_agent
 
 > `decision_engine.py` / `tool_executor.py` / `tool_router.py` / `intent_types.py` / `mcp_resource_bind.py` 已在 consolidation 中删除，其解析职责并入 `tool_parser.py`。
 
+### 1.3 模型路由的受控启用与回滚
+
+默认 Agent 继续使用其直接绑定的 `llm_id`。只有 Standard/React Agent 显式绑定有效的“模型路由策略”后，运行开始前才会从该策略允许的角色模型组中选择并冻结一个叶子模型；Code Profile 不支持该绑定。
+
+受控上线按以下顺序操作：先为叶子模型声明能力，再建立角色模型组和策略；记录目标 Agent 当前的直接 LLM；仅为小范围 Standard Agent 绑定策略；在会话“执行过程”中展开“模型路由”检查冻结模型、候选过滤、回退原因和耗时。不要把既有 `type=group` LLM Group 转换为角色模型组。
+
+回滚不需要删策略或审计记录：在 Agent 设置中清空“模型路由策略”并保存。此操作只解除 `routing_policy_id`，不会修改原有 `llm_id` 或 legacy LLM Group 成员；下一次任务立即恢复该 Agent 的直接模型执行。解绑后应发起一次小任务，确认没有新的“模型路由”步骤且实际使用原直接 LLM。
+
 ---
 
 ## 2. 请求生命周期
