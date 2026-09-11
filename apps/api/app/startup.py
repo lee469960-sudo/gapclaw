@@ -122,6 +122,11 @@ def init_db(db: Session) -> None:
             "local_publish_lock_key": "VARCHAR(255) DEFAULT ''",
         }
         with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(text(
+                    "ALTER TABLE code_project_manifests "
+                    "ALTER COLUMN status TYPE VARCHAR(32)"
+                ))
             for name, definition in manifest_columns.items():
                 if name not in cmcols:
                     conn.execute(text(

@@ -10,8 +10,12 @@ from sqlalchemy.orm import sessionmaker
 
 import app.database
 import app.startup
-from app.models import CodeProject, ModelRoleGroup, ModelRoutingPolicy, ModelRouteDecision
+from app.models import CodeProject, CodeProjectManifest, ModelRoleGroup, ModelRoutingPolicy, ModelRouteDecision
 from app.routers.agent import agent_get
+
+
+def test_code_project_manifest_status_allows_security_republish_required():
+    assert CodeProjectManifest.__table__.c.status.type.length == 32
 
 
 def test_existing_code_projects_table_is_migrated_for_agent_form_refs(monkeypatch, tmp_path):

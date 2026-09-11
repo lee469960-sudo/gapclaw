@@ -545,7 +545,7 @@ class CodeProjectManifest(Base):
     id: Mapped[str] = mapped_column(String(16), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(16), index=True)
     version: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(16), default="draft")
+    status: Mapped[str] = mapped_column(String(32), default="draft")
     source_id: Mapped[str] = mapped_column(String(16), default="", index=True)
     source_type: Mapped[str] = mapped_column(String(16), default="")
     credential_ref: Mapped[str] = mapped_column(String(128), default="")
