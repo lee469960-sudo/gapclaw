@@ -1,0 +1,29 @@
+gapclaw.online {
+  @api path /api/* /pages/* /hooks/* /ws* /health /docs* /openapi.json
+  handle @api {
+    reverse_proxy 127.0.0.1:8000
+  }
+  handle {
+    reverse_proxy 127.0.0.1:8080
+  }
+}
+
+runner.gapclaw.online {
+  tls {
+    client_auth {
+      mode require_and_verify
+      trust_pool file /etc/caddy/production/runner-ca.crt
+    }
+  }
+
+  @release_callback path /internal/release-runner/callback
+  handle @release_callback {
+    reverse_proxy 127.0.0.1:8000 {
+      header_up Host gapclaw.online
+      header_up X-Gap-Runner-Client-Verify SUCCESS
+    }
+  }
+  handle {
+    respond "not found" 404
+  }
+}

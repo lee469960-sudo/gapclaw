@@ -17,6 +17,7 @@ PAGE_ROUTE_MAP: dict[str, str] = {
     "/pages/page_terminal.cgi": "/terminals",
     "/pages/page_docker.cgi": "/docker",
     "/pages/page_monitor.cgi": "/monitor",
+    "/pages/page_release_management.cgi": "/release-management",
     "/pages/page_site.cgi": "/site",
     "/pages/system_me.cgi": "/me",
     "/pages/system_user.cgi": "/users",
@@ -64,6 +65,7 @@ MENU_GROUPS: list[dict] = [
             ("/pages/page_terminal.cgi", "远程终端"),
             ("/pages/page_docker.cgi", "Docker"),
             ("/pages/page_monitor.cgi", "监控"),
+            ("/pages/page_release_management.cgi", "发布管理"),
         ],
     },
     {

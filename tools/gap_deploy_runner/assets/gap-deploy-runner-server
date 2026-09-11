@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+runner_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export PYTHONPATH="$runner_root/lib${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m tools.gap_deploy_runner.server "$@"

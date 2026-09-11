@@ -1,0 +1,24 @@
+[Unit]
+Description=GAP Staging Deploy Runner restricted mTLS control service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=gap-staging-runner
+Group=gap-staging-runner
+SupplementaryGroups=docker
+EnvironmentFile=/opt/gap-staging-runner/runner.env
+ExecStart=/opt/gap-staging-runner/bin/gap-deploy-runner-server --root /opt/gap-staging-runner --app-env /opt/gap-staging/.env
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/gap-staging-runner/state
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

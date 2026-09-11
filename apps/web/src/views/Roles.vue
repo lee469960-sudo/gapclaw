@@ -134,6 +134,7 @@ const PAGE_GROUPS = [
       { path: '/pages/page_terminal.cgi', label: '远程终端' },
       { path: '/pages/page_docker.cgi', label: 'Docker' },
       { path: '/pages/page_monitor.cgi', label: '监控' },
+      { path: '/pages/page_release_management.cgi', label: '发布管理' },
     ],
   },
   {

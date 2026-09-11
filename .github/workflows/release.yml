@@ -17,10 +17,8 @@ jobs:
     name: Build and push (amd64 + arm64)
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    outputs:
-      image_tag: ${{ steps.meta.outputs.tag }}
-      image_api: ${{ steps.meta.outputs.api }}
-      image_web: ${{ steps.meta.outputs.web }}
+    env:
+      TARGET_ID: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,13 +31,10 @@ jobs:
         run: |
           set -euo pipefail
           GIT_TAG="${GITHUB_REF_NAME}"
-          case "${GIT_TAG}" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "Refusing git tag '${GIT_TAG}'; expected vMAJOR.MINOR.PATCH (e.g. v1.0.0)" >&2
-              exit 1
-              ;;
-          esac
+          if [[ ! "${GIT_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing git tag '${GIT_TAG}'; expected vMAJOR.MINOR.PATCH (e.g. v1.0.0)" >&2
+            exit 1
+          fi
           if [ ! -f deploy/gap.version ]; then
             echo "deploy/gap.version is required" >&2
             exit 1
@@ -47,6 +42,10 @@ jobs:
           TAG="$(tr -d '[:space:]' < deploy/gap.version)"
           if [ -z "${TAG}" ]; then
             echo "deploy/gap.version is empty" >&2
+            exit 1
+          fi
+          if [ "${GIT_TAG}" != "${TAG}" ]; then
+            echo "Refusing release: git tag '${GIT_TAG}' must exactly equal deploy/gap.version '${TAG}'" >&2
             exit 1
           fi
           # Keep the packaged file identical to git: CI tag only triggers the
@@ -85,6 +84,7 @@ jobs:
           password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
 
       - name: Build and push API (linux/amd64, linux/arm64)
+        id: api-build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -102,6 +102,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=gap-api
 
       - name: Build and push Web (linux/amd64, linux/arm64)
+        id: web-build
         uses: docker/build-push-action@v6
         with:
           context: apps/web
@@ -116,22 +117,75 @@ jobs:
           cache-from: type=gha,scope=gap-web
           cache-to: type=gha,mode=max,scope=gap-web
 
-  deploy:
-    name: Deploy on self-hosted runner
-    needs: build
-    runs-on: [self-hosted, linux, production]
-    timeout-minutes: 20
-    steps:
-      - name: Checkout tagged revision
-        uses: actions/checkout@v4
-
-      - name: Deploy from ACR
+      - name: Create immutable release manifest
         env:
-          ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
-          ALIYUN_REGISTRY_USERNAME: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
-          ALIYUN_REGISTRY_PASSWORD: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
-          ALIYUN_IMAGE: ${{ secrets.ALIYUN_IMAGE }}
-          IMAGE_API: ${{ needs.build.outputs.image_api }}
-          IMAGE_WEB: ${{ needs.build.outputs.image_web }}
-          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
-        run: ./scripts/deploy.sh "${{ needs.build.outputs.image_tag }}"
+          GIT_TAG: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.meta.outputs.tag }}
+          IMAGE_API: ${{ steps.meta.outputs.api }}
+          IMAGE_WEB: ${{ steps.meta.outputs.web }}
+          API_DIGEST: ${{ steps.api-build.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          git_tag = os.environ["GIT_TAG"]
+          version = os.environ["VERSION"]
+          if git_tag != version:
+              raise SystemExit("git tag and release version must match exactly")
+          api_digest = os.environ["API_DIGEST"]
+          web_digest = os.environ["WEB_DIGEST"]
+          if not api_digest.startswith("sha256:") or not web_digest.startswith("sha256:"):
+              raise SystemExit("build outputs must contain immutable image digests")
+
+          manifest = {
+              "schema_version": 1,
+              "release_id": f"{git_tag}-{os.environ['GIT_SHA'][:8]}",
+              "git_tag": git_tag,
+              "version": version,
+              "commit_sha": os.environ["GIT_SHA"],
+              "target_id": os.environ["TARGET_ID"],
+              "api_image": f"{os.environ['IMAGE_API']}@{api_digest}",
+              "web_image": f"{os.environ['IMAGE_WEB']}@{web_digest}",
+              "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "health_check_version": "v1",
+          }
+          with open(".release/release-manifest.json", "w", encoding="utf-8") as output:
+              json.dump(manifest, output, sort_keys=True)
+              output.write("\n")
+          PY
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gap-release-manifest
+          path: .release/release-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create staging release manifest
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+
+          with open(".release/release-manifest.json", encoding="utf-8") as source:
+              manifest = json.load(source)
+          manifest["target_id"] = "staging"
+          with open(".release/release-manifest-staging.json", "w", encoding="utf-8") as output:
+              json.dump(manifest, output, sort_keys=True)
+              output.write("\n")
+          PY
+
+      - name: Upload staging release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gap-staging-release-manifest
+          path: .release/release-manifest-staging.json
+          if-no-files-found: error
+          retention-days: 7

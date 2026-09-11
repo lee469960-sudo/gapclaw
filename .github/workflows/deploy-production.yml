@@ -1,0 +1,42 @@
+name: Deploy GAP Production
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v') &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    name: Deploy verified manifest on fixed host runner
+    runs-on: [self-hosted, linux, production]
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - name: Download verified release manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: gap-release-manifest
+          path: ${{ runner.temp }}/gap-release-manifest
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Deploy with fixed host runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/gap-release-manifest/release-manifest.json"
+          test -f "${manifest}"
+          /opt/gap-runner/bin/gap-deploy-runner deploy --manifest "${manifest}"

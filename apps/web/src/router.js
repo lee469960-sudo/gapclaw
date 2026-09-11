@@ -38,6 +38,7 @@ const routes = [
       { path: 'terminals', name: 'terminals', component: () => import('./views/Terminals.vue'), meta: { route: '/terminals' } },
       { path: 'docker', name: 'docker', component: () => import('./views/Docker.vue'), meta: { route: '/docker' } },
       { path: 'monitor', name: 'monitor', component: () => import('./views/Monitor.vue'), meta: { route: '/monitor' } },
+      { path: 'release-management', name: 'release-management', component: () => import('./views/ReleaseManagement.vue'), meta: { route: '/release-management' } },
       { path: 'site', name: 'site', component: () => import('./views/Site.vue'), meta: { route: '/site' } },
       { path: 'me', name: 'me', component: () => import('./views/Me.vue'), meta: { route: '/me' } },
       { path: 'users', name: 'users', component: () => import('./views/Users.vue'), meta: { route: '/users' } },

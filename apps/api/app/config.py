@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
+    # Release Agent control plane: one process-fixed deployment environment.
+    # Target, Runner URL, and callback identity are derived from this value and
+    # can never be selected by a browser, API request, or release manifest.
+    release_environment: str = "production"
+    release_runner_ca_file: str = ""
+    release_runner_client_cert_file: str = ""
+    release_runner_client_key_file: str = ""
+    release_runner_timeout_seconds: float = 10.0
 
     @property
     def cors_origin_list(self) -> list[str]:

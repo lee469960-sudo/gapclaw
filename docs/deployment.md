@@ -1,160 +1,136 @@
-# 生产发布（Git Tag → ACR → Self-hosted Runner）
+# GAP 生产发布与运维
 
-推送形如 `v1.0.0` 的 Git tag 后，GitHub Actions 在 GitHub-hosted runner 上用 Buildx 构建 **linux/amd64 + linux/arm64** 镜像，推送到阿里云 ACR，再由目标机上的 Self-hosted Runner 只做 `docker compose pull/up` 和健康检查。服务器**不编译、不 git pull 业务代码**。
+本流程使用不可变镜像 digest、固定主机 Deploy Runner 和受限 Release Agent 完成 GAP 自身发布。生产主机不检出 Git tag，也不执行 tag 中的脚本或 Compose 文件。
 
-本地开发仍使用 `deploy/docker-compose.yml` 与 `deploy/build-local.sh`（按架构打 `gap-api-amd` / `gap-api-arm` 单架构标签）。生产多架构镜像不再带 `-amd`/`-arm` 后缀。
+## 发布链路与权限边界
 
-## GitHub Secrets
+1. 推送 `vMAJOR.MINOR.PATCH` tag 后，`Release` 工作流要求它与该提交的 `deploy/gap.version` 完全一致。
+2. GitHub-hosted 构建任务向 ACR 推送 API/Web 镜像，并上传含 API/Web digest 的 `gap-release-manifest`。
+3. 默认分支中的 `Deploy GAP Production` 工作流只在成功的同仓库 Release 后运行。它使用受保护的 `production` GitHub Environment 和带 `self-hosted`、`linux`、`production` 标签的 Runner，执行唯一固定命令：
 
-在仓库 **Settings → Secrets and variables → Actions** 配置：
+   ```bash
+   /opt/gap-runner/bin/gap-deploy-runner deploy --manifest "${RUNNER_TEMP}/gap-release-manifest/release-manifest.json"
+   ```
 
-| Secret | 含义 | 示例 |
-| --- | --- | --- |
-| `ALIYUN_REGISTRY` | ACR 域名 | `crpi-xxxx.cn-chengdu.personal.cr.aliyuncs.com` |
-| `ALIYUN_REGISTRY_USERNAME` | ACR 用户名 | 阿里云 RAM / ACR 登录名 |
-| `ALIYUN_REGISTRY_PASSWORD` | ACR 密码 | 只放 Secret，禁止写入 Git |
-| `ALIYUN_IMAGE` | **API** 仓库路径（不含 tag） | `tools_claw/gap-api` |
+4. 主机 Runner 校验 manifest、目标、仓库、tag/version 和 SHA-256 digest 后，才使用 `/opt/gap-runner/compose/gap-prod.compose.yml` 操作 Compose。
 
-最终镜像：
+部署工作流不 checkout tag、不读取 `scripts/deploy.sh`、不执行仓库 Compose 文件，也不接收 ACR pull 凭据。GitHub 的 `production` Environment 应限制为受保护默认分支工作流和经过审批的生产操作人员。
+
+## 首次主机安装
+
+在生产主机安装 Docker Engine、`docker compose` 插件和已由主机运维的 Caddy。GAP Compose 不创建也不加入公共代理网络；API 与 Web 仅发布到 host loopback。安装随已审核 Runner 发布包提供的固定资产：
+
+```bash
+sudo sh tools/gap_deploy_runner/assets/initialize-host.sh
+sudo sh tools/gap_deploy_runner/assets/install-production-caddy.sh
+sudo systemctl daemon-reload
+```
+
+初始化脚本创建 `/opt/gap-runner`、状态目录、固定 Compose 资产、`Caddyfile.production` 副本和 `gap-deploy-runner.service`。`install-production-caddy.sh` 仅在主 Caddyfile 已显式导入 `/etc/caddy/sites/*.Caddyfile`、且 production callback CA 已就位时，安装 `/etc/caddy/sites/gap-production.Caddyfile`，先执行 `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`，再 reload Caddy；它不会覆盖主 Caddyfile，也不会启动或加载 Nginx。将已审核的 Runner 二进制分别安装到：
 
 ```text
-${ALIYUN_REGISTRY}/${ALIYUN_IMAGE}:v1.0.0
-${ALIYUN_REGISTRY}/${ALIYUN_IMAGE}:latest
+/opt/gap-runner/bin/gap-deploy-runner
+/opt/gap-runner/bin/gap-deploy-runner-server
 ```
 
-Web 镜像由 API 路径推导：若 `ALIYUN_IMAGE` 以 `-api` 结尾，则换成 `-web`（`tools_claw/gap-api` → `tools_claw/gap-web`），否则追加 `-web`。
+服务以 `gap-runner` 用户运行；不要以 root、GitHub Runner 用户或 GAP 应用容器身份直接执行部署。
 
-数据库镜像**不随 tag 构建**。在服务器 `/opt/gap/.env` 的 `IMAGE_DB`（或沿用 `GAP_IMAGE_DB`）填写已有 Postgres/pgvector 地址。
+### 主机配置与 ACR pull 凭据
 
-## 服务器首次初始化
+`/opt/gap/.env` 是唯一的主机受管应用和 ACR pull 配置。它至少包含：
 
-以下在**目标生产机**执行。Runner labels 必须包含 `self-hosted`、`linux`、`production`。
+```dotenv
+ALIYUN_REGISTRY=registry.example.com
+ALIYUN_REGISTRY_USERNAME=host-pull-user
+ALIYUN_REGISTRY_PASSWORD=host-pull-password
+ALIYUN_IMAGE=namespace/gap-api
+IMAGE_DB=registry.example.com/namespace/gap-db@sha256:...
+GAP_DATA_DIR=/opt/gap/data
 
-### 1. 安装 Docker
+RELEASE_TARGET_ID=production
+RELEASE_RUNNER_BASE_URL=https://gap-runner.internal:9443
+RELEASE_RUNNER_CA_FILE=/run/gap-release-mtls/ca.crt
+RELEASE_RUNNER_CLIENT_CERT_FILE=/run/gap-release-mtls/gap-client.crt
+RELEASE_RUNNER_CLIENT_KEY_FILE=/run/gap-release-mtls/gap-client.key
+RELEASE_RUNNER_TIMEOUT_SECONDS=10
+```
+
+该文件只供主机 Runner/Compose 使用，不得加入 Git、GitHub Secrets 的部署 job、浏览器响应或发布审计。文件须由 `gap-runner` 独占可读：
 
 ```bash
-curl -fsSL https://get.docker.com | sudo sh
-sudo systemctl enable --now docker
+sudo chown gap-runner:gap-runner /opt/gap/.env
+sudo chmod 0600 /opt/gap/.env
 ```
 
-### 2. 安装 Docker Compose Plugin
+Runner 的监听/服务端 TLS 配置在 `/opt/gap-runner/runner.env`；可从 `runner.env.example` 创建后填写。它的 `GAP_RUNNER_LISTEN` 应绑定 Docker bridge（示例为 `172.17.0.1:9443`），主机防火墙只允许该 bridge 访问 9443，不得向公网开放。
+
+### 私有控制面与公网回调
+
+- GAP API 容器通过 Compose 中唯一的 `gap-runner.internal:host-gateway` 映射访问 `https://gap-runner.internal:9443`。该地址仅服务 `GET /v1/status`、`GET /v1/health` 和无输入的 `POST /v1/rollback`。
+- `/opt/gap/release-mtls` 只读挂载到 API 容器的 `/run/gap-release-mtls`，保存 GAP 客户端所需 CA、证书和私钥。不要把这些材料放进镜像或 API 响应。
+- `https://runner.gapclaw.online/internal/release-runner/callback` 是另一个方向：它仅接受 Runner 到 GAP 的 `POST`，由宿主机 Caddy 以 `require_and_verify` mTLS 验证。它不代理 `/v1/*`；任何其他 callback host 路径返回 404，未持受信任客户端证书的请求在到达 GAP 前被拒绝。
+- `gapclaw.online` 仅由宿主机 Caddy 提供 GAP Web/API。Caddy 将明确列出的 API/WebSocket 路径反向代理至 `127.0.0.1:8000`，其余浏览器流量代理至 `127.0.0.1:8080`；GAP API/Web 不直接绑定公网接口，也不加入可被后续 Compose 栈共享的代理网络。
+
+### Caddy 站点与后续 Compose 扩展
+
+主机 Caddy 主配置必须保留这一已审核 import（可与主机其他安全全局配置并存）：
+
+```caddyfile
+import /etc/caddy/sites/*.Caddyfile
+```
+
+production site 使用 `gapclaw.online` 和固定 callback host `runner.gapclaw.online`；callback 信任 CA 位于：
+
+```text
+/etc/caddy/production/runner-ca.crt
+```
+
+该 CA 只授予 Caddy 读取权限，且必须与 staging CA 分离。后续第二个 Compose 栈必须使用独立的显式域名或子域名、独立 loopback upstream 与单独的 `/etc/caddy/sites/*.Caddyfile` site；不得复用 GAP site、取得 catch-all 路由、绑定 80/443，或访问 GAP API 容器网络。
+
+配置完成后启用 Runner 服务：
 
 ```bash
-docker compose version
+sudo systemctl enable --now gap-deploy-runner
+sudo systemctl status gap-deploy-runner
 ```
 
-若未安装，按 [Docker Compose 插件说明](https://docs.docker.com/compose/install/linux/) 安装 `docker-compose-plugin`。
+## mTLS 轮换
 
-### 3. 创建部署目录
+使用私有 CA 为 Runner 服务端证书签发 `gap-runner.internal` SAN，并为 GAP API 与 Runner callback 分别签发客户端身份。维护这些受管位置：
+
+```text
+/opt/gap-runner/tls/ca.crt
+/opt/gap-runner/tls/runner.crt
+/opt/gap-runner/tls/runner.key
+/opt/gap/release-mtls/ca.crt
+/opt/gap/release-mtls/gap-client.crt
+/opt/gap/release-mtls/gap-client.key
+/etc/caddy/production/runner-ca.crt
+```
+
+轮换时先让新旧 CA 在信任链中重叠，替换客户端/服务端证书后重启 Runner 与受影响的 GAP Compose 服务，再撤销旧 CA。每次轮换均验证私有 Runner 的 status/health、受保护 callback 以及未持证书客户端被拒绝。私钥必须不可被其他用户读取，且不得记录到日志或审计表。
+
+## 发布、健康基线与回滚
+
+首次发布没有已知健康版本；若健康检查失败，Runner 记录 `reconciliation_required`，不会猜测镜像。先完成一次成功的 digest 发布，确认 Compose 服务健康且 API `/health` 返回 `{"status":"ok"}`，再将其作为首个 `last_known_healthy` 基线。
+
+日常发布只需：
 
 ```bash
-sudo mkdir -p /opt/gap/data
-sudo chown -R "$USER:$USER" /opt/gap
+git tag v1.2.3
+git push origin v1.2.3
 ```
 
-将仓库中的 `deploy/.env.example` 复制为服务器私密配置（**不要**提交真实 `.env`）：
+通过「发布管理」查看状态、健康、自动回滚和历史。只有管理员可见受确认回滚；必须选择 Runner 显示的已知健康目标并输入 `ROLLBACK`。界面不能接受 tag、镜像或 digest。
+
+紧急情况下，经过授权的主机操作员可绕过 GAP UI，调用固定无输入回滚操作：
 
 ```bash
-cp deploy/.env.example /opt/gap/.env
-chmod 600 /opt/gap/.env
+sudo -u gap-runner /opt/gap-runner/bin/gap-deploy-runner rollback
 ```
 
-至少填写：
+随后检查 Runner status/health 与 GAP 发布管理历史是否一致；不一致时保持 `reconciliation_required`，不要重新执行或手工指定镜像。
 
-- `IMAGE_API` / `IMAGE_WEB`（可与 Secrets 中的 ACR 路径一致；Actions 部署时会覆盖 tag）
-- `IMAGE_DB`
-- `GAP_DATA_DIR=/opt/gap/data`
-- `DOCKER_DATA_HOST_PATH=/opt/gap/data`
-- `CORS_ORIGINS`（生产域名）
-- `SECRET_KEY`、`ADMIN_PASSWORD`（不要用示例占位）
-- `ALIYUN_REGISTRY` / `ALIYUN_REGISTRY_USERNAME` / `ALIYUN_REGISTRY_PASSWORD`（若仅靠 Actions 注入也可留空，由 workflow env 提供）
+## Code Agent 边界
 
-### 4–6. 安装并注册 GitHub Actions Self-hosted Runner（systemd）
-
-在仓库 **Settings → Actions → Runners → New self-hosted runner** 按 Linux 提示下载。示例（版本号以 GitHub 页面为准）：
-
-```bash
-mkdir -p "$HOME/actions-runner" && cd "$HOME/actions-runner"
-curl -o actions-runner-linux.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64-2.321.0.tar.gz
-tar xzf actions-runner-linux.tar.gz
-./config.sh --url https://github.com/<ORG_OR_USER>/gapclaw --token <REGISTRATION_TOKEN> \
-  --labels self-hosted,linux,production --name gap-prod-1
-sudo ./svc.sh install
-sudo ./svc.sh start
-```
-
-ARM 机器请下载 `actions-runner-linux-arm64-*.tar.gz`。`--token` 一次性注册令牌来自 GitHub 页面，不要写入仓库。
-
-### 7. Docker 权限
-
-Runner 进程用户必须能无 sudo 调用 Docker：
-
-```bash
-sudo usermod -aG docker "$USER"
-```
-
-安装成 systemd 服务后，重启 runner 服务使组生效：
-
-```bash
-sudo ./svc.sh stop && sudo ./svc.sh start
-docker ps
-```
-
-### 8. 部署文件
-
-生产 compose 在仓库 `deploy/docker-compose.prod.yml`。workflow 会 checkout **该 tag** 再执行 `./scripts/deploy.sh`，因此不需要在服务器上 `git pull` 业务。`/opt/gap/.env` 与数据目录必须留在仓库 checkout 之外，避免被工作区清理删掉。
-
-可选：`export DEPLOY_ENV_FILE=/opt/gap/.env` 写入 runner 的 `.env`（`actions-runner/.env`）或 systemd 环境。脚本默认即读取 `/opt/gap/.env`。
-
-### 9. GitHub Secrets
-
-见上文表格。不要把 ACR 密码写入仓库或 `docs/`。
-
-### 10. 第一次发布验证
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-然后确认：
-
-1. Actions 中 **Release** workflow 的 `build` 成功（双架构 push）。
-2. `deploy` job 跑在带 `production` 标签的 self-hosted runner。
-3. `curl -sf http://127.0.0.1:8000/health` 返回 `"status":"ok"`。
-4. 浏览器打开 Web 端口（默认 5173）。
-
-## 发布命令
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-并发：workflow `concurrency.group: production-deploy` 且 `cancel-in-progress: false`，同一时刻只跑一条生产发布。
-
-## 回滚
-
-服务器已有旧 tag 镜像时，直接再部署该 tag（镜像仍在 ACR）：
-
-```bash
-./scripts/deploy.sh v0.9.0
-```
-
-或重新推送/重跑旧 tag 的 workflow。回滚**不会**自动改 Git 默认分支，只切换 Compose 使用的 `IMAGE_TAG`。
-
-## 验证多架构镜像
-
-```bash
-# 清单应同时包含 amd64 与 arm64
-docker buildx imagetools inspect ${ALIYUN_REGISTRY}/${ALIYUN_IMAGE}:v1.0.0
-docker buildx imagetools inspect ${ALIYUN_REGISTRY}/tools_claw/gap-web:v1.0.0
-```
-
-目标机：
-
-```bash
-uname -m                    # x86_64 → amd64；aarch64 → arm64
-docker compose -p gap -f deploy/docker-compose.prod.yml ps
-curl -sf http://127.0.0.1:8000/health
-```
+既有 Code Agent Docker socket 挂载未在本变更中迁移或移除，但它不属于 Release Agent 的权限。Release Agent 没有 Docker、shell、SSH、MCP、通用 URL/命令执行或 ACR 写入凭据；所有 GAP 自部署只能由固定 Deploy Runner 完成。

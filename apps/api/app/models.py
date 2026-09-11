@@ -1174,3 +1174,55 @@ class ImEventLog(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     detail: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class ReleaseManifestRecord(Base):
+    __tablename__ = "release_manifest_records"
+
+    release_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(64), default="")
+    git_tag: Mapped[str] = mapped_column(String(128), default="")
+    commit_sha: Mapped[str] = mapped_column(String(64), default="")
+    api_image: Mapped[str] = mapped_column(String(512), default="")
+    web_image: Mapped[str] = mapped_column(String(512), default="")
+    created_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class ReleaseLifecycleAudit(Base):
+    __tablename__ = "release_lifecycle_audits"
+    __table_args__ = (UniqueConstraint("release_id", "status", name="uq_release_terminal_status"),)
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    health_result: Mapped[str] = mapped_column(String(32), default="")
+    rollback_result: Mapped[str] = mapped_column(String(32), default="")
+    failure_summary: Mapped[str] = mapped_column(Text, default="")
+    trigger_source: Mapped[str] = mapped_column(String(32), default="runner")
+    occurred_at: Mapped[str] = mapped_column(String(32), index=True)
+
+
+class ReleaseRollbackRequest(Base):
+    __tablename__ = "release_rollback_requests"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
+    requested_by: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    requested_at: Mapped[str] = mapped_column(String(32), default="")
+    completed_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class ReleaseCallbackDelivery(Base):
+    __tablename__ = "release_callback_deliveries"
+    __table_args__ = (UniqueConstraint("release_id", "status", name="uq_release_callback_status"),)
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    delivery_state: Mapped[str] = mapped_column(String(32), default="received")
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    received_at: Mapped[str] = mapped_column(String(32), default="")

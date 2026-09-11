@@ -1,0 +1,54 @@
+services:
+  db:
+    image: ${IMAGE_DB:?IMAGE_DB is required}
+    env_file: /opt/gap-staging/.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gap} -d ${POSTGRES_DB:-gap}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [gap-staging]
+  api:
+    image: ${GAP_RELEASE_API_IMAGE:?immutable API digest is required}
+    env_file: /opt/gap-staging/.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gap}:${POSTGRES_PASSWORD:-gap}@db:5432/${POSTGRES_DB:-gap}
+      GAP_VERSION: ${GAP_VERSION:?release version is required}
+      RELEASE_ENVIRONMENT: staging
+    volumes:
+      - ${GAP_DATA_DIR:-/opt/gap-staging/data}:/app/data
+      - /opt/gap-staging/release-mtls:/run/gap-release-mtls:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "gap-runner-staging.internal:host-gateway"
+    ports: ["127.0.0.1:${API_PORT:-18000}:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks: [gap-staging]
+  web:
+    image: ${GAP_RELEASE_WEB_IMAGE:?immutable Web digest is required}
+    env_file: /opt/gap-staging/.env
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    ports: ["127.0.0.1:${WEB_PORT:-18080}:8080"]
+    networks: [gap-staging]
+volumes:
+  pgdata:
+networks:
+  gap-staging:
+    name: gap-staging
