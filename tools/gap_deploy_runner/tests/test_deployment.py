@@ -24,6 +24,21 @@ def test_success_records_known_healthy(tmp_path):
     assert runner.deploy(_manifest(1))["phase"] == "succeeded"
 
 
+def test_health_polling_waits_for_a_starting_service(tmp_path):
+    waits = []
+    runner = HealthGatedDeployment(
+        ReleaseStateStore(tmp_path / "state.json", target_id="production"),
+        Compose([False, True]),
+        Api([True]),
+        allowed_images={"api": "registry.example.com/gap-api", "web": "registry.example.com/gap-web"},
+        health_attempts=2,
+        health_interval_seconds=5,
+        sleeper=waits.append,
+    )
+    assert runner.deploy(_manifest(1))["phase"] == "succeeded"
+    assert waits == [5]
+
+
 def test_failed_health_automatically_rolls_back(tmp_path):
     runner = _runner(tmp_path, [True], [True])
     runner.deploy(_manifest(1))

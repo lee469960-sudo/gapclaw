@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from time import sleep
+from typing import Callable, Protocol
 
 from tools.gap_deploy_runner.release_manifest import ReleaseManifest
 from tools.gap_deploy_runner.state import ReleaseStateStore
@@ -42,10 +43,18 @@ class HealthGatedDeployment:
         *,
         allowed_images: dict[str, str],
         callbacks: TerminalCallbackDispatcher | None = None,
+        health_attempts: int = 1,
+        health_interval_seconds: float = 0,
+        sleeper: Callable[[float], None] = sleep,
     ):
+        if health_attempts < 1:
+            raise ValueError("health_attempts must be positive")
         self.store, self.compose, self.api, self.allowed_images, self.callbacks = (
             store, compose, api, allowed_images, callbacks,
         )
+        self.health_attempts = health_attempts
+        self.health_interval_seconds = health_interval_seconds
+        self.sleeper = sleeper
 
     def deploy(self, manifest: ReleaseManifest) -> dict[str, object]:
         with self.store.locked():
@@ -73,10 +82,15 @@ class HealthGatedDeployment:
             )
 
     def _healthy(self) -> bool:
-        try:
-            return self.compose.services_healthy() and self.api.ready()
-        except TimeoutError:
-            return False
+        for attempt in range(self.health_attempts):
+            try:
+                if self.compose.services_healthy() and self.api.ready():
+                    return True
+            except TimeoutError:
+                pass
+            if attempt + 1 < self.health_attempts:
+                self.sleeper(self.health_interval_seconds)
+        return False
 
     def _complete(
         self,

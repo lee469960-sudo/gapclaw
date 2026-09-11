@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -16,6 +17,8 @@ from tools.gap_deploy_runner.release_manifest import ReleaseManifest, ReleaseMan
 from tools.gap_deploy_runner.result_callback import GapCallbackTls, HttpsCallbackTransport, ResultCallbackDispatcher
 from tools.gap_deploy_runner.runner import RunnerCommandError, RunnerOperation
 from tools.gap_deploy_runner.state import ReleaseStateStore
+
+logger = logging.getLogger(__name__)
 
 
 class RunnerRuntimeError(RuntimeError):
@@ -42,10 +45,17 @@ class DockerComposeHost(ComposeAdapter):
             self._command("up", "--detach", "--remove-orphans"),
             env={**os.environ, **environment},
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
             check=False,
         )
         if completed.returncode != 0:
+            detail = (completed.stderr or "").strip().splitlines()
+            message = detail[-1] if detail else ""
+            for value in environment.values():
+                if len(value) >= 4:
+                    message = message.replace(value, "[redacted]")
+            logger.warning("GAP Compose apply failed (exit %s): %s", completed.returncode, message[:512])
             raise RunnerRuntimeError("runner_compose_apply_failed")
 
     def services_healthy(self) -> bool:
@@ -106,6 +116,8 @@ class DeployRunnerRuntime:
             LocalApiHealth(self._api_port),
             allowed_images=dict(self.config.allowed_images),
             callbacks=callbacks,
+            health_attempts=12,
+            health_interval_seconds=5,
         )
 
     def dispatch(self, operation: str, *, manifest_payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
