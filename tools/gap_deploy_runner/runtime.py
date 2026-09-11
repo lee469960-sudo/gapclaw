@@ -32,6 +32,7 @@ class DockerComposeHost(ComposeAdapter):
 
     def __init__(self, config: RunnerConfig, installation: RunnerInstallation):
         self.config, self.installation = config, installation
+        self._active_environment: dict[str, str] = {}
 
     def _command(self, *args: str) -> list[str]:
         return [
@@ -41,6 +42,7 @@ class DockerComposeHost(ComposeAdapter):
 
     def apply(self, manifest: ReleaseManifest) -> None:
         environment = self.config.compose_environment(manifest)
+        self._active_environment = environment
         completed = subprocess.run(
             self._command("up", "--detach", "--remove-orphans"),
             cwd=self.installation.compose_file.parent,
@@ -63,6 +65,7 @@ class DockerComposeHost(ComposeAdapter):
         completed = subprocess.run(
             self._command("ps", "--format", "json"),
             cwd=self.installation.compose_file.parent,
+            env={**os.environ, **self._active_environment},
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
