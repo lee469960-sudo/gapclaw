@@ -24,12 +24,12 @@ The target is one existing production host running GAP and, later, a second inde
 
 The current release workflow will be split logically into:
 
-1. A tag-triggered build workflow that checks out the tag, validates `GITHUB_REF_NAME == deploy/gap.version`, builds API and Web, captures each multi-platform `build-push-action` output digest, and uploads a small versioned release-manifest artifact.
-2. A production deployment workflow defined on the protected default branch and activated only after the build workflow succeeds. It runs under the existing `production` GitHub Environment and on the production self-hosted runner. It downloads the source-run artifact by run id and does not check out the tag.
+1. A tag-triggered GitHub-hosted build workflow that checks out the tag, validates `GITHUB_REF_NAME == deploy/gap.version`, builds API and Web, captures each multi-platform `build-push-action` output digest, and creates a small versioned release manifest.
+2. The same CI job canonicalizes that manifest, assigns a unique delivery id and posts it to GAP's fixed HTTPS Hook with an HMAC-SHA256 signature and bounded timestamp. It does not invoke a server-side GitHub runner, transmit ACR credentials, or execute repository deployment scripts.
 
 The manifest schema is fixed and includes: `schema_version`, `release_id`, `git_tag`, `version`, `commit_sha`, `target_id`, `api_image`, `web_image`, `created_at`, and `health_check_version`. Image references are canonical `repository@sha256:...` values, while `version` remains available for the GAP version display. The deployment job validates this schema and invokes only the installed host command with the manifest path.
 
-`workflow_run` (or the equivalent GitHub default-branch-only trigger) is chosen because the production deployment definition is evaluated from the default branch rather than the tagged source. The alternative—keeping a `deploy` job in the tag-triggered workflow—would still permit a tag to change host-executed YAML even after moving `deploy.sh` out of the repository, so it is rejected.
+The server does not fetch GitHub artifacts or register a GitHub Runner. GAP validates the fixed signed envelope before it can reach the private Runner; the Runner independently repeats manifest/repository/digest validation. This preserves tag-content isolation without requiring GitHub egress from production.
 
 ### 2. Install a fixed, local Deploy Runner on the production host
 
@@ -47,7 +47,7 @@ The Runner is a systemd-managed host service with assets controlled outside an a
 
 The protected GitHub deployment workflow uses only `gap-deploy-runner deploy --manifest <verified-file>`. The command validates the manifest schema, target id, canonical allowed API/Web repositories, SHA-256 digest form, and tag/version consistency before it performs a Compose operation. The fixed Compose template receives digest image references, never `latest`; it has no dependency on source files checked out by GitHub Actions.
 
-The Runner exposes a separate, narrow mTLS HTTP control surface for `GET /v1/status`, `GET /v1/health`, and `POST /v1/rollback`. `deploy` is deliberately local-only, so GAP cannot initiate deployment. File ownership and systemd permissions limit Docker/Compose authority to the Runner service account. The Runner reads ACR pull credentials only from `/opt/gap/.env`; GitHub secrets for the deployment job contain no registry password.
+The Runner exposes a narrow mTLS HTTP control surface for `POST /v1/deploy`, `GET /v1/status`, `GET /v1/health`, and `POST /v1/rollback`. The deploy route accepts only the fixed complete manifest from GAP's client identity; it has no URL, command, tag or caller-selected target input. File ownership and systemd permissions limit Docker/Compose authority to the Runner service account. The Runner reads ACR pull credentials only from `/opt/gap/.env`; GitHub receives no registry password.
 
 The current API Docker socket mount continues only for the existing Code Agent runtime and is not an approved Runner transport or Release Agent interface. The Release Agent implementation contains no Docker client, shell executor, MCP tool, or generic URL/command bridge.
 
@@ -61,9 +61,9 @@ The state files store fixed fields only: release/target identifiers, manifest di
 
 ### 4. Use bidirectional mTLS for the fixed Runner/GAP protocol
 
-Runner and the GAP release-management API use the private `https://gap-runner.internal:9443` endpoint, protected by mutual TLS and host-gateway network restriction. Only the GAP API container resolves this name to the host's Docker gateway; the Runner binds its configured Docker-bridge address and host firewall policy permits this port only from that bridge. GAP uses the Runner endpoints to read status/health and request the constrained rollback. Runner calls a GAP result endpoint after each terminal transition and retries persisted unsent results with backoff.
+GitHub CI calls `POST /internal/release-hook` through Caddy. GAP verifies the exact canonical manifest body using its host-provisioned HMAC secret, a bounded timestamp and an idempotent delivery id before persisting an intake audit. Only then does the non-LLM release intake service use the GAP mTLS identity at `https://gap-runner.internal:9443` to call fixed deploy. The private endpoint is reachable only from the GAP API container via Docker gateway; Runner callback retry remains unchanged.
 
-The shared protocol uses idempotent release ids and a fixed JSON result envelope. GAP validates both peer identity and envelope shape, deduplicates repeated terminal notifications, and stores a release audit record. Authentication/validation failures are rejected without state change. This avoids a reusable shared webhook secret and makes a delayed callback safe to retry.
+The Hook and Runner protocol use fixed envelopes only. GAP records accepted delivery ids before deploy so retries cannot produce a second deployment; signature, timestamp, source event, target or manifest validation failure has no state transition. The HMAC secret is not exposed through API/UI/audit/logs; it is a GitHub CI secret and host-provisioned GAP secret, not an ACR credential.
 
 ### 5. Implement Release Agent as a deterministic management surface
 
@@ -75,11 +75,11 @@ The optional LLM-facing explanation is a read-only rendering over persisted rele
 
 ### 6. Keep deployment configuration intentionally small and auditable
 
-New deployment configuration is limited to a target id, Runner base URL, CA bundle, GAP client certificate/key reference, and timeouts. ACR credentials remain host-only. The UI/API redact image registry credentials, private-key paths/content, and all unrelated application secrets. Installation documentation describes required protected GitHub rules, Runner service installation, host file ownership, certificate rotation, bootstrap behavior before a first healthy release, and the emergency direct-operator rollback path.
+New deployment configuration is limited to a target id, Runner base URL, CA bundle, GAP client certificate/key reference, Hook HMAC reference and bounded Hook time window. ACR credentials remain host-only. The UI/API redact image registry credentials, private-key paths/content, Hook secret and all unrelated application secrets. Documentation describes GitHub CI Hook configuration rather than GitHub Runner installation.
 
 ### 7. Use one host-managed Caddy service for domains and mTLS ingress
 
-Caddy is the already installed host-level service and exclusively binds ports 80 and 443. `gapclaw.online` routes browser traffic to loopback-only GAP Web/API upstreams using a reviewed production Caddyfile. Later Compose stacks use their own explicit domain/host-loopback upstream pair; they do not bind 80/443 and cannot forge Caddy's verified-client identity. GAP API and Web bind only host loopback, never directly to the public interface.
+Caddy is the already installed host-level service and exclusively binds ports 80 and 443. `gapclaw.online` routes browser traffic to loopback-only GAP Web/API upstreams and the exact `POST /internal/release-hook` path to the Hook receiver. Later Compose stacks use their own explicit domain/host-loopback upstream pair; they do not bind 80/443 and cannot forge Caddy's verified-client identity. GAP API and Web bind only host loopback, never directly to the public interface.
 
 `runner.gapclaw.online` exposes only `POST /internal/release-runner/callback`, requires a client certificate signed by the Runner private CA, removes any client-supplied identity header and sets the verified identity itself before proxying to GAP API. It is not a GAP-to-Runner control endpoint; all other public Runner-host requests receive no application route. A later Compose stack receives its own explicit Caddy site; this change does not add a catch-all route or a placeholder hostname for an unknown application.
 
@@ -97,8 +97,8 @@ The GAP mTLS client uses the fixed private `gap-runner.internal:9443` endpoint a
 
 ## Migration Plan
 
-1. Add and test the manifest generation/validation and default-branch deployment workflow without enabling production deployment.
+1. Add and test manifest generation/validation plus signed GitHub CI Hook delivery without enabling production deployment.
 2. Provision the host Caddy site, `gapclaw.online` DNS/TLS, Runner mTLS callback hostname, Runner host directory, service account, fixed Compose template and local ACR pull-only credentials; validate Caddy then verify public GAP routing and authenticated Runner callback manually.
 3. Deploy the GAP API/Web release-management capability, bootstrap a known healthy manifest, and verify callback/audit reconciliation.
-4. Enable the protected production Environment workflow for a controlled release. Exercise health success, failed health automatic rollback, GAP-unavailable callback retry, authorization denial, and administrator-confirmed rollback.
-5. Retire tag-checkout deployment and repository-owned production script execution only after the new loop passes the controlled release checks. Rollback of the rollout is to disable the protected deployment workflow and invoke the documented Runner emergency operation; the Runner state remains available for diagnosis.
+4. After the user explicitly authorizes the production host, configure GitHub CI's Hook secret and run one controlled production Hook release with the existing Caddy backup and automatic rollback safeguards. Exercise signature denial/replay denial, health success, failed health automatic rollback, GAP-unavailable callback retry and administrator-confirmed rollback.
+5. Retire GitHub self-hosted runner and repository-owned production script execution after the Hook loop passes controlled checks. Rollback is to disable Hook delivery and invoke the documented Runner emergency operation; the Runner state remains available for diagnosis.

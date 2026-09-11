@@ -168,24 +168,39 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Create staging release manifest
+      - name: Deliver signed manifest to GAP Hook
+        env:
+          RELEASE_HOOK_SECRET: ${{ secrets.GAP_RELEASE_HOOK_SECRET }}
+          DELIVERY_ID: release-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          test -n "${RELEASE_HOOK_SECRET}"
           python3 - <<'PY'
+          import hashlib
+          import hmac
           import json
+          import os
+          from datetime import datetime, timezone
 
           with open(".release/release-manifest.json", encoding="utf-8") as source:
               manifest = json.load(source)
-          manifest["target_id"] = "staging"
-          with open(".release/release-manifest-staging.json", "w", encoding="utf-8") as output:
-              json.dump(manifest, output, sort_keys=True)
-              output.write("\n")
-          PY
 
-      - name: Upload staging release manifest
-        uses: actions/upload-artifact@v4
-        with:
-          name: gap-staging-release-manifest
-          path: .release/release-manifest-staging.json
-          if-no-files-found: error
-          retention-days: 7
+          envelope = {
+              "delivery_id": os.environ["DELIVERY_ID"],
+              "issued_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "manifest": manifest,
+          }
+          canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+          signature = hmac.new(
+              os.environ["RELEASE_HOOK_SECRET"].encode("utf-8"), canonical, hashlib.sha256
+          ).hexdigest()
+          with open(".release/release-hook.json", "wb") as output:
+              output.write(canonical)
+          with open(".release/release-hook.signature", "w", encoding="utf-8") as output:
+              output.write(f"sha256={signature}\\n")
+          PY
+          curl --fail --silent --show-error --max-time 20 --retry 2 --retry-all-errors \
+            --request POST "https://gapclaw.online/internal/release-hook" \
+            --header "Content-Type: application/json" \
+            --header "X-GAP-Release-Signature: $(<.release/release-hook.signature)" \
+            --data-binary @.release/release-hook.json

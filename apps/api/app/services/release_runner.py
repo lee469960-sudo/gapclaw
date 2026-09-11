@@ -48,12 +48,16 @@ class ReleaseRunnerClient:
     def rollback(self) -> dict[str, Any]:
         return self._request("POST", "/v1/rollback")
 
-    def _request(self, method: str, path: str) -> dict[str, Any]:
+    def deploy(self, manifest: Mapping[str, object]) -> dict[str, Any]:
+        return self._request("POST", "/v1/deploy", json_payload=dict(manifest))
+
+    def _request(self, method: str, path: str, *, json_payload: dict[str, object] | None = None) -> dict[str, Any]:
         try:
             with self.client_factory(
                 verify=str(self.tls.ca_file), cert=(str(self.tls.cert_file), str(self.tls.key_file)), timeout=self.tls.timeout_seconds,
             ) as client:
-                response = client.request(method, f"{self.tls.base_url.rstrip('/')}{path}")
+                request_kwargs = {"json": json_payload} if json_payload is not None else {}
+                response = client.request(method, f"{self.tls.base_url.rstrip('/')}{path}", **request_kwargs)
                 response.raise_for_status()
                 payload = response.json()
         except httpx.HTTPError as exc:

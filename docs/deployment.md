@@ -6,15 +6,14 @@
 
 1. 推送 `vMAJOR.MINOR.PATCH` tag 后，`Release` 工作流要求它与该提交的 `deploy/gap.version` 完全一致。
 2. GitHub-hosted 构建任务向 ACR 推送 API/Web 镜像，并上传含 API/Web digest 的 `gap-release-manifest`。
-3. 默认分支中的 `Deploy GAP Production` 工作流只在成功的同仓库 Release 后运行。它使用受保护的 `production` GitHub Environment 和带 `self-hosted`、`linux`、`production` 标签的 Runner，执行唯一固定命令：
+3. 同一个 GitHub-hosted job 生成唯一 delivery id 与 UTC 时间戳，使用 GitHub secret `GAP_RELEASE_HOOK_SECRET` 对规范 JSON envelope 作 HMAC-SHA256 签名，并且只向固定地址 `POST https://gapclaw.online/internal/release-hook` 投递。
+4. GAP 的非 LLM Hook receiver 在验签、五分钟时窗、delivery/release 去重、目标、tag/version、SHA 与 digest 格式均通过后，才以其固定 mTLS 身份调用私有 `https://gap-runner.internal:9443/v1/deploy`。Runner 再次校验 manifest、允许仓库与目标，才使用 `/opt/gap-runner/compose/gap-prod.compose.yml` 操作 Compose。
 
-   ```bash
-   /opt/gap-runner/bin/gap-deploy-runner deploy --manifest "${RUNNER_TEMP}/gap-release-manifest/release-manifest.json"
-   ```
+GitHub 不 checkout 生产主机、不读取 `scripts/deploy.sh`、不执行仓库 Compose 文件，也不接收 ACR pull 凭据。生产服务器不安装 GitHub Actions Runner、不需要 runner token，也不需要访问 GitHub；它只需访问 ACR 拉取已固定的镜像 digest。
 
-4. 主机 Runner 校验 manifest、目标、仓库、tag/version 和 SHA-256 digest 后，才使用 `/opt/gap-runner/compose/gap-prod.compose.yml` 操作 Compose。
+### GitHub Hook secret
 
-部署工作流不 checkout tag、不读取 `scripts/deploy.sh`、不执行仓库 Compose 文件，也不接收 ACR pull 凭据。GitHub 的 `production` Environment 应限制为受保护默认分支工作流和经过审批的生产操作人员。
+在仓库 Actions secrets 中创建至少 32 字符的随机 `GAP_RELEASE_HOOK_SECRET`，并将**完全相同的值**仅写入生产主机 `/opt/gap/.env` 的 `RELEASE_HOOK_SECRET`。不要把它设为 ACR 密码、GitHub PAT、证书私钥或可猜测版本号。GitHub 工作流不打印该值，GAP 不将它写入发布审计、API 响应或日志。
 
 ## 首次主机安装
 
@@ -47,12 +46,13 @@ ALIYUN_IMAGE=namespace/gap-api
 IMAGE_DB=registry.example.com/namespace/gap-db@sha256:...
 GAP_DATA_DIR=/opt/gap/data
 
-RELEASE_TARGET_ID=production
-RELEASE_RUNNER_BASE_URL=https://gap-runner.internal:9443
+RELEASE_ENVIRONMENT=production
 RELEASE_RUNNER_CA_FILE=/run/gap-release-mtls/ca.crt
 RELEASE_RUNNER_CLIENT_CERT_FILE=/run/gap-release-mtls/gap-client.crt
 RELEASE_RUNNER_CLIENT_KEY_FILE=/run/gap-release-mtls/gap-client.key
 RELEASE_RUNNER_TIMEOUT_SECONDS=10
+RELEASE_HOOK_SECRET=replace-with-the-same-32-plus-character-github-secret
+RELEASE_HOOK_MAX_AGE_SECONDS=300
 ```
 
 该文件只供主机 Runner/Compose 使用，不得加入 Git、GitHub Secrets 的部署 job、浏览器响应或发布审计。文件须由 `gap-runner` 独占可读：
@@ -66,10 +66,10 @@ Runner 的监听/服务端 TLS 配置在 `/opt/gap-runner/runner.env`；可从 `
 
 ### 私有控制面与公网回调
 
-- GAP API 容器通过 Compose 中唯一的 `gap-runner.internal:host-gateway` 映射访问 `https://gap-runner.internal:9443`。该地址仅服务 `GET /v1/status`、`GET /v1/health` 和无输入的 `POST /v1/rollback`。
+- GAP API 容器通过 Compose 中唯一的 `gap-runner.internal:host-gateway` 映射访问 `https://gap-runner.internal:9443`。该地址仅服务由 GAP `gap-client` mTLS 身份调用的 `POST /v1/deploy`、`GET /v1/status`、`GET /v1/health` 和无输入的 `POST /v1/rollback`；deploy 只接受完整的已验证 manifest。
 - `/opt/gap/release-mtls` 只读挂载到 API 容器的 `/run/gap-release-mtls`，保存 GAP 客户端所需 CA、证书和私钥。不要把这些材料放进镜像或 API 响应。
 - `https://runner.gapclaw.online/internal/release-runner/callback` 是另一个方向：它仅接受 Runner 到 GAP 的 `POST`，由宿主机 Caddy 以 `require_and_verify` mTLS 验证。它不代理 `/v1/*`；任何其他 callback host 路径返回 404，未持受信任客户端证书的请求在到达 GAP 前被拒绝。
-- `gapclaw.online` 仅由宿主机 Caddy 提供 GAP Web/API。Caddy 将明确列出的 API/WebSocket 路径反向代理至 `127.0.0.1:8000`，其余浏览器流量代理至 `127.0.0.1:8080`；GAP API/Web 不直接绑定公网接口，也不加入可被后续 Compose 栈共享的代理网络。
+- `gapclaw.online` 仅由宿主机 Caddy 提供 GAP Web/API 和精确的 `POST /internal/release-hook`。Hook 仅反代到 `127.0.0.1:8000`，同一路径的其他方法为 404；明确列出的 API/WebSocket 路径也反代到 API，其余浏览器流量代理至 `127.0.0.1:8080`。GAP API/Web 不直接绑定公网接口，也不加入可被后续 Compose 栈共享的代理网络。
 
 ### Caddy 站点与后续 Compose 扩展
 
@@ -120,6 +120,8 @@ sudo systemctl status gap-deploy-runner
 git tag v1.2.3
 git push origin v1.2.3
 ```
+
+随后在 GitHub Actions 中确认 `Release` 的 Hook 步骤收到 202；在 Release Management 中确认同一 delivery 的 `received` 审计及后续 Runner 回传。若 GAP 到 Runner 的请求中断，保留 `dispatch_failed`/`reconciliation_required` 记录并执行对账；不要重放 delivery、手工改 Hook URL 或传递新镜像。
 
 通过「发布管理」查看状态、健康、自动回滚和历史。只有管理员可见受确认回滚；必须选择 Runner 显示的已知健康目标并输入 `ROLLBACK`。界面不能接受 tag、镜像或 digest。
 

@@ -17,6 +17,14 @@
 - **THEN** Release Agent 不执行该命令
 - **AND** 仅返回其受限发布管理能力允许的状态或回滚操作说明
 
+### Requirement: Release Intake 仅接收验证后的固定 CI 发布任务
+GitHub CI 的固定签名发布 Hook MUST 由非 LLM 的 Release Intake 服务处理。GAP SHALL 仅在 HMAC-SHA256 签名、时间窗口、delivery id、目标和完整不可变 manifest 均通过验证后创建发布 intake 记录并调用私网 Runner deploy。Release Agent 仅可读取该服务记录的 intake、部署和回传审计，且不得选择 Hook URL、目标、镜像、命令或签名材料。
+
+#### Scenario: 重复或无效 Hook
+- **WHEN** Hook 签名、时间窗口、delivery id 或 manifest 校验失败，或 delivery id 已被接受
+- **THEN** GAP 不调用 Runner 且不创建第二次部署
+- **AND** Release Agent 仅展示已存档的安全 intake 结果
+
 ### Requirement: 发布记录在 GAP 中可审计且与 Runner 状态对账
 系统 SHALL 持久化来自受信任 Runner 的发布生命周期记录，至少包含发布清单标识、目标标识、状态变迁、API/Web digest、开始与结束时间、健康结果、自动回滚结果、触发来源和失败摘要。Release Agent MUST 能标识 Runner 本地状态与 GAP 审计记录之间的未同步或不一致情形，不得假定中断部署已成功或盲目恢复。
 

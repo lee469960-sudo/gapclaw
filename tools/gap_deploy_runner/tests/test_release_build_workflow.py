@@ -5,8 +5,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
-DEPLOY_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "deploy-production.yml"
-STAGING_DEPLOY_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "deploy-staging.yml"
 
 
 def _workflow() -> str:
@@ -33,65 +31,54 @@ def test_tag_build_emits_digest_pinned_release_manifest_artifact():
     assert "path: .release/release-manifest.json" in workflow
 
 
-def test_tag_build_emits_a_separate_build_verified_staging_manifest():
+def test_tag_build_delivers_only_a_canonical_signed_manifest_to_the_fixed_hook():
     workflow = _workflow()
 
-    assert "name: Create staging release manifest" in workflow
-    assert 'manifest["target_id"] = "staging"' in workflow
-    assert "name: gap-staging-release-manifest" in workflow
-    assert "path: .release/release-manifest-staging.json" in workflow
+    assert "name: Deliver signed manifest to GAP Hook" in workflow
+    assert "RELEASE_HOOK_SECRET: ${{ secrets.GAP_RELEASE_HOOK_SECRET }}" in workflow
+    assert 'DELIVERY_ID: release-${{ github.run_id }}-${{ github.run_attempt }}' in workflow
+    assert 'json.dumps(envelope, sort_keys=True, separators=(",", ":"))' in workflow
+    assert "hmac.new(" in workflow
+    assert '"https://gapclaw.online/internal/release-hook"' in workflow
+    assert "X-GAP-Release-Signature" in workflow
+    assert "--data-binary @.release/release-hook.json" in workflow
 
 
-def test_production_deployment_uses_default_branch_workflow_run_and_fixed_runner():
-    workflow = DEPLOY_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-    assert "workflow_run:" in workflow
-    assert 'workflows: ["Release"]' in workflow
-    assert "types: [completed]" in workflow
-    assert "actions: read" in workflow
-    assert "environment: production" in workflow
-    assert "run-id: ${{ github.event.workflow_run.id }}" in workflow
-    assert "github-token: ${{ github.token }}" in workflow
-    assert "/opt/gap-runner/bin/gap-deploy-runner deploy --manifest" in workflow
-
-
-def test_production_deployment_never_checks_out_or_executes_tag_owned_assets():
-    workflow = DEPLOY_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-    assert "actions/checkout" not in workflow
-    assert "scripts/deploy.sh" not in workflow
-    assert "docker-compose.prod.yml" not in workflow
-    assert "ALIYUN_REGISTRY_PASSWORD" not in workflow
-
-
-def test_staging_deployment_uses_protected_environment_and_fixed_runner():
-    workflow = STAGING_DEPLOY_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-    assert "workflow_run:" in workflow
-    assert 'workflows: ["Release"]' in workflow
-    assert "types: [completed]" in workflow
-    assert "actions: read" in workflow
-    assert "runs-on: [self-hosted, linux, staging]" in workflow
-    assert "environment: staging" in workflow
-    assert "name: gap-staging-release-manifest" in workflow
-    assert "run-id: ${{ github.event.workflow_run.id }}" in workflow
-    assert "/opt/gap-staging-runner/bin/gap-deploy-runner deploy --manifest" in workflow
-
-
-def test_staging_deployment_never_checks_out_or_executes_tag_owned_assets_or_acr_login():
-    workflow = STAGING_DEPLOY_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-    assert "actions/checkout" not in workflow
-    assert "scripts/deploy.sh" not in workflow
-    assert "docker-compose.prod.yml" not in workflow
-    assert "acr login" not in workflow.lower()
-    assert "ALIYUN_REGISTRY_PASSWORD" not in workflow
-
-
-def test_tag_build_has_no_legacy_production_deploy_job_or_credential_transfer():
+def test_hook_delivery_has_no_registry_credentials_or_tag_controlled_host_execution():
     workflow = _workflow()
 
-    assert "\n  deploy:\n" not in workflow
-    assert "runs-on: [self-hosted, linux, production]" not in workflow
-    assert "./scripts/deploy.sh" not in workflow
-    assert "ALIYUN_REGISTRY_PASSWORD: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}" not in workflow
+    delivery = workflow.split("      - name: Deliver signed manifest to GAP Hook", 1)[1]
+
+    assert "ALIYUN_REGISTRY_USERNAME" not in delivery
+    assert "ALIYUN_REGISTRY_PASSWORD" not in delivery
+    assert "scripts/deploy.sh" not in delivery
+    assert "docker-compose.prod.yml" not in delivery
+    assert "/opt/gap-runner" not in delivery
+    assert '"target_id": os.environ["TARGET_ID"]' in workflow
+
+
+def test_release_has_no_workflow_run_or_self_hosted_runner_dependency():
+    workflow_dir = REPO_ROOT / ".github" / "workflows"
+    workflows = "\n".join(path.read_text(encoding="utf-8") for path in workflow_dir.glob("*.yml"))
+
+    assert not (workflow_dir / "deploy-production.yml").exists()
+    assert not (workflow_dir / "deploy-staging.yml").exists()
+    assert "workflow_run:" not in workflows
+    assert "self-hosted" not in workflows
+    assert "environment: production" not in workflows
+    assert "registration-token" not in workflows
+
+
+def test_tag_can_only_contribute_to_the_manifest_not_host_execution():
+    workflow = _workflow()
+    delivery = workflow.split("      - name: Deliver signed manifest to GAP Hook", 1)[1]
+
+    assert "TARGET_ID: production" in workflow
+    assert '"target_id": os.environ["TARGET_ID"]' in workflow
+    assert "${{ github.ref_name }}" not in delivery
+    assert "${GITHUB_REF_NAME}" not in delivery
+    assert "/opt/gap-runner" not in delivery
+    assert "compose" not in delivery.lower()
+    assert "deploy.sh" not in delivery
+    assert "https://gapclaw.online/internal/release-hook" in delivery
+    assert "${{ secrets.GAP_RELEASE_HOOK_URL }}" not in delivery

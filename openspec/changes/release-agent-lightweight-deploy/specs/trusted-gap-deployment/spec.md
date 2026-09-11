@@ -16,13 +16,18 @@
 - **THEN** 系统拒绝创建可部署发布清单
 - **AND** 不触发生产主机部署
 
-### Requirement: 生产部署权限与标签内容隔离
-系统 SHALL 使用存放在默认分支且受保护的部署工作流来执行生产部署。该工作流 MUST 仅把已验证发布清单交给主机侧固定 Deploy Runner，不得检出或执行发布 tag 中的工作流、脚本或 Compose 文件。Deploy Runner MUST 从主机受管目录加载部署程序与生产 Compose 模板，且仅接受 GAP API/Web 的已记录 digest 作为部署镜像。
+### Requirement: 生产 Hook 触发与标签内容隔离
+系统 SHALL 使用 GitHub-hosted CI 在构建成功后向固定 `POST /internal/release-hook` 投递已验证发布清单。CI MUST 以 GitHub secret 的 HMAC-SHA256 签名覆盖规范 manifest、delivery id 与时间戳，且不得把 ACR 凭据传递给 Hook。GAP MUST 在验签、时间窗口、delivery id 去重、target、tag/version 与 digest 校验全部通过后，才通过私网 mTLS 调用固定 Deploy Runner。生产服务器 MUST NOT 依赖 GitHub self-hosted runner、GitHub runner token 或 GitHub 出网。
 
-#### Scenario: 构建成功后进入受保护部署链路
+#### Scenario: 构建成功后进入固定 Hook 链路
 - **WHEN** 某个可部署发布清单已由构建链路产生
-- **THEN** 默认分支的受保护部署工作流调用固定 Deploy Runner 执行部署
-- **AND** 部署不执行该 tag 仓库中的脚本或 Compose 文件
+- **THEN** GitHub CI 仅向固定 Hook 投递签名 manifest
+- **AND** GAP 仅在验签成功后调用固定 Deploy Runner
+
+#### Scenario: Hook 重放或签名无效
+- **WHEN** Hook 的签名、时间戳、delivery id 或固定 manifest 任一项无效，或 delivery id 已被接受
+- **THEN** GAP 拒绝请求且不调用 Deploy Runner
+- **AND** 当前运行版本保持不变
 
 #### Scenario: 非记录镜像被请求部署
 - **WHEN** 调用方请求 Deploy Runner 部署不在可部署发布清单中的镜像引用或 digest
@@ -30,7 +35,7 @@
 - **AND** 当前运行中的 GAP 版本保持不变
 
 ### Requirement: Deploy Runner 以最小且固定的主机权限运行
-Deploy Runner SHALL 作为主机受管服务提供受限的 `deploy`、`status`、`health` 与 `rollback` 操作。只有 Runner 可以执行 GAP 生产 Compose 操作；Release Agent、普通 Agent 运行时和 GitHub 工作流 MUST NOT 获得任意 Docker、主机 shell 或 SSH 部署执行能力。Runner MUST 从主机本地受限配置读取 ACR pull-only 凭据；GitHub 部署工作流不得接收、记录或传递该凭据。既有 Code Agent 的 Docker 运行时权限不属于本能力的迁移范围，且 MUST NOT 用于 GAP 自部署操作。
+Deploy Runner SHALL 作为主机受管服务提供受限的 `deploy`、`status`、`health` 与 `rollback` 操作。`deploy` MUST 仅接受来自 GAP 固定 mTLS 身份的完整已验证 manifest；它不得接受 URL、命令、tag、任意 image 或调用者目标。只有 Runner 可以执行 GAP 生产 Compose 操作；Release Agent、普通 Agent 运行时和 GitHub CI MUST NOT 获得任意 Docker、主机 shell 或 SSH 部署执行能力。Runner MUST 从主机本地受限配置读取 ACR pull-only 凭据；GitHub CI 不得接收、记录或传递该凭据。
 
 #### Scenario: 部署工作流不含 ACR 拉取凭据
 - **WHEN** 受保护部署工作流执行一次发布
@@ -68,7 +73,7 @@ Deploy Runner MUST 在主机本地持久化当前发布状态、最近一次已�
 - **AND** 最近一次已知健康版本仍可用于自动或受控回滚
 
 ### Requirement: Runner 与 GAP 控制面使用双向认证的固定发布协议
-Deploy Runner 与 GAP 发布管理控制面 SHALL 通过双向 mTLS 通信。GAP 到 Runner 的 `status`、`health` 和受限 `rollback` MUST 仅使用私有 `https://gap-runner.internal:9443`，该名称只从 GAP API 容器解析到受主机防火墙限制的 Docker gateway；它 MUST NOT 经过或暴露在公网 Caddy。Runner 的结果回传 MUST 仅发送至 Caddy 受管的 `https://runner.gapclaw.online/internal/release-runner/callback`，且该入口只在客户端和服务端证书均通过信任校验时转发。Runner 的状态、健康和结果回传消息 MUST 使用固定的发布状态字段，至少包含发布标识、目标标识、状态、镜像 digest、时间、健康结果与回滚结果（如适用）；消息不得包含 ACR 凭据、应用秘密或任意命令文本。
+Deploy Runner 与 GAP 发布管理控制面 SHALL 通过双向 mTLS 通信。GAP 到 Runner 的 `deploy`、`status`、`health` 和受限 `rollback` MUST 仅使用私有 `https://gap-runner.internal:9443`，该名称只从 GAP API 容器解析到受主机防火墙限制的 Docker gateway；它 MUST NOT 经过或暴露在公网 Caddy。Runner 的结果回传 MUST 仅发送至 Caddy 受管的 `https://runner.gapclaw.online/internal/release-runner/callback`，且该入口只在客户端和服务端证书均通过信任校验时转发。
 
 #### Scenario: 经认证的结果回传
 - **WHEN** Runner 向 GAP 回传发布结果

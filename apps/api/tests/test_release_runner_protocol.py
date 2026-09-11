@@ -79,6 +79,34 @@ def test_runner_client_uses_fixed_mtls_files_and_fixed_operation_path():
     assert captured["request"] == ("GET", "https://gap-runner.internal:9443/v1/health")
 
 
+def test_runner_client_sends_only_the_verified_manifest_to_fixed_deploy_path():
+    captured = {}
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"status": "accepted"}
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def request(self, method, url, **kwargs):
+            captured["request"] = (method, url, kwargs)
+            return Response()
+
+    manifest = _payload()
+    manifest.pop("status")
+    manifest.pop("occurred_at")
+    manifest.pop("health_result")
+    client = ReleaseRunnerClient(
+        ReleaseRunnerTls("https://gap-runner.internal:9443", Path("ca"), Path("cert"), Path("key")),
+        client_factory=Client,
+    )
+
+    assert client.deploy(manifest) == {"status": "accepted"}
+    assert captured["request"] == ("POST", "https://gap-runner.internal:9443/v1/deploy", {"json": manifest})
+
+
 def test_callback_requires_nginx_verified_client_and_is_idempotent():
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,

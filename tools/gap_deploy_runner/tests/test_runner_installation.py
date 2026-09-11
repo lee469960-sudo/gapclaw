@@ -135,7 +135,10 @@ def test_deployment_documentation_matches_private_runner_and_fixed_asset_paths()
 
     assert "https://gap-runner.internal:9443" in documentation
     assert "https://runner.gapclaw.online/internal/release-runner/callback" in documentation
-    assert "/opt/gap-runner/bin/gap-deploy-runner deploy --manifest" in documentation
+    assert "GAP_RELEASE_HOOK_SECRET" in documentation
+    assert "RELEASE_HOOK_SECRET" in documentation
+    assert "POST https://gapclaw.online/internal/release-hook" in documentation
+    assert "不安装 GitHub Actions Runner" in documentation
     assert "tools/gap_deploy_runner/assets/initialize-host.sh" in documentation
     assert "install-production-caddy.sh" in documentation
     assert "Caddyfile.production" in documentation
@@ -147,4 +150,6 @@ def test_deployment_documentation_matches_private_runner_and_fixed_asset_paths()
     assert "/opt/gap-edge/tls/runner-ca.crt" not in documentation
     assert "/opt/gap/release-mtls" in documentation
     assert "不读取 `scripts/deploy.sh`" in documentation
+    assert "self-hosted" not in documentation
+    assert "workflow_run" not in documentation
     assert "git pull" not in documentation

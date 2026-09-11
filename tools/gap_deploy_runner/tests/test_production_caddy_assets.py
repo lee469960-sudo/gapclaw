@@ -15,6 +15,10 @@ def test_production_caddy_separates_browser_callback_and_private_control_paths()
     assert "reverse_proxy 127.0.0.1:8080" in caddyfile
     assert "mode require_and_verify" in caddyfile
     assert "trust_pool file /etc/caddy/production/runner-ca.crt" in caddyfile
+    assert "@release_hook {" in caddyfile
+    assert "method POST" in caddyfile
+    assert "path /internal/release-hook" in caddyfile
+    assert "@release_hook_other_method path /internal/release-hook" in caddyfile
     assert "@release_callback path /internal/release-runner/callback" in caddyfile
     assert "header_up X-Gap-Runner-Client-Verify SUCCESS" in caddyfile
     assert 'respond "not found" 404' in caddyfile

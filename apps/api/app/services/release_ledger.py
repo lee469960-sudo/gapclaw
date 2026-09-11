@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.models import (
     ReleaseCallbackDelivery,
+    ReleaseHookDelivery,
     ReleaseLifecycleAudit,
     ReleaseManifestRecord,
     ReleaseRollbackRequest,
@@ -66,6 +68,52 @@ class ReleaseLedger:
         self.db.add_all((audit, delivery))
         self.db.commit()
         return audit, True
+
+    def accept_hook_delivery(self, manifest: dict[str, object], *, delivery_id: str) -> tuple[ReleaseHookDelivery, bool]:
+        """Durably deduplicate an accepted Hook before any Runner request."""
+        _require_fixed_fields(manifest, ("release_id", "target_id", "version", "git_tag", "commit_sha", "api_image", "web_image"))
+        if not delivery_id:
+            raise ReleaseLedgerError("release_hook_delivery_invalid")
+        existing = self.db.get(ReleaseHookDelivery, delivery_id)
+        if existing is not None:
+            return existing, False
+        release_id = str(manifest["release_id"])
+        existing_release = self.db.query(ReleaseHookDelivery).filter_by(release_id=release_id).first()
+        if existing_release is not None:
+            return existing_release, False
+        self.store_manifest(manifest)
+        delivery = ReleaseHookDelivery(
+            delivery_id=delivery_id,
+            release_id=release_id,
+            target_id=str(manifest["target_id"]),
+            state="accepted",
+            accepted_at=now_str(),
+        )
+        audit = ReleaseLifecycleAudit(
+            id=new_id(), release_id=release_id, target_id=str(manifest["target_id"]), status="received",
+            trigger_source="github_hook", occurred_at=now_str(),
+        )
+        self.db.add_all((delivery, audit))
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            existing = self.db.get(ReleaseHookDelivery, delivery_id)
+            if existing is None:
+                existing = self.db.query(ReleaseHookDelivery).filter_by(release_id=release_id).first()
+            if existing is not None:
+                return existing, False
+            raise
+        return delivery, True
+
+    def mark_hook_dispatch_failed(self, delivery: ReleaseHookDelivery, *, reason: str) -> None:
+        delivery.state = "dispatch_failed"
+        audit = ReleaseLifecycleAudit(
+            id=new_id(), release_id=delivery.release_id, target_id=delivery.target_id, status="dispatch_failed",
+            failure_summary=reason, trigger_source="github_hook", occurred_at=now_str(),
+        )
+        self.db.add(audit)
+        self.db.commit()
 
     def request_rollback(self, *, release_id: str, target_id: str, requested_by: str) -> ReleaseRollbackRequest:
         if not release_id or not target_id or not requested_by:

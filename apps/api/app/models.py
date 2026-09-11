@@ -1226,3 +1226,13 @@ class ReleaseCallbackDelivery(Base):
     delivery_state: Mapped[str] = mapped_column(String(32), default="received")
     attempts: Mapped[int] = mapped_column(Integer, default=1)
     received_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class ReleaseHookDelivery(Base):
+    __tablename__ = "release_hook_deliveries"
+
+    delivery_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
+    state: Mapped[str] = mapped_column(String(32), default="accepted")
+    accepted_at: Mapped[str] = mapped_column(String(32), default="")

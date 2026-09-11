@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     release_runner_client_cert_file: str = ""
     release_runner_client_key_file: str = ""
     release_runner_timeout_seconds: float = 10.0
+    # Shared only between GitHub CI and the GAP Hook receiver. It is deliberately
+    # separate from registry credentials and never participates in public views.
+    release_hook_secret: str = ""
+    release_hook_max_age_seconds: int = 300
 
     @property
     def cors_origin_list(self) -> list[str]:

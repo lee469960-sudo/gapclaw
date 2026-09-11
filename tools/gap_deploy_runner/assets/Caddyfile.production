@@ -1,4 +1,17 @@
 gapclaw.online {
+  @release_hook {
+    method POST
+    path /internal/release-hook
+  }
+  handle @release_hook {
+    reverse_proxy 127.0.0.1:8000
+  }
+
+  @release_hook_other_method path /internal/release-hook
+  handle @release_hook_other_method {
+    respond "not found" 404
+  }
+
   @api path /api/* /pages/* /hooks/* /ws* /health /docs* /openapi.json
   handle @api {
     reverse_proxy 127.0.0.1:8000
