@@ -11,7 +11,7 @@ install -d -m 0750 -o root -g gap-runner "$runner_root" "$runner_root/bin" "$run
 install -d -m 0750 -o gap-runner -g gap-runner "$runner_root/state"
 install -d -m 0750 -o root -g gap-runner "$app_root"
 install -d -m 0750 -o root -g gap-runner "$app_root/caddy"
-install -m 0640 -o root -g gap-runner "$(dirname "$0")/gap-prod.compose.yml" "$runner_root/compose/gap-prod.compose.yml"
+install -m 0640 -o root -g gap-runner "$(dirname "$0")/gap-prod.compose.yml" "$runner_root/compose/gap-production.compose.yml"
 install -m 0640 -o root -g gap-runner "$(dirname "$0")/runner.env.example" "$runner_root/runner.env.example"
 install -m 0640 -o root -g gap-runner "$(dirname "$0")/Caddyfile.production" "$app_root/caddy/Caddyfile.production"
 install -m 0644 -o root -g root "$(dirname "$0")/gap-deploy-runner.service" /etc/systemd/system/gap-deploy-runner.service

@@ -124,6 +124,12 @@ def test_runner_binary_installer_packages_only_the_reviewed_runner_modules_and_f
     assert 'sh "$(dirname "$0")/install-runner-binaries.sh" "$runner_root"' in (assets / "initialize-host.sh").read_text(encoding="utf-8")
 
 
+def test_production_initializer_installs_the_runtime_expected_compose_filename():
+    initializer = (Path(__file__).parents[1] / "assets" / "initialize-host.sh").read_text(encoding="utf-8")
+
+    assert 'gap-prod.compose.yml" "$runner_root/compose/gap-production.compose.yml"' in initializer
+
+
 def test_deployment_documentation_matches_private_runner_and_fixed_asset_paths():
     documentation = (Path(__file__).parents[3] / "docs" / "deployment.md").read_text(encoding="utf-8")
 
