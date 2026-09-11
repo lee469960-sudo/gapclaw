@@ -61,6 +61,8 @@ def test_release_has_no_workflow_run_or_self_hosted_runner_dependency():
     workflow_dir = REPO_ROOT / ".github" / "workflows"
     workflows = "\n".join(path.read_text(encoding="utf-8") for path in workflow_dir.glob("*.yml"))
 
+    assert "group: release-build" in _workflow()
+    assert "group: production-deploy" not in _workflow()
     assert not (workflow_dir / "deploy-production.yml").exists()
     assert not (workflow_dir / "deploy-staging.yml").exists()
     assert "workflow_run:" not in workflows
