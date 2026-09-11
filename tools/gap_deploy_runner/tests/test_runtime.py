@@ -30,3 +30,20 @@ def test_compose_apply_uses_managed_compose_directory(monkeypatch, tmp_path):
     assert captured["up"]["cwd"] == compose_file.parent
     assert captured["ps"]["cwd"] == compose_file.parent
     assert captured["ps"]["env"]["GAP_RELEASE_API_IMAGE"] == manifest.api_image
+
+
+def test_compose_health_accepts_compose_line_delimited_json(monkeypatch, tmp_path):
+    compose_file = tmp_path / "compose" / "gap-production.compose.yml"
+    compose_file.parent.mkdir()
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    config = SimpleNamespace(target_id="production", env_file=tmp_path / "gap.env")
+    host = DockerComposeHost(config, SimpleNamespace(compose_file=compose_file))
+    monkeypatch.setattr(
+        "tools.gap_deploy_runner.runtime.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout='{"Health":"healthy"}\n{"Health":"healthy"}\n',
+        ),
+    )
+
+    assert host.services_healthy() is True

@@ -76,7 +76,10 @@ class DockerComposeHost(ComposeAdapter):
         try:
             services = json.loads(completed.stdout or "[]")
         except json.JSONDecodeError:
-            return False
+            try:
+                services = [json.loads(line) for line in (completed.stdout or "").splitlines() if line.strip()]
+            except json.JSONDecodeError:
+                return False
         if not isinstance(services, list) or not services:
             return False
         return all(isinstance(item, dict) and item.get("Health") == "healthy" for item in services)
