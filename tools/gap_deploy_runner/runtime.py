@@ -43,6 +43,7 @@ class DockerComposeHost(ComposeAdapter):
         environment = self.config.compose_environment(manifest)
         completed = subprocess.run(
             self._command("up", "--detach", "--remove-orphans"),
+            cwd=self.installation.compose_file.parent,
             env={**os.environ, **environment},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -61,6 +62,7 @@ class DockerComposeHost(ComposeAdapter):
     def services_healthy(self) -> bool:
         completed = subprocess.run(
             self._command("ps", "--format", "json"),
+            cwd=self.installation.compose_file.parent,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
