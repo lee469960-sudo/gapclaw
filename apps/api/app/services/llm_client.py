@@ -1,12 +1,13 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from sqlalchemy.orm import Session
@@ -18,6 +19,24 @@ from app.services.tool_parser import ToolStep, strip_leaked_tool_tokens
 
 
 logger = logging.getLogger(__name__)
+
+
+def _running_in_container() -> bool:
+    return os.path.exists("/.dockerenv") or bool(os.environ.get("GAP_RUNNING_IN_CONTAINER"))
+
+
+def _runtime_llm_endpoint(endpoint: str) -> str:
+    """Resolve host-local LLM URLs when the API itself runs inside Docker."""
+    parsed = urlparse(endpoint or "")
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return endpoint
+    if not _running_in_container():
+        return endpoint
+    host = os.environ.get("GAP_LOCAL_MODEL_HOST", "host.docker.internal").strip() or "host.docker.internal"
+    netloc = host
+    if parsed.port:
+        netloc = f"{host}:{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 def normalize_openai_base_url(base_url: str, provider: str = "openai") -> str:
@@ -835,12 +854,13 @@ async def test_llm_chat(
         if anthropic
         else openai_chat_completions_url(llm.base_url, llm.provider)
     )
+    endpoint = _runtime_llm_endpoint(endpoint)
     if not endpoint:
         return "未配置 base_url"
 
     payload_messages = normalize_chat_messages([{"role": "user", "content": message}])
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             headers = (
                 {
                     "x-api-key": api_key,
@@ -1008,7 +1028,7 @@ async def chat_completion(
         raise RuntimeError("未配置 API Key")
     if is_masked_secret(api_key):
         raise RuntimeError("API Key 无效（保存了脱敏占位符），请在 LLM 管理中重新填写完整密钥")
-    endpoint = openai_chat_completions_url(llm.base_url, llm.provider)
+    endpoint = _runtime_llm_endpoint(openai_chat_completions_url(llm.base_url, llm.provider))
     _raise_if_llm_throttle_circuit_open(llm)
     # Prefer explicit timeout (e.g. Agent.llm_timeout) over LLM resource default
     resolved_timeout = timeout if timeout is not None else getattr(llm, "llm_timeout", None)
@@ -1035,7 +1055,7 @@ async def chat_completion(
             # Keep M3 thinking out of `content` (separate reasoning_details field),
             # so an "only thinking" round no longer parses as a corrupted reply.
             body["reasoning_split"] = True
-        async with httpx.AsyncClient(timeout=resolved_timeout) as client:
+        async with httpx.AsyncClient(timeout=resolved_timeout, trust_env=False) as client:
             send_task = asyncio.create_task(
                 client.post(
                     endpoint,

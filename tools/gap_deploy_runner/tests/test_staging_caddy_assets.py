@@ -42,5 +42,6 @@ def test_staging_compose_exposes_only_loopback_proxy_ports_and_no_nginx_networks
     assert '"127.0.0.1:${API_PORT:-18000}:8000"' in compose
     assert '"127.0.0.1:${WEB_PORT:-18080}:8080"' in compose
     assert '"gap-runner-staging.internal:host-gateway"' in compose
+    assert '"host.docker.internal:host-gateway"' in compose
     for forbidden in ("gap-staging-edge", "gap-staging-proxy", "nginx", '"80:80"', '"443:443"'):
         assert forbidden not in compose

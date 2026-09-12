@@ -13,9 +13,10 @@
         <span class="logout" @click="logout">退出</span>
       </div>
     </el-header>
-    <el-container>
+    <el-container class="body">
       <el-aside :width="collapsed ? '0' : '220px'" class="aside">
         <el-menu
+          class="menu"
           :default-active="route.path"
           router
           :background-color="menuBg"
@@ -106,7 +107,10 @@ async function logout() {
 </script>
 
 <style scoped>
-.layout { height: 100vh; }
+.layout {
+  height: 100vh;
+  overflow: hidden;
+}
 .header {
   background: var(--gap-header);
   color: var(--gap-header-text);
@@ -116,6 +120,8 @@ async function logout() {
   padding: 0 20px;
   border-bottom: 1px solid var(--gap-aside-border);
   box-shadow: 0 1px 4px var(--gap-shadow);
+  flex-shrink: 0;
+  z-index: 10;
 }
 .left { display: flex; align-items: center; gap: 12px; }
 .brand-logo { width: 28px; height: 28px; object-fit: contain; border-radius: 4px; background: #fff; padding: 2px; }
@@ -125,7 +131,30 @@ async function logout() {
 .time, .user { color: var(--gap-header-text); }
 .logout { cursor: pointer; color: var(--gap-header-text); }
 .logout:hover { color: var(--gap-header-text-hover); }
-.aside { background: var(--gap-aside); transition: width 0.3s; overflow: hidden; }
+.body {
+  min-height: 0;
+  overflow: hidden;
+}
+.aside {
+  background: var(--gap-aside);
+  transition: width 0.3s;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.menu {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-right: none;
+}
 .version { text-align: center; color: var(--gap-text-muted); font-size: 12px; padding: 12px; border-top: 1px solid var(--gap-aside-border); }
-.main { background: var(--gap-bg); padding: 16px; overflow: auto; }
+.main {
+  background: var(--gap-bg);
+  padding: 16px;
+  overflow: auto;
+  min-width: 0;
+}
 </style>

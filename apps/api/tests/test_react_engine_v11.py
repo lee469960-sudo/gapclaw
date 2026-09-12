@@ -218,7 +218,8 @@ def test_group_flat_failures_single_layer_message():
     assert "529" in msg
 
 
-def test_group_throttling_skips_same_endpoint_but_reaches_local_fallback():
+def test_group_throttling_skips_same_endpoint_but_reaches_local_fallback(monkeypatch):
+    monkeypatch.setattr("app.services.llm_client.os.path.exists", lambda path: path == "/.dockerenv")
     _clear_llm_throttle_circuit()
     db = _make_db()
     _leaf(db, "leaf1")
@@ -249,7 +250,7 @@ def test_group_throttling_skips_same_endpoint_but_reaches_local_fallback():
     class CountingStatusClient(_StatusClient):
         async def post(self, url, *_args, **_kwargs):
             endpoints.append(str(url))
-            if "127.0.0.1:11434" in str(url):
+            if "host.docker.internal:11434" in str(url):
                 return _OkResponse()
             return _StatusResponse(429)
 
@@ -265,5 +266,5 @@ def test_group_throttling_skips_same_endpoint_but_reaches_local_fallback():
     assert asyncio.run(_run()) == "LOCAL OK"
     assert endpoints == [
         "https://example.test/v1/chat/completions",
-        "http://127.0.0.1:11434/v1/chat/completions",
+        "http://host.docker.internal:11434/v1/chat/completions",
     ]

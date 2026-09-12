@@ -11,6 +11,7 @@ from app.services.llm_client import (
     LLMHTTPError,
     LLMTransportError,
     _clear_llm_throttle_circuit,
+    _runtime_llm_endpoint,
     chat_completion,
     extract_chat_response_text,
 )
@@ -196,6 +197,30 @@ def test_chat_completion_logs_transport_exhaustion_as_network_connectivity():
     assert "api_key" not in joined
     assert "token" not in joined
     assert "secret-token" not in joined
+
+
+def test_local_llm_endpoint_uses_host_gateway_inside_container(monkeypatch):
+    monkeypatch.setattr("app.services.llm_client.os.path.exists", lambda path: path == "/.dockerenv")
+
+    assert (
+        _runtime_llm_endpoint("http://127.0.0.1:11434/v1/chat/completions")
+        == "http://host.docker.internal:11434/v1/chat/completions"
+    )
+    assert (
+        _runtime_llm_endpoint("http://localhost:1234/v1/chat/completions")
+        == "http://host.docker.internal:1234/v1/chat/completions"
+    )
+    assert _runtime_llm_endpoint("https://example.test/v1/chat/completions").startswith("https://example.test")
+
+
+def test_local_llm_endpoint_can_override_host_gateway(monkeypatch):
+    monkeypatch.setattr("app.services.llm_client.os.path.exists", lambda path: path == "/.dockerenv")
+    monkeypatch.setenv("GAP_LOCAL_MODEL_HOST", "172.17.0.1")
+
+    assert (
+        _runtime_llm_endpoint("http://127.0.0.1:11434/v1/chat/completions")
+        == "http://172.17.0.1:11434/v1/chat/completions"
+    )
 
 
 def test_chat_response_direct_tool_call_becomes_mcp_protocol():

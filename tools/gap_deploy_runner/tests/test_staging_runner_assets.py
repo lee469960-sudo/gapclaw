@@ -51,6 +51,7 @@ def test_staging_compose_keeps_staging_mtls_state_and_private_runner_mapping_sep
 
     assert "/opt/gap-staging/release-mtls:/run/gap-release-mtls:ro" in compose
     assert '"gap-runner-staging.internal:host-gateway"' in compose
+    assert '"host.docker.internal:host-gateway"' in compose
     assert "name: gap-staging" in compose
     assert '"127.0.0.1:${API_PORT:-18000}:8000"' in compose
     assert '"127.0.0.1:${WEB_PORT:-18080}:8080"' in compose
