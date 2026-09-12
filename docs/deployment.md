@@ -98,7 +98,7 @@ sudo systemctl status gap-deploy-runner
 
 ## mTLS 轮换
 
-使用私有 CA 为 Runner 服务端证书签发 `gap-runner.internal` SAN，并为 GAP API 与 Runner callback 分别签发客户端身份。维护这些受管位置：
+使用私有 CA 为 Runner 证书签发 `gap-runner.internal` SAN。当前 Runner 固定回调传输复用该证书作为 callback 客户端身份，因此这张证书必须同时包含 `serverAuth` 和 `clientAuth` EKU。为 GAP API 签发独立的 `gap-client` 客户端身份。维护这些受管位置：
 
 ```text
 /opt/gap-runner/tls/ca.crt
