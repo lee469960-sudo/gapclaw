@@ -266,5 +266,5 @@ def test_group_throttling_skips_same_endpoint_but_reaches_local_fallback(monkeyp
     assert asyncio.run(_run()) == "LOCAL OK"
     assert endpoints == [
         "https://example.test/v1/chat/completions",
-        "http://host.docker.internal:11434/v1/chat/completions",
+        "http://host.docker.internal:11434/api/chat",
     ]

@@ -48,6 +48,10 @@ def normalize_openai_base_url(base_url: str, provider: str = "openai") -> str:
         url = url[: -len("/chat/completions")].rstrip("/")
 
     prov = (provider or "openai").lower()
+    if prov == "ollama":
+        if not re.search(r"/v\d+$", url):
+            url = f"{url}/v1"
+        return url
     if prov not in ("openai", "minimax"):
         return url
 
@@ -66,6 +70,21 @@ def openai_chat_completions_url(base_url: str, provider: str = "openai") -> str:
     if not base:
         return ""
     return f"{base}/chat/completions"
+
+
+def is_ollama_provider(provider: str = "") -> bool:
+    return (provider or "").strip().lower() == "ollama"
+
+
+def ollama_chat_url(base_url: str) -> str:
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    for suffix in ("/v1/chat/completions", "/chat/completions", "/v1"):
+        if url.lower().endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    return f"{url}/api/chat"
 
 
 def is_anthropic_provider(provider: str = "") -> bool:
@@ -118,7 +137,7 @@ def supports_native_tools(llm) -> bool:
     The check runs on the resolved leaf model, so an OpenAI-flavored group does
     not force native tools onto an Ollama child.
     """
-    return (getattr(llm, "provider", "") or "").strip().lower() != "ollama"
+    return not is_ollama_provider(getattr(llm, "provider", "") or "")
 
 
 def normalize_chat_messages(messages: list[dict]) -> list[dict]:
@@ -849,9 +868,12 @@ async def test_llm_chat(
 
     api_key = decrypt_secret(llm.api_key_enc)
     anthropic = is_anthropic_provider(llm.provider)
+    ollama = is_ollama_provider(llm.provider)
     endpoint = (
         anthropic_messages_url(llm.base_url)
         if anthropic
+        else ollama_chat_url(llm.base_url)
+        if ollama
         else openai_chat_completions_url(llm.base_url, llm.provider)
     )
     endpoint = _runtime_llm_endpoint(endpoint)
@@ -868,24 +890,39 @@ async def test_llm_chat(
                     "Content-Type": "application/json",
                 }
                 if anthropic
+                else {"Content-Type": "application/json"}
+                if ollama
                 else {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 }
             )
-            resp = await client.post(
-                endpoint,
-                headers=headers,
-                json={
+            body = (
+                {
+                    "model": llm.model,
+                    "messages": payload_messages,
+                    "stream": False,
+                    "think": False,
+                    "options": {"num_predict": min(llm.max_output_tokens or 4096, 1024)},
+                }
+                if ollama
+                else {
                     "model": llm.model,
                     "messages": payload_messages,
                     "max_tokens": min(llm.max_output_tokens or 4096, 1024),
-                },
+                }
+            )
+            resp = await client.post(
+                endpoint,
+                headers=headers,
+                json=body,
             )
             resp.raise_for_status()
             data = resp.json()
             if anthropic:
                 return _anthropic_content_text(data)
+            if ollama:
+                return _extract_content_text(data.get("message") or {})
             return data["choices"][0]["message"]["content"]
     except httpx.HTTPStatusError as e:
         return f"测试失败: {format_llm_http_error(e)}"
@@ -1028,7 +1065,10 @@ async def chat_completion(
         raise RuntimeError("未配置 API Key")
     if is_masked_secret(api_key):
         raise RuntimeError("API Key 无效（保存了脱敏占位符），请在 LLM 管理中重新填写完整密钥")
-    endpoint = _runtime_llm_endpoint(openai_chat_completions_url(llm.base_url, llm.provider))
+    ollama = is_ollama_provider(llm.provider)
+    endpoint = _runtime_llm_endpoint(
+        ollama_chat_url(llm.base_url) if ollama else openai_chat_completions_url(llm.base_url, llm.provider)
+    )
     _raise_if_llm_throttle_circuit_open(llm)
     # Prefer explicit timeout (e.g. Agent.llm_timeout) over LLM resource default
     resolved_timeout = timeout if timeout is not None else getattr(llm, "llm_timeout", None)
@@ -1044,11 +1084,21 @@ async def chat_completion(
 
     async def _post(payload_messages: list[dict], out_tokens: int) -> dict:
         _raise_if_stopped()
-        body = {
-            "model": llm.model,
-            "messages": payload_messages,
-            "max_tokens": out_tokens,
-        }
+        body = (
+            {
+                "model": llm.model,
+                "messages": payload_messages,
+                "stream": False,
+                "think": False,
+                "options": {"num_predict": out_tokens},
+            }
+            if ollama
+            else {
+                "model": llm.model,
+                "messages": payload_messages,
+                "max_tokens": out_tokens,
+            }
+        )
         if tools and supports_native_tools(llm):
             body["tools"] = tools
         if is_minimax_llm(llm):
@@ -1059,10 +1109,14 @@ async def chat_completion(
             send_task = asyncio.create_task(
                 client.post(
                     endpoint,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=(
+                        {"Content-Type": "application/json"}
+                        if ollama
+                        else {
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        }
+                    ),
                     json=body,
                 )
             )
@@ -1076,7 +1130,18 @@ async def chat_completion(
                     raise ChatStopped("已停止")
                 resp = send_task.result()
                 resp.raise_for_status()
-                return resp.json()
+                data = resp.json()
+                if ollama:
+                    if isinstance(data, dict) and isinstance(data.get("choices"), list):
+                        return data
+                    message = data.get("message") if isinstance(data, dict) else None
+                    return {
+                        "choices": [{
+                            "message": message if isinstance(message, dict) else {},
+                            "finish_reason": data.get("done_reason") if isinstance(data, dict) else None,
+                        }],
+                    }
+                return data
             except asyncio.CancelledError as exc:
                 raise ChatStopped("已停止") from exc
             finally:

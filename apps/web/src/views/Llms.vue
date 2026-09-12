@@ -57,13 +57,15 @@
           <el-button type="primary" plain size="small" @click="applyAnthropicPreset">Anthropic Claude</el-button>
           <el-button type="primary" plain size="small" @click="applyMinMaxPreset(false)">MiniMax 国际</el-button>
           <el-button type="primary" plain size="small" @click="applyMinMaxPreset(true)">MiniMax 国内</el-button>
+          <el-button type="success" plain size="small" @click="applyOllamaPreset">Ollama 本地</el-button>
         </el-form-item>
         <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
         <template v-if="form.type === 'llm'">
           <el-form-item label="Provider"><el-input v-model="form.provider" /></el-form-item>
           <el-form-item label="Base URL">
-            <el-input v-model="form.base_url" :placeholder="form.provider === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.minimaxi.com/v1'" />
+            <el-input v-model="form.base_url" :placeholder="form.provider === 'anthropic' ? 'https://api.anthropic.com' : form.provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.minimaxi.com/v1'" />
             <div v-if="form.provider === 'anthropic'" class="field-hint">Claude Code 使用 Anthropic API；CodeAgent 请绑定此类型的单个 LLM</div>
+            <div v-else-if="form.provider === 'ollama'" class="field-hint">Ollama 请使用 OpenAI 兼容地址，默认 http://127.0.0.1:11434/v1；如果 GAP 在远程服务器，需在服务器上运行 Ollama 或配置可访问的地址。</div>
             <div v-else class="field-hint">MiniMax 请用 OpenAI 兼容地址，末尾带 /v1，不要用 /anthropic</div>
           </el-form-item>
           <el-form-item label="API Key">
@@ -173,6 +175,16 @@ function applyAnthropicPreset() {
   form.base_url = 'https://api.anthropic.com'
   form.model = 'sonnet'
   form.description = 'Anthropic Claude（CodeAgent）'
+}
+
+function applyOllamaPreset() {
+  form.type = 'llm'
+  form.name = form.name || 'Ollama qwen3:8b'
+  form.provider = 'ollama'
+  form.base_url = 'http://127.0.0.1:11434/v1'
+  form.model = 'qwen3:8b'
+  form.description = '本地 Ollama OpenAI 兼容接口'
+  form.api_key = form.api_key || 'ollama'
 }
 
 function openForm(row) {

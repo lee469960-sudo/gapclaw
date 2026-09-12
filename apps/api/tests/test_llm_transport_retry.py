@@ -14,6 +14,8 @@ from app.services.llm_client import (
     _runtime_llm_endpoint,
     chat_completion,
     extract_chat_response_text,
+    ollama_chat_url,
+    openai_chat_completions_url,
 )
 
 
@@ -220,6 +222,26 @@ def test_local_llm_endpoint_can_override_host_gateway(monkeypatch):
     assert (
         _runtime_llm_endpoint("http://127.0.0.1:11434/v1/chat/completions")
         == "http://172.17.0.1:11434/v1/chat/completions"
+    )
+
+
+def test_ollama_base_url_adds_openai_compatible_v1_path():
+    assert (
+        openai_chat_completions_url("http://127.0.0.1:11434", "ollama")
+        == "http://127.0.0.1:11434/v1/chat/completions"
+    )
+    assert (
+        openai_chat_completions_url("http://127.0.0.1:11434/v1", "ollama")
+        == "http://127.0.0.1:11434/v1/chat/completions"
+    )
+
+
+def test_ollama_native_chat_url_strips_openai_suffixes():
+    assert ollama_chat_url("http://127.0.0.1:11434") == "http://127.0.0.1:11434/api/chat"
+    assert ollama_chat_url("http://127.0.0.1:11434/v1") == "http://127.0.0.1:11434/api/chat"
+    assert (
+        ollama_chat_url("http://127.0.0.1:11434/v1/chat/completions")
+        == "http://127.0.0.1:11434/api/chat"
     )
 
 

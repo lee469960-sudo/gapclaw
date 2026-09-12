@@ -83,10 +83,13 @@ async def llm_post(body: LLMBody, user: User = Depends(get_session_user), db: Se
         item.name = body.name or item.name or "未命名"
         item.provider = body.provider
         item.base_url = normalize_openai_base_url(body.base_url, body.provider)
+        provider = (body.provider or "").strip().lower()
         if body.api_key:
             if is_masked_secret(body.api_key):
                 return fail("API Key 无效：检测到脱敏占位符，请填写完整密钥")
             item.api_key_enc = encrypt_secret(body.api_key)
+        elif action == "create" and body.type == "llm" and provider == "ollama":
+            item.api_key_enc = encrypt_secret("ollama")
         elif action == "create" and body.type == "llm":
             return fail("请填写 API Key")
         item.model = body.model
