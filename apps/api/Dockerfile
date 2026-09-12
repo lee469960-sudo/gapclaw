@@ -8,6 +8,12 @@ ENV GAP_VERSION=${GAP_VERSION}
 
 WORKDIR /app
 COPY apps/api/requirements.txt ./requirements.txt
+# stdio MCP servers such as 得到大脑 run through `npx -y @getnote/mcp`.
+# Install Node/npm in the API image because stdio processes are spawned inside
+# this container, not on the Docker host.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
 # 使用预编译 wheel，避免 apt 安装 gcc（国内可设 PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple）
 RUN pip install --no-cache-dir -i ${PIP_INDEX} -r requirements.txt
 COPY apps/api/ .

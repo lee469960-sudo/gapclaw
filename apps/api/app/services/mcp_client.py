@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from typing import Any
 
@@ -302,6 +303,11 @@ class _StdioSession:
             if k.lower() in ("http_proxy", "https_proxy", "all_proxy"):
                 # Local npx + MCP servers often break behind corporate proxies meant for browsers
                 merged.pop(k, None)
+        if os.path.sep not in self.command and shutil.which(self.command, path=merged.get("PATH")) is None:
+            raise FileNotFoundError(
+                f"stdio MCP 命令不存在: {self.command!r}；请把该命令安装到 API 容器 PATH，"
+                "或在 MCP 配置中填写容器内可执行文件的绝对路径"
+            )
         self.proc = await asyncio.create_subprocess_exec(
             self.command,
             *self.args,
