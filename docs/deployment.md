@@ -79,13 +79,15 @@ Runner 的监听/服务端 TLS 配置在 `/opt/gap-runner/runner.env`；可从 `
 import /etc/caddy/sites/*.Caddyfile
 ```
 
-production site 使用 `gapclaw.online` 和固定 callback host `runner.gapclaw.online`；callback 信任 CA 位于：
+production site 使用 `gapclaw.online` 和固定 callback host `runner.gapclaw.online`。`gapclaw.online` 可使用 Caddy 自动证书；Runner callback host 是机器到机器入口，使用 release 私有 CA 签发的固定服务端证书，避免把 callback 可用性绑定到公网 ACME challenge。callback 证书和信任 CA 位于：
 
 ```text
+/etc/caddy/production/runner-server.crt
+/etc/caddy/production/runner-server.key
 /etc/caddy/production/runner-ca.crt
 ```
 
-该 CA 只授予 Caddy 读取权限，且必须与 staging CA 分离。后续第二个 Compose 栈必须使用独立的显式域名或子域名、独立 loopback upstream 与单独的 `/etc/caddy/sites/*.Caddyfile` site；不得复用 GAP site、取得 catch-all 路由、绑定 80/443，或访问 GAP API 容器网络。
+这些材料只授予 Caddy 读取权限，且必须与 staging CA 分离。后续第二个 Compose 栈必须使用独立的显式域名或子域名、独立 loopback upstream 与单独的 `/etc/caddy/sites/*.Caddyfile` site；不得复用 GAP site、取得 catch-all 路由、绑定 80/443，或访问 GAP API 容器网络。
 
 配置完成后启用 Runner 服务：
 
@@ -105,6 +107,8 @@ sudo systemctl status gap-deploy-runner
 /opt/gap/release-mtls/ca.crt
 /opt/gap/release-mtls/gap-client.crt
 /opt/gap/release-mtls/gap-client.key
+/etc/caddy/production/runner-server.crt
+/etc/caddy/production/runner-server.key
 /etc/caddy/production/runner-ca.crt
 ```
 

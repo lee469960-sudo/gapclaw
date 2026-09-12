@@ -22,7 +22,7 @@ gapclaw.online {
 }
 
 runner.gapclaw.online {
-  tls {
+  tls /etc/caddy/production/runner-server.crt /etc/caddy/production/runner-server.key {
     client_auth {
       mode require_and_verify
       trust_pool file /etc/caddy/production/runner-ca.crt

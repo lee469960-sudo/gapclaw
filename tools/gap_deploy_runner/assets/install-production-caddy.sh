@@ -9,6 +9,8 @@ site_file="$site_dir/gap-production.Caddyfile"
 command -v caddy >/dev/null 2>&1 || { echo 'caddy_production_binary_missing' >&2; exit 1; }
 test -f "$main_file" || { echo 'caddy_production_main_config_missing' >&2; exit 1; }
 test -f /etc/caddy/production/runner-ca.crt || { echo 'caddy_production_callback_ca_missing' >&2; exit 1; }
+test -f /etc/caddy/production/runner-server.crt || { echo 'caddy_production_callback_cert_missing' >&2; exit 1; }
+test -f /etc/caddy/production/runner-server.key || { echo 'caddy_production_callback_key_missing' >&2; exit 1; }
 grep -F 'import /etc/caddy/sites/*.Caddyfile' "$main_file" >/dev/null || {
   echo 'caddy_production_import_missing' >&2; exit 1;
 }

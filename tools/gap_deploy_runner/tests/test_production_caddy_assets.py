@@ -14,6 +14,7 @@ def test_production_caddy_separates_browser_callback_and_private_control_paths()
     assert "reverse_proxy 127.0.0.1:8000" in caddyfile
     assert "reverse_proxy 127.0.0.1:8080" in caddyfile
     assert "mode require_and_verify" in caddyfile
+    assert "tls /etc/caddy/production/runner-server.crt /etc/caddy/production/runner-server.key" in caddyfile
     assert "trust_pool file /etc/caddy/production/runner-ca.crt" in caddyfile
     assert "@release_hook {" in caddyfile
     assert "method POST" in caddyfile
@@ -35,6 +36,8 @@ def test_production_caddy_installer_validates_a_reviewed_import_before_reload():
     assert "command -v caddy" in installer
     assert "import /etc/caddy/sites/*.Caddyfile" in installer
     assert "caddy_production_import_missing" in installer
+    assert "caddy_production_callback_cert_missing" in installer
+    assert "caddy_production_callback_key_missing" in installer
     assert "caddy validate --config \"$main_file\" --adapter caddyfile" in installer
     assert "systemctl reload caddy" in installer
     assert "nginx" not in installer.lower()
