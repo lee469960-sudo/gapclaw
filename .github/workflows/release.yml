@@ -191,16 +191,29 @@ jobs:
               "manifest": manifest,
           }
           canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+          secret = os.environ["RELEASE_HOOK_SECRET"]
+          print(f"release_hook_secret_len={len(secret)}")
+          print(f"release_hook_secret_sha256_12={hashlib.sha256(secret.encode('utf-8')).hexdigest()[:12]}")
           signature = hmac.new(
-              os.environ["RELEASE_HOOK_SECRET"].encode("utf-8"), canonical, hashlib.sha256
+              secret.encode("utf-8"), canonical, hashlib.sha256
           ).hexdigest()
           with open(".release/release-hook.json", "wb") as output:
               output.write(canonical)
           with open(".release/release-hook.signature", "w", encoding="utf-8") as output:
               output.write(f"sha256={signature}\\n")
           PY
-          curl --fail --silent --show-error --max-time 20 --retry 2 --retry-all-errors \
-            --request POST "https://gapclaw.online/internal/release-hook" \
-            --header "Content-Type: application/json" \
-            --header "X-GAP-Release-Signature: $(<.release/release-hook.signature)" \
-            --data-binary @.release/release-hook.json
+          http_code="$(
+            curl --silent --show-error --max-time 20 --retry 2 --retry-all-errors \
+              --output .release/release-hook.response \
+              --write-out "%{http_code}" \
+              --request POST "https://gapclaw.online/internal/release-hook" \
+              --header "Content-Type: application/json" \
+              --header "X-GAP-Release-Signature: $(<.release/release-hook.signature)" \
+              --data-binary @.release/release-hook.json
+          )"
+          cat .release/release-hook.response
+          echo
+          if [[ ! "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
+            echo "release hook returned HTTP ${http_code}" >&2
+            exit 1
+          fi
