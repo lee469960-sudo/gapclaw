@@ -15,7 +15,12 @@ from sqlalchemy.orm import Session
 from app.models import LLMResource
 from app.security import decrypt_secret, is_masked_secret
 from app.services.agent_runtime.hub import ChatStopped
-from app.services.tool_parser import ToolStep, strip_leaked_tool_tokens
+from app.services.tool_parser import (
+    ToolStep,
+    looks_like_mcp_tool_name,
+    sanitize_native_tool_name,
+    strip_leaked_tool_tokens,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -184,6 +189,23 @@ def _tool_arg(args_obj, *keys, default=""):
     return default
 
 
+def _infer_native_tool_name(args_obj) -> str:
+    """Recover a native tool when MiniMax ate the function name and left only args."""
+    if not isinstance(args_obj, dict):
+        return ""
+    if _tool_arg(args_obj, "cmd"):
+        return "shell"
+    if _tool_arg(args_obj, "content") and _tool_arg(args_obj, "path"):
+        return "file_write"
+    if _tool_arg(args_obj, "old") and _tool_arg(args_obj, "new") and _tool_arg(args_obj, "path"):
+        return "file_search_replace"
+    if _tool_arg(args_obj, "path"):
+        return "file_read"
+    if _tool_arg(args_obj, "query") and not _tool_arg(args_obj, "skill_id"):
+        return "file_search"
+    return ""
+
+
 def _extract_content_text(message: dict) -> str:
     """Return the assistant message content as a string (stripped of leaked tokens)."""
     content = message.get("content")
@@ -291,10 +313,10 @@ def _tool_call_to_step(call: dict) -> ToolStep | None:
     fn = call.get("function") if isinstance(call, dict) else None
     if not isinstance(fn, dict):
         return None
-    name = str(fn.get("name") or "").strip()
+    raw_name = str(fn.get("name") or "").strip()
     raw_args = fn.get("arguments")
     call_id = str(call.get("id") or "").strip()
-    if not name:
+    if not raw_name:
         return None
     if isinstance(raw_args, str):
         args_text = strip_leaked_tool_tokens(raw_args).strip() or "{}"
@@ -309,6 +331,11 @@ def _tool_call_to_step(call: dict) -> ToolStep | None:
         args_obj = None
         args_text = "{}"
 
+    name = sanitize_native_tool_name(raw_name)
+    if not name:
+        name = _infer_native_tool_name(args_obj)
+    if not name:
+        return None
     lower_name = name.lower()
     step: ToolStep | None = None
     if lower_name in ("done", "final"):
@@ -385,8 +412,8 @@ def _tool_call_to_step(call: dict) -> ToolStep | None:
         q = _tool_arg(args_obj, "query")
         if q:
             step = ToolStep("recall", f"RECALL: {q}")
-    else:
-        # Unknown tool name → assume an MCP tool invoked by its real name.
+    elif looks_like_mcp_tool_name(name):
+        # Unknown identifier → assume an MCP tool invoked by its real name.
         step = ToolStep("mcp_tool_call", f"MCP: {name} {args_text}")
     if step is not None:
         step.tool_call_id = call_id

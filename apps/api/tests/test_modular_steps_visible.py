@@ -79,6 +79,8 @@ def test_slim_and_save_assistant_meta_includes_steps():
             pass
 
     ctx.db = _DB()
+    long_body = ("确认 ZEC 无挂单。\n" * 40) + ("尾段数据 " * 50)
+    assert len(long_body) > 200
     steps = [
         {"type": "info", "action": "skill_loaded", "title": "已加载 Skills: ads-export", "status": "done"},
         {
@@ -86,7 +88,8 @@ def test_slim_and_save_assistant_meta_includes_steps():
             "iteration": 1,
             "title": "LLM 推理 (第 1 轮)",
             "status": "done",
-            "preview": "hello preview",
+            "preview": long_body[:200],
+            "content": long_body,
             "hidden": False,
         },
         {
@@ -104,10 +107,32 @@ def test_slim_and_save_assistant_meta_includes_steps():
     actions = {s.get("action") for s in meta["steps"]}
     assert "skill_loaded" in actions
     assert any(s.get("type") == "llm" for s in meta["steps"])
+    llm = next(s for s in meta["steps"] if s.get("type") == "llm")
+    assert len(llm.get("preview") or "") <= 300
+    assert len(llm.get("content") or "") > 200
+    assert "确认 ZEC 无挂单" in (llm.get("content") or "")
     # Successful tool payload is retained for the expandable execution audit.
     tool = next(s for s in meta["steps"] if s.get("action") == "mcp_tool_call")
-    assert "content" not in tool or len(tool.get("content") or "") <= 4_000
+    assert "content" not in tool or len(tool.get("content") or "") <= 12_000
 
+
+def test_slim_steps_keeps_long_llm_content_with_short_preview():
+    long_body = "A" * 500 + "\n## 盘面\n" + "B" * 800
+    steps = [{
+        "type": "llm",
+        "iteration": 34,
+        "title": "LLM 推理 (第 34 轮)",
+        "status": "done",
+        "preview": AgentRuntime._llm_step_preview(long_body),
+        "content": long_body,
+    }]
+    slim = AgentRuntime._slim_steps_for_meta(steps)
+    assert len(slim) == 1
+    assert slim[0]["type"] == "llm"
+    assert len(slim[0]["preview"]) <= 300
+    assert len(slim[0]["preview"]) < len(long_body)
+    assert len(slim[0]["content"]) == len(long_body)
+    assert slim[0]["content"].startswith("A" * 50)
 
 def test_save_assistant_empty_reply_and_zero_steps_gets_placeholder():
     ctx = _fake_ctx(mcp_ids=[], has_export_skill=False)
@@ -156,6 +181,12 @@ def test_llm_step_preview_strips_final_meta_reasoning():
     assert "Wait" not in prev
     assert "Let me" not in prev
     assert prev == "sql有语法错误，请检查括号。"
+
+
+def test_llm_step_preview_strips_minimax_final_glue():
+    prev = AgentRuntime._llm_step_preview("[<FINAL: 当前盘面快照")
+    assert prev == "当前盘面快照"
+    assert "[<" not in prev
 
 
 def test_save_assistant_meta_strips_protocol_leak_in_step_preview():

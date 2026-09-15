@@ -819,8 +819,8 @@ function executionStepDetail(step) {
 function sanitizeStepDetail(text) {
   let cleaned = String(text || '')
   if (!cleaned) return ''
-  if (/^\s*FINAL\s*[:：]/im.test(cleaned)) {
-    const matches = [...cleaned.matchAll(/^\s*FINAL\s*[:：]\s*/gim)]
+  if (/^\s*(?:\[<+)?FINAL\s*[:：]/im.test(cleaned)) {
+    const matches = [...cleaned.matchAll(/^\s*(?:\[<+)?FINAL\s*[:：]\s*/gim)]
     if (matches.length) {
       const last = matches[matches.length - 1]
       cleaned = cleaned.slice(last.index + last[0].length)
@@ -984,7 +984,10 @@ function isExecOpen(key) {
 }
 
 function isStepDetailExpandable(step) {
-  return step?.type === 'tool' || step?.type === 'model_route'
+  if (step?.type === 'tool' || step?.type === 'model_route') return true
+  // LLM rounds: expand when we have stored body (content or preview).
+  if (step?.type === 'llm') return Boolean(stepDetail(step))
+  return false
 }
 
 function toolStepKey(execKey, index) {

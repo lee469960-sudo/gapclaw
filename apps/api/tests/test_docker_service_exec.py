@@ -116,3 +116,30 @@ def test_exec_in_sandbox_bounds_persistent_409(monkeypatch):
     assert "409 Client Error" not in result
     assert container.calls == 2
     assert _tool_result_failed(result) is True
+
+
+def test_exec_in_sandbox_reports_daemon_socket_timeout(monkeypatch):
+    class _Boom(_Container):
+        def reload(self):
+            raise RuntimeError(
+                "UnixHTTPConnectionPool(host='localhost', port=None): Read timed out. (read timeout=60)"
+            )
+
+    _use_container(monkeypatch, _Boom())
+    result = docker_service.exec_in_sandbox("sandbox-timeout", "echo ok")
+    assert result.startswith("[sandbox_unavailable]")
+    assert "Docker 守护进程无响应" in result
+    assert "容器状态为 unknown" not in result
+    assert _tool_result_failed(result) is True
+
+
+def test_exec_in_sandbox_bounds_stuck_container_inspect(monkeypatch):
+    class _Hang(_Container):
+        def reload(self):
+            time.sleep(0.3)
+
+    monkeypatch.setattr(docker_service, "_INSPECT_TIMEOUT_SECONDS", 0.05)
+    _use_container(monkeypatch, _Hang())
+    result = docker_service.exec_in_sandbox("sandbox-hang", "echo ok")
+    assert result.startswith("[sandbox_unavailable]")
+    assert "Docker 守护进程无响应" in result

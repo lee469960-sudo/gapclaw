@@ -189,7 +189,7 @@ export function extractFinalDisplayContent(text) {
       }
     })
     .join('\n')
-  const marker = /^\s*FINAL\s*[:：]\s*/gim
+  const marker = /^\s*(?:\[<+)?FINAL\s*[:：]\s*/gim
   let last = null
   let match
   while ((match = marker.exec(source)) !== null) last = match

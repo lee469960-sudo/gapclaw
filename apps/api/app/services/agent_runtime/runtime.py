@@ -728,9 +728,13 @@ class AgentRuntime:
             clean_final_answer,
             extract_final_payload,
             is_final_reply,
+            strip_leaked_tool_tokens,
         )
 
         raw = str(text or "").strip()
+        if not raw:
+            return ""
+        raw = strip_leaked_tool_tokens(raw)
         if not raw:
             return ""
         if is_final_reply(raw):
@@ -1542,9 +1546,13 @@ class AgentRuntime:
                     self._native_tool_step_preview(tool_steps)
                     if native else self._llm_step_preview(reply)
                 )
-                await self._patch_last_step(
-                    ctx, state, status="done", preview=preview,
-                )
+                llm_patch = {"status": "done", "preview": preview}
+                # Persist sanitized full reply for expandable LLM rows in the
+                # execution accordion (preview stays short for the folded title).
+                detail = self._sanitize_step_text(reply)
+                if detail:
+                    llm_patch["content"] = detail[:_EXECUTION_DETAIL_LIMIT]
+                await self._patch_last_step(ctx, state, **llm_patch)
                 if native:
                     cm.push_assistant_native(result.content or "", result.tool_calls)
                 elif reply.strip():

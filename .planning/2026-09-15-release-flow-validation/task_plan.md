@@ -6,17 +6,17 @@ Publish the current verified GAP changes under the next patch tag and validate t
 
 ## Current Phase
 
-Phase 5 cannot complete until the existing public DNSPod/provider block for `gapclaw.online` is cleared. Run `34917597143` proved image/manifest publication but failed before Hook intake at the TLS boundary.
+ICP/provider access is now reported as cleared. A fresh `v1.0.23` release is being prepared from the latest code so the full GitHub Actions → signed Hook → Release Agent → Deploy Runner → production health/audit path can be validated without bypassing CI.
 
 ## Phases
 
 | Phase | Status |
 |---|---|
 | 1. Inspect release contents and CI/production prerequisites | complete |
-| 2. Run pre-release tests and prepare versioned commit | complete |
-| 3. Create and push the next patch tag | complete |
-| 4. Monitor GitHub build, image push and signed hook delivery | complete |
-| 5. Verify Release Agent, Runner, production health and audit evidence | pending (public ingress blocked) |
+| 2. Run pre-release tests and prepare versioned commit | complete (`v1.0.23` tests passed; commit pending) |
+| 3. Create and push the next patch tag | in_progress (`v1.0.23`) |
+| 4. Monitor GitHub build, image push and signed hook delivery | pending (`v1.0.23`) |
+| 5. Verify Release Agent, Runner, production health and audit evidence | pending (`v1.0.23`) |
 
 ## Release Safety Rules
 

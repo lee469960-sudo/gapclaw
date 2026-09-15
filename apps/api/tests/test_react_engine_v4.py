@@ -95,7 +95,13 @@ def test_route_persists_and_clamps_summary_max_words():
 def test_strip_chatml_and_minimax_leaked_tokens():
     assert strip_leaked_tool_tokens("<|tool_call|>") == ""
     assert strip_leaked_tool_tokens("]<tool_call>[") == ""
+    assert strip_leaked_tool_tokens("]<]minimax[") == ""
+    assert strip_leaked_tool_tokens("]<]minimax[>") == ""
+    assert strip_leaked_tool_tokens("]:<]minimax[") == ""
+    assert strip_leaked_tool_tokens("SHELL:]:<]minimax[") == "SHELL:"
+    assert strip_leaked_tool_tokens("[<FINAL: 完成") == "FINAL: 完成"
     assert "hello" in strip_leaked_tool_tokens("hello <|tool_call|> world")
+    assert "hello" in strip_leaked_tool_tokens("hello ]<]minimax[> world")
 
 
 def test_norm_path_strips_trailing_bracket():
@@ -107,6 +113,18 @@ def test_extract_steps_strips_leaked_token_before_parse():
     steps = extract_tool_steps("<|tool_call|>SHELL: ls -la")
     assert steps and steps[0].action == "shell"
     assert steps[0].reply == "SHELL: ls -la"
+
+
+def test_extract_steps_strips_minimax_name_leak_before_parse():
+    steps = extract_tool_steps("]<]minimax[>SHELL: ls -la")
+    assert steps and steps[0].action == "shell"
+    assert steps[0].reply == "SHELL: ls -la"
+
+
+def test_extract_steps_recovers_final_glued_to_minimax_leak():
+    steps = extract_tool_steps("[<FINAL: 当前盘面快照")
+    assert steps and steps[0].is_final
+    assert steps[0].reply == "FINAL: 当前盘面快照"
 
 
 # ---- 6.3 ToolStep.tool_call_id + native source ----
@@ -133,6 +151,38 @@ def test_tool_steps_from_tool_calls_generates_directly():
     # Unknown tool name falls back to a real-name MCP step (single source mapping).
     assert steps[1].action == "mcp_tool_call"
     assert "describe_ads_view" in steps[1].reply
+
+
+def test_tool_call_to_step_recovers_shell_from_minimax_leaked_name():
+    step = _tool_call_to_step({
+        "id": "call_leak",
+        "function": {
+            "name": "SHELL:]:<]minimax[",
+            "arguments": '{"cmd": "cat /workplace/task/1789451030563/file_read_result_4.txt"}',
+        },
+    })
+    assert step is not None
+    assert step.action == "shell"
+    assert step.reply == "SHELL: cat /workplace/task/1789451030563/file_read_result_4.txt"
+    assert step.tool_call_id == "call_leak"
+
+
+def test_tool_call_to_step_infers_shell_when_name_is_only_a_leak():
+    step = _tool_call_to_step({
+        "id": "call_only_leak",
+        "function": {"name": "]<]minimax[", "arguments": '{"cmd": "ls"}'},
+    })
+    assert step is not None
+    assert step.action == "shell"
+    assert step.reply == "SHELL: ls"
+
+
+def test_tool_call_to_step_does_not_treat_garbage_name_as_mcp():
+    step = _tool_call_to_step({
+        "id": "call_junk",
+        "function": {"name": "SHELL:]:<]minimax[", "arguments": "{}"},
+    })
+    assert step is None
 
 
 def test_build_chat_result_native_path_has_tool_calls():

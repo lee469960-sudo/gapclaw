@@ -36,7 +36,7 @@ _JSON_FENCE_RE = re.compile(
 def extract_final_display_content(text: str) -> str:
     """Mirror Web ``extractFinalDisplayContent`` — keep text after last FINAL:."""
     source = str(text or "")
-    marker = re.compile(r"^\s*FINAL\s*[:：]\s*", re.IGNORECASE | re.MULTILINE)
+    marker = re.compile(r"^\s*(?:\[<+)?FINAL\s*[:：]\s*", re.IGNORECASE | re.MULTILINE)
     last = None
     for match in marker.finditer(source):
         last = match

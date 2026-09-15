@@ -14,8 +14,30 @@ logger = logging.getLogger(__name__)
 
 _client = None
 _client_failed = False
+_INSPECT_TIMEOUT_SECONDS = 8.0
 _exec_locks: dict[str, threading.Lock] = {}
 _exec_locks_guard = threading.Lock()
+
+
+def _reset_docker_client():
+    global _client
+    old, _client = _client, None
+    if old is None:
+        return
+    try:
+        old.close()
+    except Exception:
+        pass
+
+
+def _is_docker_timeout(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return "timed out" in text or "timeout" in type(exc).__name__.lower()
+
+
+def _docker_call(fn, timeout: float):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(fn).result(timeout=timeout)
 
 
 def get_docker_client():
@@ -521,8 +543,11 @@ def _docker_status_code(exc: BaseException) -> int | None:
 
 
 def _container_status(container) -> str:
-    container.reload()
-    return str(getattr(container, "status", "") or "unknown").lower()
+    def _reload():
+        container.reload()
+        return str(getattr(container, "status", "") or "unknown").lower()
+
+    return _docker_call(_reload, _INSPECT_TIMEOUT_SECONDS)
 
 
 def _prepare_container_for_exec(container, *, wait_seconds: float) -> tuple[bool, str, str]:
@@ -548,7 +573,13 @@ def _prepare_container_for_exec(container, *, wait_seconds: float) -> tuple[bool
                 break
             time.sleep(0.05)
         return status == "running", status, ""
+    except concurrent.futures.TimeoutError:
+        _reset_docker_client()
+        return False, "unreachable", "Docker 守护进程无响应（状态查询超时）"
     except Exception as exc:
+        if _is_docker_timeout(exc):
+            _reset_docker_client()
+            return False, "unreachable", "Docker 守护进程无响应（socket 超时）"
         return False, "unknown", _format_docker_error(exc)
 
 
@@ -563,11 +594,17 @@ def exec_in_sandbox(container_id: str, command: str, timeout: int = 60) -> str:
     if not lock.acquire(timeout=timeout):
         return f"[sandbox_busy] 同一容器已有命令执行超过 {timeout}s，本次命令未执行。"
     try:
-        c = client.containers.get(container_id)
+        try:
+            c = _docker_call(lambda: client.containers.get(container_id), _INSPECT_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            _reset_docker_client()
+            return "[sandbox_unavailable] Docker 守护进程无响应（无法查询容器，socket 超时）"
         ready, status, prepare_error = _prepare_container_for_exec(
             c, wait_seconds=min(_EXEC_RECOVERY_WAIT_SECONDS, float(timeout)),
         )
         if not ready:
+            if status == "unreachable":
+                return f"[sandbox_unavailable] {prepare_error or 'Docker 守护进程无响应'}"
             detail = f"：{prepare_error}" if prepare_error else ""
             return f"[sandbox_unavailable] 容器状态为 {status}，无法执行命令{detail}"
 

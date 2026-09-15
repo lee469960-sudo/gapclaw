@@ -24,3 +24,6 @@
 - GitHub API denied failed-job rerun with 403; no destructive tag replacement was attempted.
 - Final production cross-check: all GAP production containers are healthy; Runner status/health remain `ok` at `v1.0.21-eac37d1`; no `v1.0.22` Hook delivery, manifest record, audit or Runner transition exists.
 - Phase 4 monitoring is complete. Phase 5 remains pending until public domain/provider access is cleared and the same failed job is rerun with Actions-write authority (or manually rerun by the repository owner).
+- 2026-09-15: User reported ICP/provider access has passed. Started a fresh release attempt from latest code, advanced `deploy/gap.version` to `v1.0.23`, and will validate the full GitHub-to-Release-Agent path with a new tag instead of rerunning the old failed `v1.0.22` job.
+- 2026-09-15: `v1.0.23` pre-release checks passed: targeted API tests `37 passed`, web `npm run build` passed, `openspec validate release-agent-lightweight-deploy --strict` passed, `openspec validate react-engine-batched-tool-execution --strict` passed, and `git diff --check` passed.
+- 2026-09-15: Public `https://gapclaw.online/health` now returns `{"status":"ok","version":"v1.0.21"}`, confirming the previous pre-HTTP TLS reset is cleared from this environment.

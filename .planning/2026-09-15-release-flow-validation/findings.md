@@ -16,3 +16,10 @@
 - Adapted Caddy TLS policies correctly isolate callback mTLS to SNI `runner.gapclaw.online`; the main `gapclaw.online` Hook route does not request client certificates. No safe Caddy configuration defect was found.
 - Production API logs and release tables contain no `v1.0.22-30ea7f0` intake; Runner logs contain no new deployment. Production remains entirely on healthy `v1.0.21-eac37d1`, proving there was no partial deployment.
 - This reproduces the existing task 5.4 public-domain gap documented on 2026-09-12: DNSPod/provider public ingress blocks or resets the domain before Caddy. Completing ICP/provider release is required before rerunning the failed GitHub job.
+
+## 2026-09-15 v1.0.23 retry after ICP approval
+
+- User reported ICP/provider access has passed and requested a fresh latest-code commit, new tag and complete release flow validation.
+- The retry will use `v1.0.23` because `v1.0.22` already exists remotely and records the previous pre-ICP failed Hook attempt.
+- Public `https://gapclaw.online/health` now returns HTTP success with `status=ok` and version `v1.0.21`; this is the expected pre-release production baseline before the new GitHub Hook deploys `v1.0.23`.
+- Pre-release validation for the current latest-code batch passed: targeted API tests, web production build, both relevant OpenSpec strict validations, and whitespace diff check.

@@ -32,14 +32,73 @@ PROTOCOL_MARKERS = (
     r"BATCH:|SHELL:|WRITE:|READ:|PATCH:|FINAL:|THINK:|MCP_ROUTE:|MCP:|SKILL_MD:|RAG:|PLAN:|RECALL:|RUN_SKILL:|HTTPMCP:|SEARCH:"
 )
 
-# Leaked native tool-call special tokens (e.g. MiniMax <|tool_call|>) that pollute
-# text-only replies. Compiled once; strip via strip_leaked_tool_tokens().
-LEAKED_TOOL_TOKEN_RE = re.compile(r"<\|[^|>\n]*\|>|\]<[^>]*>\[")
+# Leaked native tool-call special tokens that pollute text and function names.
+# MiniMax emits ]<]minimax[> / ]:<]minimax[ in addition to ChatML <|...|> and
+# the older ]<tool_call>[ wrapper.
+LEAKED_TOOL_TOKEN_RE = re.compile(
+    r"<\|[^|>\n]*\|>"
+    r"|\]:?<\]?minimax\[>?"
+    r"|<\]minimax\[>?"
+    r"|\]<[^>\n]*>\["
+)
+
+_PROTOCOL_NAME_ALIASES = {
+    "shell": "shell",
+    "write": "file_write",
+    "file_write": "file_write",
+    "read": "file_read",
+    "file_read": "file_read",
+    "patch": "file_search_replace",
+    "file_search_replace": "file_search_replace",
+    "search": "file_search",
+    "file_search": "file_search",
+    "mcp": "mcp_tool_call",
+    "mcp_tool_call": "mcp_tool_call",
+    "mcp_route": "mcp_route_request",
+    "mcp_route_request": "mcp_route_request",
+    "httpmcp": "httpmcp_call",
+    "httpmcp_call": "httpmcp_call",
+    "skill_md": "skill_read_md",
+    "skill_read_md": "skill_read_md",
+    "run_skill": "skill_run_script",
+    "skill_run_script": "skill_run_script",
+    "rag": "rag_query",
+    "rag_query": "rag_query",
+    "recall": "recall",
+    "final": "done",
+    "done": "done",
+}
+_MCP_TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+
+
+_LEAK_GLUE_RE = re.compile(
+    r"\[<+(?=(?:FINAL|SHELL|WRITE|READ|PATCH|MCP|PLAN|THINK|BATCH|SEARCH|RAG|RECALL)\b)",
+    re.IGNORECASE,
+)
 
 
 def strip_leaked_tool_tokens(text: str) -> str:
     """Drop leaked native tool-call special tokens (e.g. MiniMax <|tool_call|>)."""
-    return LEAKED_TOOL_TOKEN_RE.sub("", text or "")
+    cleaned = LEAKED_TOOL_TOKEN_RE.sub("", text or "")
+    return _LEAK_GLUE_RE.sub("", cleaned)
+
+
+def sanitize_native_tool_name(name: str) -> str:
+    """Strip MiniMax leaks and map SHELL:/READ: leftovers to native tool names."""
+    cleaned = strip_leaked_tool_tokens(name or "").strip().strip("`\"'")
+    cleaned = cleaned.strip("[]<>|")
+    if not cleaned:
+        return ""
+    prefix = cleaned.split(":", 1)[0].strip().lower().replace("-", "_")
+    alias = _PROTOCOL_NAME_ALIASES.get(prefix)
+    if alias:
+        return alias
+    lower = cleaned.lower().replace("-", "_")
+    return _PROTOCOL_NAME_ALIASES.get(lower, cleaned)
+
+
+def looks_like_mcp_tool_name(name: str) -> bool:
+    return bool(_MCP_TOOL_NAME_RE.fullmatch(str(name or "").strip()))
 
 
 _TOOL_BOUNDARY = PROTOCOL_MARKERS
