@@ -407,3 +407,12 @@
 - `openspec validate release-agent-lightweight-deploy --strict` passed.
 - Focused release verification passed: `PYTHONPATH=apps/api pytest -q apps/api/tests/test_release_hook.py apps/api/tests/test_release_hook_end_to_end_contract.py apps/api/tests/test_release_runner_protocol.py apps/api/tests/test_release_ledger.py tools/gap_deploy_runner/tests/test_release_build_workflow.py tools/gap_deploy_runner/tests/test_production_caddy_assets.py tools/gap_deploy_runner/tests/test_runner_installation.py` — 43 passed. `npm --prefix apps/web run build` passed with existing Vite chunk/PURE-comment warnings. `git diff --check` passed.
 - Public domain verification remains blocked: `http://gapclaw.online/health` reaches Caddy and returns `308 Location: https://gapclaw.online/health`, but `https://gapclaw.online/health` still fails with `curl: (35) Recv failure: Connection reset by peer`. This prevents external GitHub Hook proof and browser HTTPS acceptance, so task 5.4 remains unchecked and the change is not ready to archive.
+
+## 2026-09-15 — v1.0.22 GitHub-to-Release-Agent revalidation
+
+- Published commit `30ea7f0` and tag `v1.0.22`. GitHub Release run `34917597143` successfully built/pushed API and Web multi-architecture images, generated the immutable manifest and uploaded artifact `10376884675`.
+- Manifest digests were API `sha256:db17ca8e5cd28dd7aefc8fa545c722f31c670512ad7b34950f20b0d37fd43515` and Web `sha256:f7f3e2f72dba3af51b57a0cb808f084b84d9d7f51d32b479d2eede3d7283abe4`.
+- The signed Hook step alone failed after three `curl: (35) Recv failure: Connection reset by peer` attempts to `https://gapclaw.online/internal/release-hook`; no HTTP response was received.
+- Host evidence remained healthy: Caddy active/listening on 80/443, configuration valid, host-local SNI `/health` returned HTTP 200, UFW inactive and INPUT accept. The main Hook route is not under callback mTLS.
+- GAP API/release ledger and Runner contain no `v1.0.22-30ea7f0` intake or transition. Production remained healthy at `v1.0.21-eac37d1`, so no partial deploy or automatic rollback occurred.
+- This is the same public DNSPod/provider reachability blocker already recorded for task 5.4. The checkbox remains unchecked. After ICP/provider access is cleared, rerun failed jobs for run `34917597143` and complete signature/replay, terminal callback, independent health and administrator rollback evidence.

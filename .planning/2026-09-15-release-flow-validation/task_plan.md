@@ -6,17 +6,17 @@ Publish the current verified GAP changes under the next patch tag and validate t
 
 ## Current Phase
 
-Phase 2 is in progress: run release-specific verification, prepare the `v1.0.22` commit and inspect its staged contents.
+Phase 5 cannot complete until the existing public DNSPod/provider block for `gapclaw.online` is cleared. Run `34917597143` proved image/manifest publication but failed before Hook intake at the TLS boundary.
 
 ## Phases
 
 | Phase | Status |
 |---|---|
 | 1. Inspect release contents and CI/production prerequisites | complete |
-| 2. Run pre-release tests and prepare versioned commit | in_progress |
-| 3. Create and push the next patch tag | pending |
-| 4. Monitor GitHub build, image push and signed hook delivery | pending |
-| 5. Verify Release Agent, Runner, production health and audit evidence | pending |
+| 2. Run pre-release tests and prepare versioned commit | complete |
+| 3. Create and push the next patch tag | complete |
+| 4. Monitor GitHub build, image push and signed hook delivery | complete |
+| 5. Verify Release Agent, Runner, production health and audit evidence | pending (public ingress blocked) |
 
 ## Release Safety Rules
 
@@ -39,3 +39,14 @@ Phase 2 is in progress: run release-specific verification, prepare the `v1.0.22`
 | Browser fetch rejected `https://gapclaw.online/health` as an unsafe URL before making a request | 1 | Use an approved read-only `curl` request for the production baseline. |
 | Escalated HTTPS baseline request failed during TLS handshake with `SSL_ERROR_SYSCALL` | 1 | Retry once over explicit IPv4; use GitHub Hook delivery plus host-internal health as authoritative cross-check if the local network path remains unavailable. |
 | Explicit IPv4 HTTPS baseline produced the same TLS handshake failure | 2 | Stop repeating the local path; proceed with GitHub delivery and production host evidence as planned. |
+| First `git push origin main v1.0.22` returned no output and did not advance `origin/main` | 1 | Treat as failed; diagnose GitHub SSH authentication before retrying. |
+| Unauthenticated GitHub Actions API returned HTTP 403 | 1 | Repository/workflow data requires authentication or rate-limit relief; use an authorized authenticated request after the push succeeds. |
+| GitHub SSH authentication probe timed out on port 22 | 1 | Use HTTPS with a transient askpass helper and the previously authorized PAT; never place the token in the remote URL or Git config. |
+| HTTPS push returned GitHub HTTP 403 for the authorized identity | 1 | The PAT lacks current write authority or is expired. Delete the helper and try GitHub's SSH-over-443 endpoint with the existing local key. |
+| GitHub SSH-over-443 also timed out | 1 | Check for an existing OS Git credential helper; if absent or unauthorized, a new repository-scoped write PAT is required. |
+| macOS Keychain helper did not provide a GitHub username for non-interactive HTTPS push | 1 | GitHub push is blocked until a current repository-scoped write PAT is supplied; continue only read-only production baseline checks meanwhile. |
+| First password-SSH expect wrapper captured the password prompt but returned no remote output | 1 | Do not treat as authenticated; test login with a simpler exact prompt matcher before issuing Runner reads. |
+| First authenticated Actions API call returned 401 because the bearer environment variable was expanded by the parent shell before `env` applied it | 1 | Expand the token only inside a child shell that receives the environment variable; do not classify the credential itself as invalid. |
+| GitHub rerun-failed-jobs API returned 403 | 1 | Token has Actions read but not Actions write. Do not mutate tags to force a rerun; record the ingress blocker and request rerun authority only after public TLS is fixed. |
+| First release-ledger SSH query failed because Tcl expanded the container-only `$POSTGRES_USER` variable locally | 1 | Wrap the complete remote command in a Tcl braced literal so PostgreSQL environment variables expand only inside the DB container. |
+| Second release-ledger query reached PostgreSQL but nested quoting mangled SQL string labels | 2 | Remove all SQL string constants and query the latest fixed fields directly; check for the target release id in output. |

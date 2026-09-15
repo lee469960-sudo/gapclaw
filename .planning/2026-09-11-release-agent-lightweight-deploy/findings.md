@@ -324,3 +324,10 @@
 - **Evidence still missing:** the production Runner has a last-known-healthy baseline and the callback/audit path works, but no authenticated administrator UI/API rollback has been executed against the displayed baseline after the public domain cutover issue.
 - **Specific unexecuted tool action:** after an administrator session is available on the production domain or an equivalent authenticated API session is provided, call the Release Management rollback endpoint using only the displayed `release_id`, `target_id` and exact confirmation phrase.
 - **Expected decision condition:** non-admin or malformed confirmation remains rejected, the valid administrator request invokes only Runner's fixed rollback operation, Runner status remains healthy, and GAP records the rollback audit without accepting a caller-supplied image, digest, tag or shell command.
+
+## 2026-09-15 — Task 5.4 v1.0.22 Revalidation Gap
+
+- **User requirement to verify:** deliver the `v1.0.22` immutable manifest from GitHub through the signed production Hook into Release Agent/Runner and observe terminal healthy audit evidence.
+- **Evidence still missing:** run `34917597143` pushed both digest images and uploaded the manifest, but all three GitHub Hook attempts were reset during TLS before an HTTP response. GAP has no corresponding Hook delivery/audit and Runner remains at `v1.0.21`.
+- **Specific unexecuted tool action:** after `gapclaw.online` ICP/provider blocking is cleared, invoke GitHub's rerun-failed-jobs action for run `34917597143` using an Actions-write credential or the repository UI.
+- **Expected decision condition:** Hook step receives 2xx, GAP records exactly one accepted delivery for `v1.0.22-30ea7f0`, Runner reaches `phase=succeeded` with matching API/Web digests, callback audit becomes terminal, replay/invalid signature remain rejected, and the administrator-confirmed rollback evidence is completed before checking task 5.4.
