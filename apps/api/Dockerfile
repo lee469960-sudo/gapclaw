@@ -8,7 +8,7 @@ ENV GAP_VERSION=${GAP_VERSION}
 
 WORKDIR /app
 COPY apps/api/requirements.txt ./requirements.txt
-# stdio MCP servers such as 得到大脑 run through `npx -y @getnote/mcp`.
+# stdio MCP servers such as 得到大脑 run through pinned `npx -y @getnote/mcp@1.7.2`.
 # Install Node/npm in the API image because stdio processes are spawned inside
 # this container, not on the Docker host.
 RUN apt-get update \

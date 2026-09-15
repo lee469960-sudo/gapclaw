@@ -9,9 +9,11 @@ import App from './App.vue'
 import router from './router'
 import { initTheme } from './theme'
 import { installBrowserLogBridge } from './browserLog'
+import { loadPublicBrand } from './branding'
 
 initTheme()
 installBrowserLogBridge()
+loadPublicBrand()
 
 const app = createApp(App)
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {

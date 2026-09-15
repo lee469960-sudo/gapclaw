@@ -90,6 +90,7 @@ import { ElMessage } from 'element-plus'
 import { Setting, Check, EditPen, View, Plus, Picture } from '@element-plus/icons-vue'
 import { getCgi, postCgi } from '../api'
 import { patchShellSite } from '../session'
+import { applySiteBrand } from '../branding'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -143,7 +144,9 @@ async function load() {
 
 function applySiteBranding(data) {
   if (!data) return
-  window.dispatchEvent(new CustomEvent('gap-site-updated', { detail: brandingFrom(data) }))
+  const branding = brandingFrom(data)
+  applySiteBrand(branding)
+  window.dispatchEvent(new CustomEvent('gap-site-updated', { detail: branding }))
 }
 
 async function save() {

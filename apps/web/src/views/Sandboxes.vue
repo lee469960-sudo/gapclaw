@@ -52,15 +52,15 @@
         <div class="resource-rows">
           <div class="resource-row">
             <span class="res-icon orange">镜</span>
-            <span>{{ row.image }}</span>
+            <span class="resource-text" :title="row.image">{{ row.image }}</span>
           </div>
           <div class="resource-row">
             <span class="res-icon blue">规</span>
-            <span>CPU: {{ row.cpu_count }}核 | 内存: {{ row.memory_mb }}MB</span>
+            <span class="resource-text">CPU: {{ row.cpu_count }}核 | 内存: {{ row.memory_mb }}MB</span>
           </div>
           <div class="resource-row">
             <span class="res-icon green">网</span>
-            <span>{{ networkLabel(row.network_mode) }}</span>
+            <span class="resource-text">{{ networkLabel(row.network_mode) }}</span>
           </div>
         </div>
         <div class="card-footer">
@@ -549,6 +549,7 @@ onActivated(() => {
   border: 1px solid #ebeef5;
   border-radius: 8px;
   padding: 16px;
+  min-width: 0;
   transition: box-shadow 0.2s;
 }
 .card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
@@ -557,11 +558,27 @@ onActivated(() => {
 .vis-icon { color: #909399; }
 .vis-icon.pub { color: #67c23a; }
 .card-meta { display: flex; gap: 12px; font-size: 13px; color: #909399; margin-bottom: 12px; }
-.resource-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
-.resource-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #606266; }
+.resource-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; min-width: 0; }
+.resource-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #606266; min-width: 0; }
 .res-icon {
-  width: 22px; height: 22px; border-radius: 4px; display: inline-flex;
-  align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #fff;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 600;
+  color: #fff;
+}
+.resource-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .res-icon.orange { background: #e6a23c; }
 .res-icon.blue { background: #409eff; }

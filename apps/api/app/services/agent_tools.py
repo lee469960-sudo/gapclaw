@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 from app.models import Skill, MCP, Sandbox, RagCorpus, HttpMcp
 from app.services import docker_service, skill_runtime
 from app.services.mcp_client import call_mcp_tool
-from app.services.agent_runtime.utils import _get_mcp_tools_cached, record_ads_view_catalog
+from app.services.agent_runtime.utils import (
+    _get_mcp_tools_cached,
+    normalize_mcp_tool_args,
+    record_ads_view_catalog,
+)
 from app.services.httpmcp_runner import call_httpmcp
 from app.services.rag_indexer import search_corpus
 from app.services.workplace import format_dir_listing, find_files, workplace_root, benchmark_workplace_root
@@ -143,13 +147,20 @@ async def execute_action(
         if not bound:
             return "no mcp configured"
         target = None
+        target_tool = None
         for mcp in bound:
             tools, _ = await _get_mcp_tools_cached(mcp)
-            if any(isinstance(t, dict) and str(t.get("name")) == tool for t in tools):
+            matched = next(
+                (t for t in tools if isinstance(t, dict) and str(t.get("name")) == tool),
+                None,
+            )
+            if matched is not None:
                 target = mcp
+                target_tool = matched
                 break
         if target is None:
             return f"未在绑定 MCP 中找到工具 {tool}"
+        args = normalize_mcp_tool_args(target_tool or {}, args)
         if mcp_sessions is not None:
             result = await mcp_sessions.call_tool(target, tool, args)
         else:

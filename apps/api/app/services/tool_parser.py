@@ -11,6 +11,7 @@ class ToolStep:
     reply: str
     is_final: bool = False
     tool_call_id: str = ""
+    batch: dict | None = None
 
 
 def _norm_path(path: str) -> str:
@@ -28,7 +29,7 @@ def _norm_path(path: str) -> str:
 # Canonical protocol marker list — single source of truth for parsing boundaries,
 # history-trimming, and display cleanup. Import this instead of re-listing markers.
 PROTOCOL_MARKERS = (
-    r"SHELL:|WRITE:|READ:|PATCH:|FINAL:|THINK:|MCP_ROUTE:|MCP:|SKILL_MD:|RAG:|PLAN:|RECALL:|RUN_SKILL:|HTTPMCP:|SEARCH:"
+    r"BATCH:|SHELL:|WRITE:|READ:|PATCH:|FINAL:|THINK:|MCP_ROUTE:|MCP:|SKILL_MD:|RAG:|PLAN:|RECALL:|RUN_SKILL:|HTTPMCP:|SEARCH:"
 )
 
 # Leaked native tool-call special tokens (e.g. MiniMax <|tool_call|>) that pollute
@@ -112,6 +113,10 @@ def _tool_steps_from_json_object(obj: dict) -> list[ToolStep]:
         args_obj = None
 
     lower_name = name.lower()
+    if lower_name in ("batch", "tool_batch"):
+        payload = args_obj if args_obj is not None else args
+        return [_parse_batch_payload(payload)]
+
     if lower_name in ("mcp", "mcp_tool_call"):
         if not isinstance(args_obj, dict):
             return []
@@ -176,6 +181,110 @@ def _parse_json_tool_object(text: str) -> list[ToolStep]:
     return steps
 
 
+_BATCH_MODES = {"parallel", "sequence", "transaction"}
+_BATCH_CHILD_REPLY_PREFIXES = (
+    "SHELL:",
+    "WRITE:",
+    "READ:",
+    "PATCH:",
+    "MCP_ROUTE:",
+    "MCP:",
+    "SKILL_MD:",
+    "RAG:",
+    "RECALL:",
+    "RUN_SKILL:",
+    "HTTPMCP:",
+    "SEARCH:",
+)
+
+
+def _batch_invalid(reason: str) -> ToolStep:
+    payload = {"ok": False, "reason": reason}
+    return ToolStep("tool_batch_invalid", f"BATCH_INVALID: {_json_dumps(payload)}", batch=payload)
+
+
+def _batch_child_to_step(child: dict) -> tuple[ToolStep | None, str]:
+    if not isinstance(child, dict):
+        return None, "child_not_object"
+    child_id = str(child.get("id") or "").strip()
+    if not child_id:
+        return None, "child_missing_id"
+
+    reply = str(child.get("reply") or "").strip()
+    if reply:
+        if not reply.upper().startswith(_BATCH_CHILD_REPLY_PREFIXES):
+            return None, f"child_invalid_reply:{child_id}"
+        parsed = _parse_plain_steps(reply)
+        executable = [s for s in parsed if not s.is_final and s.action != "plan"]
+        if len(executable) != 1:
+            return None, f"child_malformed_reply:{child_id}"
+        return executable[0], ""
+
+    action = str(child.get("action") or child.get("tool") or child.get("name") or "").strip()
+    if not action:
+        return None, f"child_missing_action:{child_id}"
+    args = child.get("arguments", child.get("args", child.get("input", {})))
+    if isinstance(args, str):
+        try:
+            args_obj = json.loads(args)
+        except (TypeError, ValueError):
+            args_obj = args
+    else:
+        args_obj = args
+    steps = _tool_steps_from_json_object({"name": action, "arguments": args_obj})
+    executable = [s for s in steps if not s.is_final and s.action != "plan"]
+    if len(executable) != 1:
+        return None, f"child_malformed_action:{child_id}"
+    return executable[0], ""
+
+
+def _parse_batch_payload(payload) -> ToolStep:
+    if isinstance(payload, str):
+        raw = payload.strip()
+        fenced = re.match(r"(?is)^```(?:json)?\s*([\s\S]*?)\s*```$", raw)
+        if fenced:
+            raw = fenced.group(1).strip()
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return _batch_invalid("invalid_json")
+    if not isinstance(payload, dict):
+        return _batch_invalid("payload_not_object")
+
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode not in _BATCH_MODES:
+        return _batch_invalid("missing_or_invalid_mode")
+    children = payload.get("children")
+    if not isinstance(children, list) or not children:
+        return _batch_invalid("missing_children")
+
+    seen_ids: set[str] = set()
+    normalized_children: list[dict] = []
+    for child in children:
+        if not isinstance(child, dict):
+            return _batch_invalid("child_not_object")
+        child_id = str(child.get("id") or "").strip()
+        if not child_id:
+            return _batch_invalid("child_missing_id")
+        if child_id in seen_ids:
+            return _batch_invalid(f"duplicate_child_id:{child_id}")
+        seen_ids.add(child_id)
+        step, err = _batch_child_to_step(child)
+        if err or step is None:
+            return _batch_invalid(err or f"child_malformed:{child_id}")
+        normalized_children.append({
+            "id": child_id,
+            "action": step.action,
+            "reply": step.reply,
+        })
+
+    batch = {"mode": mode, "children": normalized_children}
+    batch_id = str(payload.get("batch_id") or payload.get("id") or "").strip()
+    if batch_id:
+        batch["id"] = batch_id[:80]
+    return ToolStep("tool_batch", f"BATCH: {_json_dumps(batch)}", batch=batch)
+
+
 _SHELL_META_RE = re.compile(
     r"</?\s*(?:think|tool_call|action|parameter)\b|"
     r"^(?:actually|wait[, ]|looking at|let me|i (?:think|notice|need)|"
@@ -198,6 +307,7 @@ def _is_executable_shell_payload(value: str) -> bool:
 def _parse_plain_steps(text: str) -> list[ToolStep]:
     steps: list[ToolStep] = []
     patterns = [
+        (rf"^\s*BATCH\s*[:：]\s*([\s\S]+?)(?=\n\s*(?:{_TOOL_BOUNDARY})|\Z)", "tool_batch", False),
         (rf"^\s*MCP_ROUTE\s*[:：]\s*(.+?)(?=\n\s*(?:{_TOOL_BOUNDARY})|\Z)", "mcp_route_request", False),
         (rf"^\s*MCP\s*[:：]\s*(\S+)\s*([\s\S]*?)(?=\n\s*(?:{_TOOL_BOUNDARY})|\Z)", "mcp_tool_call", False),
         (r"^\s*SKILL_MD\s*[:：]\s*(.+?)(?=\n|$)", "skill_read_md", False),
@@ -243,7 +353,9 @@ def _parse_plain_steps(text: str) -> list[ToolStep]:
     ]
     for pat, action, is_final in patterns:
         for m in re.finditer(pat, text, re.MULTILINE | re.IGNORECASE):
-            if action == "file_write":
+            if action == "tool_batch":
+                steps.append(_parse_batch_payload(m.group(1).strip()))
+            elif action == "file_write":
                 path = _norm_path(m.group(1))
                 content = m.group(2).strip()
                 if path and content:

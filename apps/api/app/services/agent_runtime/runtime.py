@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 
 _EXECUTION_DETAIL_LIMIT = 12_000
+_BATCH_FILE_WRITE_ACTIONS = frozenset({"file_write", "file_search_replace"})
 
 logger = logging.getLogger(__name__)
 
@@ -490,6 +491,72 @@ class AgentRuntime:
             logger.exception("publish inbound failed")
 
     @staticmethod
+    def _slim_batch_detail(batch: dict | None) -> dict | None:
+        """Allowlist batch execution details for persisted/user-visible steps."""
+        if not isinstance(batch, dict):
+            return None
+        try:
+            duration_ms = max(0, int(batch.get("duration_ms") or 0))
+        except (TypeError, ValueError):
+            duration_ms = 0
+        out: dict = {
+            "batch_id": str(batch.get("batch_id") or "")[:80],
+            "mode": str(batch.get("mode") or "")[:32],
+            "total": max(0, int(batch.get("total") or 0)),
+            "done": max(0, int(batch.get("done") or 0)),
+            "error": max(0, int(batch.get("error") or 0)),
+            "skipped": max(0, int(batch.get("skipped") or 0)),
+            "duration_ms": duration_ms,
+            "children": [],
+        }
+        if batch.get("phase"):
+            out["phase"] = str(batch.get("phase") or "")[:32]
+        if batch.get("validation_ok") is not None:
+            out["validation_ok"] = bool(batch.get("validation_ok"))
+        if batch.get("committed") is not None:
+            out["committed"] = max(0, int(batch.get("committed") or 0))
+        try:
+            from app.services.code_agent.output_security import redact_code_output
+        except Exception:
+            redact_code_output = None
+
+        for child in (batch.get("children") or [])[:80]:
+            if not isinstance(child, dict):
+                continue
+            item: dict = {
+                "id": str(child.get("id") or "")[:80],
+                "action": str(child.get("action") or "")[:80],
+                "status": str(child.get("status") or "")[:32],
+            }
+            for key in ("attempts", "duration_ms", "chars", "returned_chars", "omitted_chars"):
+                if child.get(key) is not None:
+                    try:
+                        item[key] = max(0, int(child.get(key) or 0))
+                    except (TypeError, ValueError):
+                        pass
+            for key in ("phase", "target", "detail_path", "error", "reason", "retry_hint"):
+                value = child.get(key)
+                if isinstance(value, str) and value:
+                    safe = redact_code_output(value).text if redact_code_output else value
+                    item[key] = safe[:500]
+            args_preview = child.get("args_preview")
+            if isinstance(args_preview, str) and args_preview.strip():
+                safe = redact_code_output(args_preview).text if redact_code_output else args_preview
+                item["args_preview"] = safe[:1000]
+            for key in ("complete", "coalesced"):
+                if child.get(key) is not None:
+                    item[key] = bool(child.get(key))
+            if isinstance(child.get("range"), dict):
+                rng = child["range"]
+                item["range"] = {
+                    "path": str(rng.get("path") or "")[:500],
+                    "start": max(0, int(rng.get("start") or 0)),
+                    "end": max(0, int(rng.get("end") or 0)),
+                }
+            out["children"].append(item)
+        return out
+
+    @staticmethod
     def _slim_steps_for_meta(steps: list[dict] | None) -> list[dict]:
         """Keep bounded, user-visible execution details in ChatMessage.meta."""
         out: list[dict] = []
@@ -523,6 +590,9 @@ class AgentRuntime:
                     "failure": str(detail.get("failure") or "")[:80],
                     "duration_ms": max(0, int(detail.get("duration_ms") or 0)),
                 }
+            batch = AgentRuntime._slim_batch_detail(s.get("batch"))
+            if batch:
+                item["batch"] = batch
             preview = s.get("preview")
             if isinstance(preview, str) and preview.strip():
                 cleaned_preview = AgentRuntime._sanitize_step_text(preview)
@@ -743,6 +813,7 @@ class AgentRuntime:
         title: str,
         status: str = "done",
         content: str = "",
+        batch: dict | None = None,
     ) -> None:
         """Record a tool step on the shared run_steps bus."""
         step = {
@@ -754,6 +825,9 @@ class AgentRuntime:
         }
         if content:
             step["content"] = content[:_EXECUTION_DETAIL_LIMIT]
+        slim_batch = AgentRuntime._slim_batch_detail(batch)
+        if slim_batch:
+            step["batch"] = slim_batch
         await AgentRuntime._append_step(ctx, state, step)
 
     async def _run_conversational(self, ctx: AgentContext) -> str:
@@ -1086,7 +1160,9 @@ class AgentRuntime:
         # OpenAI-compatible providers; the text protocol remains the fallback.
         provider = (getattr(ctx.llm, "provider", "") or "").lower()
         tool_schemas = (
-            sp_builder.build_tool_schemas(ctx.allowed_actions)
+            sp_builder.build_tool_schemas(
+                ctx.allowed_actions, mcp_configured=bool(ctx.mcp_ids),
+            )
             if provider in ("", "openai", "minimax", "deepseek")
             else None
         )
@@ -1282,6 +1358,7 @@ class AgentRuntime:
             ctx.agent.id, ctx.session_id, max_iters,
         )
         tool_call_count = 0
+        batch_sequence = 0
         text_only_streak = 0
         _last_text_only_reply = ""
         llm_failures = 0
@@ -1723,6 +1800,712 @@ class AgentRuntime:
                     if not action or not normalized:
                         continue
 
+                    if action == "tool_batch_invalid":
+                        reason = ""
+                        if isinstance(getattr(step, "batch", None), dict):
+                            reason = str(step.batch.get("reason") or "")
+                        result_text = f"批量工具调用格式无效，未执行任何子工具。{reason}".strip()
+                        cm.add_coach_hint(
+                            f"【批量工具格式】{result_text} 请修正 BATCH envelope 后重试。"
+                        )
+                        await self._append_tool_step(
+                            ctx, state, iteration=round_no, action=action,
+                            title="批量工具调用格式无效", status="error",
+                            content=result_text,
+                        )
+                        if step.tool_call_id:
+                            cm.push_native_tool_result(
+                                step.tool_call_id,
+                                result_text,
+                                clip=tool_result_clip,
+                            )
+                        continue
+
+                    if action == "tool_batch":
+                        batch = getattr(step, "batch", None) or {}
+                        children = batch.get("children") if isinstance(batch, dict) else []
+                        mode = str(batch.get("mode") or "") if isinstance(batch, dict) else ""
+                        batch_sequence += 1
+                        requested_batch_id = str(
+                            batch.get("id") or batch.get("batch_id") or step.tool_call_id or ""
+                        ).strip()
+                        batch_id = re.sub(
+                            r"[^A-Za-z0-9_.:-]+", "-", requested_batch_id,
+                        )[:80].strip("-")
+                        if not batch_id:
+                            batch_id = f"batch-{run_ts}-{round_no}-{batch_sequence}"
+                        batch_executed = False
+                        result_payload: dict | None = None
+                        batch_started = time.monotonic()
+
+                        def _batch_child_args_preview(child: dict) -> str:
+                            raw = str(child.get("reply") or "")
+                            try:
+                                from app.services.code_agent.output_security import redact_code_output
+                                safe = redact_code_output(raw).text
+                            except Exception:
+                                safe = raw
+                            safe = re.sub(
+                                r"(?i)\b(secret|token|password|passwd|pwd|api[_-]?key)\s*=\s*([^\s,;&]+)",
+                                r"\1=<redacted>",
+                                safe,
+                            )
+                            return safe[:1000]
+
+                        def _batch_child_domain(child: dict) -> str:
+                            child_action = str(child.get("action") or "")
+                            if child_action == "mcp_tool_call":
+                                return "mcp"
+                            if child_action == "httpmcp_call":
+                                return "httpmcp"
+                            if child_action == "rag_query":
+                                return "rag"
+                            if child_action.startswith("code_"):
+                                return "code"
+                            return "local"
+
+                        def _batch_retry_hint(item: dict) -> str:
+                            reason = str(item.get("error") or item.get("reason") or "").lower()
+                            action_name = str(item.get("action") or "")
+                            if "write_requires_transaction" in reason:
+                                if action_name == "file_write":
+                                    return "将 WRITE 改为 PATCH 后放入 transaction，或移出批量并单独执行。"
+                                return "将 PATCH 子项放入 mode=transaction 后重新提交。"
+                            if "transaction_child_must_be_patch" in reason:
+                                return "仅保留 PATCH 子项，并使用 mode=transaction 重新提交。"
+                            if "patch_conflict" in reason:
+                                return "重新读取目标文件，更新 PATCH 的 old 内容后提交新的 transaction。"
+                            if "permission_denied" in reason:
+                                return "移除未授权子项，或先为 Agent 授权对应工具后重新提交。"
+                            if "cross_security_domain" in reason:
+                                return "按 MCP、沙箱或权限域拆分为多个独立批次。"
+                            if "timeout" in reason or "transient" in reason:
+                                return "确认依赖恢复后，仅重试该失败子项。"
+                            return "检查该子项的参数和错误结果后，仅重试该失败子项。"
+
+                        def _finalize_batch_payload(payload: dict) -> str:
+                            payload["batch_id"] = batch_id
+                            for key in ("children", "commit_results"):
+                                for item in payload.get(key) or []:
+                                    if isinstance(item, dict) and item.get("status") == "error":
+                                        item.setdefault("retry_hint", _batch_retry_hint(item))
+                            ordered = {"batch_id": batch_id, **payload}
+                            return "BATCH_RESULT: " + json.dumps(ordered, ensure_ascii=False)
+
+                        batch_mcp_route_lock = asyncio.Lock()
+
+                        async def _run_batch_child(child: dict) -> dict:
+                            child_id = str(child.get("id") or "")
+                            child_action = str(child.get("action") or "")
+                            child_reply = str(child.get("reply") or "")
+                            attempts = 0
+                            retry_reasons: list[str] = []
+                            child_started = time.monotonic()
+                            while attempts < 2:
+                                attempts += 1
+                                try:
+                                    tool_executor = getattr(ctx, "tool_executor", None)
+                                    if tool_executor is not None:
+                                        child_result = await tool_executor(child_action, child_reply)
+                                    else:
+                                        child_result = await execute_action(
+                                            child_action, child_reply,
+                                            ctx.db, ctx.agent, sandbox,
+                                            ctx.skill_ids, state.selected_mcp_ids,
+                                            ctx.rag_ids,
+                                            httpmcp_ids=ctx.httpmcp_ids,
+                                            mcp_sessions=mcp_sessions,
+                                        )
+                                    child_text = child_result or ""
+                                    if (
+                                        child_action == "mcp_tool_call"
+                                        and child_text.strip() == "no mcp configured"
+                                        and ctx.mcp_ids
+                                    ):
+                                        # Several parallel MCP children can observe the
+                                        # same empty lazy selection. Route only once;
+                                        # every waiting child then retries against that
+                                        # selected subset without loading all bindings.
+                                        async with batch_mcp_route_lock:
+                                            if (
+                                                not state.selected_mcp_ids
+                                                and state.mcp_route_attempts < 2
+                                            ):
+                                                state.mcp_route_attempts += 1
+                                                decision = await route_mcp_candidates(
+                                                    llm=ctx.llm, db=ctx.db,
+                                                    user_message=state.goal or ctx.user_message,
+                                                    candidates=candidates,
+                                                    selected_mcp_ids=state.selected_mcp_ids,
+                                                    trigger=f"batch_mcp_empty_selection:{child_reply}"[:500],
+                                                    timeout=llm_timeout,
+                                                )
+                                                newly_selected = [
+                                                    mid for mid in decision.selected_mcp_ids
+                                                    if mid not in state.selected_mcp_ids
+                                                ]
+                                                mcp_load_results = []
+                                                if newly_selected:
+                                                    state.selected_mcp_ids.extend(newly_selected)
+                                                    supplement_tools = await SystemPromptBuilder.build_tools_desc(
+                                                        db=ctx.db, agent=ctx.agent,
+                                                        allowed=ctx.allowed_actions,
+                                                        skill_ids=ctx.skill_ids,
+                                                        mcp_ids=state.selected_mcp_ids,
+                                                        rag_ids=ctx.rag_ids,
+                                                        httpmcp_ids=ctx.httpmcp_ids,
+                                                        save_dir=ctx.save_dir,
+                                                        im_source=ctx.im_source,
+                                                    )
+                                                    cm.set_tools_catalog(supplement_tools)
+                                                    mcp_load_results = getattr(
+                                                        supplement_tools, "mcp_load_results", [],
+                                                    )
+                                                _record_mcp_route_event(
+                                                    state,
+                                                    user_message=state.goal or ctx.user_message,
+                                                    candidates=candidates,
+                                                    decision=decision,
+                                                    trigger="empty_mcp_selection",
+                                                    supplement_index=state.mcp_route_attempts,
+                                                    mcp_load_results=mcp_load_results,
+                                                )
+                                            if state.selected_mcp_ids:
+                                                attempts += 1
+                                                if tool_executor is not None:
+                                                    child_result = await tool_executor(
+                                                        child_action, child_reply,
+                                                    )
+                                                else:
+                                                    child_result = await execute_action(
+                                                        child_action, child_reply,
+                                                        ctx.db, ctx.agent, sandbox,
+                                                        ctx.skill_ids, state.selected_mcp_ids,
+                                                        ctx.rag_ids,
+                                                        httpmcp_ids=ctx.httpmcp_ids,
+                                                        mcp_sessions=mcp_sessions,
+                                                    )
+                                                child_text = child_result or ""
+                                            else:
+                                                child_text = (
+                                                    "本轮 MCP 路由未选中可用能力；"
+                                                    "已尝试补选但仍无匹配 MCP。"
+                                                )
+                                    child_failed = _tool_result_failed(child_text)
+                                    if child_action == "file_read" and not child_failed:
+                                        if len(child_text) <= tool_result_clip:
+                                            shaped = {
+                                                "complete": True,
+                                                "result": child_text,
+                                                "chars": len(child_text),
+                                            }
+                                        else:
+                                            detail_path = _materialize_batch_read(child_id, child_text)
+                                            shaped = {
+                                                "complete": False,
+                                                "result": child_text[:tool_result_clip],
+                                                "chars": len(child_text),
+                                                "returned_chars": tool_result_clip,
+                                                "omitted_chars": len(child_text) - tool_result_clip,
+                                            }
+                                            if detail_path:
+                                                shaped["detail_path"] = detail_path
+                                    else:
+                                        shaped = {"result": child_text[:500]}
+                                    item = {
+                                        "id": child_id,
+                                        "action": child_action,
+                                        "status": "error" if child_failed else "done",
+                                        "attempts": attempts,
+                                        "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        **shaped,
+                                    }
+                                    if child_failed:
+                                        item.pop("result", None)
+                                        item["error"] = child_text[:400]
+                                    if retry_reasons:
+                                        item["retries"] = retry_reasons
+                                    return item
+                                except Exception as exc:
+                                    msg = f"{type(exc).__name__}: {exc}"[:400]
+                                    transient = isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "transient" in str(exc).lower()
+                                    if transient and attempts < 2:
+                                        retry_reasons.append(msg)
+                                        continue
+                                    item = {
+                                        "id": child_id,
+                                        "action": child_action,
+                                        "status": "error",
+                                        "attempts": attempts,
+                                        "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "error": msg,
+                                    }
+                                    if retry_reasons:
+                                        item["retries"] = retry_reasons
+                                    return item
+
+                        def _parse_read_range(child: dict) -> tuple[str, int, int] | None:
+                            if str(child.get("action") or "") != "file_read":
+                                return None
+                            reply = str(child.get("reply") or "")
+                            m = re.match(r"^READ:\s*(.+?)#L(\d+)-L(\d+)\s*$", reply)
+                            if not m:
+                                return None
+                            start = int(m.group(2))
+                            end = int(m.group(3))
+                            if start < 1 or end < start:
+                                return None
+                            return m.group(1).strip(), start, end
+
+                        def _materialize_batch_read(child_id: str, text: str) -> str | None:
+                            safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", child_id or "child")[:80]
+                            rel = f"task/{run_ts}/batch_read_{safe_id}.txt"
+                            try:
+                                from app.services.workplace import workplace_root
+                                sid = sandbox.id if sandbox else "default"
+                                path = workplace_root(sid) / rel
+                                path.parent.mkdir(parents=True, exist_ok=True)
+                                path.write_text(text, encoding="utf-8")
+                                return rel
+                            except Exception:
+                                return None
+
+                        def _parse_patch_child(child: dict) -> tuple[str, str, str] | None:
+                            if str(child.get("action") or "") != "file_search_replace":
+                                return None
+                            reply = str(child.get("reply") or "")
+                            if not reply.startswith("PATCH:"):
+                                return None
+                            parts = reply[6:].strip().split("\n", 2)
+                            if len(parts) != 3:
+                                return None
+                            path, old, new = parts[0].strip().lstrip("/"), parts[1], parts[2]
+                            if not path or old == "":
+                                return None
+                            return path, old, new
+
+                        async def _read_for_transaction(path: str) -> str:
+                            tool_executor = getattr(ctx, "tool_executor", None)
+                            if tool_executor is not None:
+                                return await tool_executor("file_read", f"READ: {path}") or ""
+                            return await execute_action(
+                                "file_read", f"READ: {path}",
+                                ctx.db, ctx.agent, sandbox,
+                                ctx.skill_ids, state.selected_mcp_ids,
+                                ctx.rag_ids,
+                                httpmcp_ids=ctx.httpmcp_ids,
+                                mcp_sessions=mcp_sessions,
+                            ) or ""
+
+                        async def _dry_run_transaction(children: list[dict]) -> tuple[list[dict], bool]:
+                            out: list[dict] = []
+                            ok = True
+                            for child in children:
+                                child_id = str(child.get("id") or "")
+                                child_started = time.monotonic()
+                                parsed = _parse_patch_child(child)
+                                if parsed is None:
+                                    out.append({
+                                        "id": child_id,
+                                        "action": str(child.get("action") or ""),
+                                        "status": "error",
+                                        "phase": "dry_run",
+                                        "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "error": "transaction_child_must_be_patch",
+                                    })
+                                    ok = False
+                                    continue
+                                path, old, _new = parsed
+                                try:
+                                    current = await _read_for_transaction(path)
+                                except Exception as exc:
+                                    out.append({
+                                        "id": child_id,
+                                        "action": "file_search_replace",
+                                        "status": "error",
+                                        "phase": "dry_run",
+                                        "target": path,
+                                        "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "error": f"{type(exc).__name__}: {exc}"[:400],
+                                    })
+                                    ok = False
+                                    continue
+                                if current.startswith("文件不存在") or current.startswith("[") or old not in current:
+                                    out.append({
+                                        "id": child_id,
+                                        "action": "file_search_replace",
+                                        "status": "error",
+                                        "phase": "dry_run",
+                                        "target": path,
+                                        "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "error": "patch_conflict",
+                                    })
+                                    ok = False
+                                    continue
+                                out.append({
+                                    "id": child_id,
+                                    "action": "file_search_replace",
+                                    "status": "validated",
+                                    "phase": "dry_run",
+                                    "target": path,
+                                    "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                    "args_preview": _batch_child_args_preview(child),
+                                })
+                            return out, ok
+
+                        async def _commit_transaction(children: list[dict]) -> list[dict]:
+                            out: list[dict] = []
+                            for child in children:
+                                child_id = str(child.get("id") or "")
+                                reply = str(child.get("reply") or "")
+                                child_started = time.monotonic()
+                                try:
+                                    tool_executor = getattr(ctx, "tool_executor", None)
+                                    if tool_executor is not None:
+                                        commit_result = await tool_executor("file_search_replace", reply)
+                                    else:
+                                        commit_result = await execute_action(
+                                            "file_search_replace", reply,
+                                            ctx.db, ctx.agent, sandbox,
+                                            ctx.skill_ids, state.selected_mcp_ids,
+                                            ctx.rag_ids,
+                                            httpmcp_ids=ctx.httpmcp_ids,
+                                            mcp_sessions=mcp_sessions,
+                                        )
+                                    text = commit_result or ""
+                                    out.append({
+                                        "id": child_id,
+                                        "action": "file_search_replace",
+                                        "status": "committed" if not _tool_result_failed(text) else "error",
+                                        "phase": "commit",
+                                        "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "result": text[:500],
+                                    })
+                                except Exception as exc:
+                                    out.append({
+                                        "id": child_id,
+                                        "action": "file_search_replace",
+                                        "status": "error",
+                                        "phase": "commit",
+                                        "duration_ms": int((time.monotonic() - child_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "error": f"{type(exc).__name__}: {exc}"[:400],
+                                    })
+                            return out
+
+                        async def _run_read_range_group(path: str, grouped: list[tuple[dict, int, int]]) -> list[dict]:
+                            group_started = time.monotonic()
+                            try:
+                                tool_executor = getattr(ctx, "tool_executor", None)
+                                if tool_executor is not None:
+                                    full_text = await tool_executor("file_read", f"READ: {path}")
+                                else:
+                                    full_text = await execute_action(
+                                        "file_read", f"READ: {path}",
+                                        ctx.db, ctx.agent, sandbox,
+                                        ctx.skill_ids, state.selected_mcp_ids,
+                                        ctx.rag_ids,
+                                        httpmcp_ids=ctx.httpmcp_ids,
+                                        mcp_sessions=mcp_sessions,
+                                    )
+                                lines = str(full_text or "").splitlines()
+                                out = []
+                                for child, start, end in grouped:
+                                    segment = "\n".join(lines[start - 1:end])
+                                    out.append({
+                                        "id": str(child.get("id") or ""),
+                                        "action": "file_read",
+                                        "status": "done",
+                                        "attempts": 1,
+                                        "duration_ms": int((time.monotonic() - group_started) * 1000),
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "complete": True,
+                                        "range": {"path": path, "start": start, "end": end},
+                                        "coalesced": True,
+                                        "result": segment,
+                                        "chars": len(segment),
+                                    })
+                                return out
+                            except Exception as exc:
+                                return [{
+                                    "id": str(child.get("id") or ""),
+                                    "action": "file_read",
+                                    "status": "error",
+                                    "attempts": 1,
+                                    "duration_ms": int((time.monotonic() - group_started) * 1000),
+                                    "args_preview": _batch_child_args_preview(child),
+                                    "range": {"path": path, "start": start, "end": end},
+                                    "coalesced": True,
+                                    "error": f"{type(exc).__name__}: {exc}"[:400],
+                                } for child, start, end in grouped]
+
+                        async def _run_parallel_children(children: list[dict]) -> list[dict]:
+                            range_groups: dict[str, list[tuple[dict, int, int]]] = {}
+                            non_range: list[dict] = []
+                            serial_children: list[dict] = []
+                            parallel_children: list[dict] = []
+                            for child in children:
+                                parsed = _parse_read_range(child)
+                                if parsed is None:
+                                    non_range.append(child)
+                                    continue
+                                path, start, end = parsed
+                                range_groups.setdefault(path, []).append((child, start, end))
+                            for child in non_range:
+                                if str(child.get("action") or "") in {"shell", "code_shell"}:
+                                    serial_children.append(child)
+                                else:
+                                    parallel_children.append(child)
+
+                            result_by_id: dict[str, dict] = {}
+                            group_tasks = [
+                                _run_read_range_group(path, grouped)
+                                for path, grouped in range_groups.items()
+                            ]
+                            normal_tasks = [_run_batch_child(child) for child in parallel_children]
+                            group_results = await asyncio.gather(*group_tasks) if group_tasks else []
+                            normal_results = await asyncio.gather(*normal_tasks) if normal_tasks else []
+                            serial_results = []
+                            for child in serial_children:
+                                serial_results.append(await _run_batch_child(child))
+                            for group_result in group_results:
+                                for item in group_result:
+                                    result_by_id[str(item.get("id") or "")] = item
+                            for item in normal_results:
+                                result_by_id[str(item.get("id") or "")] = item
+                            for item in serial_results:
+                                result_by_id[str(item.get("id") or "")] = item
+                            return [
+                                result_by_id.get(str(child.get("id") or ""), {
+                                    "id": str(child.get("id") or ""),
+                                    "action": str(child.get("action") or ""),
+                                    "status": "error",
+                                    "error": "missing_batch_child_result",
+                                })
+                                for child in children
+                            ]
+
+                        denied = [
+                            child for child in (children or [])
+                            if isinstance(child, dict)
+                            and str(child.get("action") or "") not in ctx.allowed_actions
+                        ]
+                        child_domains = {
+                            _batch_child_domain(child)
+                            for child in (children or [])
+                            if isinstance(child, dict)
+                        }
+                        write_children = [
+                            child for child in (children or [])
+                            if isinstance(child, dict)
+                            and str(child.get("action") or "") in _BATCH_FILE_WRITE_ACTIONS
+                        ]
+                        if denied:
+                            child = denied[0]
+                            result_text = (
+                                "批量工具调用包含未启用子工具，未执行任何子工具: "
+                                f"{child.get('id') or '?'} -> {child.get('action') or '?'}"
+                            )
+                            status = "error"
+                            result_payload = {
+                                "mode": mode,
+                                "total": len([c for c in (children or []) if isinstance(c, dict)]),
+                                "done": 0,
+                                "error": 1,
+                                "skipped": max(0, len([c for c in (children or []) if isinstance(c, dict)]) - 1),
+                                "children": [{
+                                    "id": str(child.get("id") or ""),
+                                    "action": str(child.get("action") or ""),
+                                    "status": "error",
+                                    "duration_ms": 0,
+                                    "args_preview": _batch_child_args_preview(child),
+                                    "error": "permission_denied",
+                                }],
+                            }
+                        elif mode != "transaction" and write_children:
+                            write_ids = {str(child.get("id") or "") for child in write_children}
+                            batch_children = [
+                                child for child in (children or []) if isinstance(child, dict)
+                            ]
+                            result_text = (
+                                "批量文件写入必须使用 mode=transaction，未执行任何子工具。"
+                                "（write_requires_transaction）"
+                            )
+                            result_payload = {
+                                "mode": mode,
+                                "total": len(batch_children),
+                                "done": 0,
+                                "error": len(write_children),
+                                "skipped": max(0, len(batch_children) - len(write_children)),
+                                "children": [
+                                    {
+                                        "id": str(child.get("id") or ""),
+                                        "action": str(child.get("action") or ""),
+                                        "status": (
+                                            "error"
+                                            if str(child.get("id") or "") in write_ids
+                                            else "skipped"
+                                        ),
+                                        "duration_ms": 0,
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "error": (
+                                            "write_requires_transaction"
+                                            if str(child.get("id") or "") in write_ids
+                                            else ""
+                                        ),
+                                        "reason": "write_requires_transaction",
+                                    }
+                                    for child in batch_children
+                                ],
+                            }
+                            status = "error"
+                        elif len(child_domains) > 1:
+                            ordered_domains = sorted(child_domains)
+                            result_text = (
+                                "批量工具调用跨安全域，未执行任何子工具: "
+                                + ", ".join(ordered_domains)
+                                + "（cross_security_domain）"
+                            )
+                            status = "error"
+                            result_payload = {
+                                "mode": mode,
+                                "total": len([c for c in (children or []) if isinstance(c, dict)]),
+                                "done": 0,
+                                "error": 1,
+                                "skipped": max(0, len([c for c in (children or []) if isinstance(c, dict)]) - 1),
+                                "children": [
+                                    {
+                                        "id": str(child.get("id") or ""),
+                                        "action": str(child.get("action") or ""),
+                                        "status": "error" if idx == 0 else "skipped",
+                                        "duration_ms": 0,
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "error": "cross_security_domain" if idx == 0 else "",
+                                        "reason": "cross_security_domain" if idx else "",
+                                    }
+                                    for idx, child in enumerate([c for c in (children or []) if isinstance(c, dict)])
+                                ],
+                            }
+                        elif mode == "parallel":
+                            child_results = await _run_parallel_children([
+                                child for child in (children or []) if isinstance(child, dict)
+                            ])
+                            done_count = sum(1 for item in child_results if item.get("status") == "done")
+                            error_count = sum(1 for item in child_results if item.get("status") == "error")
+                            result_payload = {
+                                "mode": "parallel",
+                                "total": len(child_results),
+                                "done": done_count,
+                                "error": error_count,
+                                "skipped": 0,
+                                "children": child_results,
+                            }
+                            result_text = "BATCH_RESULT: " + json.dumps(result_payload, ensure_ascii=False)
+                            status = "error" if error_count else "done"
+                            batch_executed = True
+                            tool_call_count += len(child_results)
+                            if done_count:
+                                made_progress = True
+                        elif mode == "sequence":
+                            child_results = []
+                            stop_after_failure = False
+                            for child in (children or []):
+                                if not isinstance(child, dict):
+                                    continue
+                                if stop_after_failure:
+                                    child_results.append({
+                                        "id": str(child.get("id") or ""),
+                                        "action": str(child.get("action") or ""),
+                                        "status": "skipped",
+                                        "duration_ms": 0,
+                                        "args_preview": _batch_child_args_preview(child),
+                                        "reason": "previous_child_failed",
+                                    })
+                                    continue
+                                item = await _run_batch_child(child)
+                                child_results.append(item)
+                                if item.get("status") == "error":
+                                    stop_after_failure = True
+                            done_count = sum(1 for item in child_results if item.get("status") == "done")
+                            error_count = sum(1 for item in child_results if item.get("status") == "error")
+                            skipped_count = sum(1 for item in child_results if item.get("status") == "skipped")
+                            result_payload = {
+                                "mode": "sequence",
+                                "total": len(child_results),
+                                "done": done_count,
+                                "error": error_count,
+                                "skipped": skipped_count,
+                                "children": child_results,
+                            }
+                            result_text = "BATCH_RESULT: " + json.dumps(result_payload, ensure_ascii=False)
+                            status = "error" if error_count else "done"
+                            batch_executed = True
+                            tool_call_count += done_count + error_count
+                            if done_count:
+                                made_progress = True
+                        elif mode == "transaction":
+                            tx_children = [child for child in (children or []) if isinstance(child, dict)]
+                            child_results, validation_ok = await _dry_run_transaction(tx_children)
+                            commit_results = await _commit_transaction(tx_children) if validation_ok else []
+                            committed_count = sum(1 for item in commit_results if item.get("status") == "committed")
+                            commit_error_count = sum(1 for item in commit_results if item.get("status") == "error")
+                            result_payload = {
+                                "mode": "transaction",
+                                "phase": "committed" if validation_ok and not commit_error_count else "dry_run",
+                                "validation_ok": validation_ok,
+                                "total": len(child_results),
+                                "done": committed_count,
+                                "validated": sum(1 for item in child_results if item.get("status") == "validated"),
+                                "error": sum(1 for item in child_results if item.get("status") == "error") + commit_error_count,
+                                "skipped": (
+                                    sum(1 for item in child_results if item.get("status") == "validated")
+                                    if not validation_ok else 0
+                                ),
+                                "committed": committed_count,
+                                "children": child_results,
+                                "commit_results": commit_results,
+                            }
+                            result_text = "BATCH_RESULT: " + json.dumps(result_payload, ensure_ascii=False)
+                            status = "done" if validation_ok and not commit_error_count else "error"
+                            batch_executed = True
+                            if committed_count:
+                                made_progress = True
+                        else:
+                            result_text = (
+                                f"批量工具调用已通过子工具权限预检，但 {mode or 'unknown'} 批量执行尚未启用；"
+                                "未执行任何子工具。"
+                            )
+                            status = "error"
+                        if result_payload is not None:
+                            if not result_text.startswith("BATCH_RESULT:"):
+                                result_payload.setdefault("message", result_text)
+                            result_text = _finalize_batch_payload(result_payload)
+                        cm.add_coach_hint(f"【批量工具】{result_text}")
+                        cm.push_tool_result(result_text, action=action, clip=tool_result_clip)
+                        batch_detail = dict(result_payload) if isinstance(result_payload, dict) else None
+                        if batch_detail is not None:
+                            batch_detail["duration_ms"] = int((time.monotonic() - batch_started) * 1000)
+                            if isinstance(batch_detail.get("commit_results"), list):
+                                batch_detail["children"] = list(batch_detail.get("children") or []) + list(batch_detail.get("commit_results") or [])
+                        await self._append_tool_step(
+                            ctx, state, iteration=round_no, action=action,
+                            title="批量工具调用", status=status,
+                            content=result_text, batch=batch_detail,
+                        )
+                        if step.tool_call_id:
+                            cm.push_native_tool_result(
+                                step.tool_call_id,
+                                result_text,
+                                clip=tool_result_clip,
+                            )
+                        continue
+
                     if action == "mcp_route_request":
                         if state.mcp_route_attempts >= 2:
                             result_text = "MCP 补选已达本次运行上限（2 次），请基于现有证据继续或向用户澄清。"
@@ -1834,13 +2617,18 @@ class AgentRuntime:
                             result_text = tool_result or ""
                             if desc is not None:
                                 state.query_cache[desc["key"]] = _dedup_entry(desc, action, result_text)
+                    mcp_failure_kind = ""
+                    if action == "mcp_tool_call":
+                        if result_text.strip() == "no mcp configured":
+                            mcp_failure_kind = "empty_selection"
+                        elif "未在绑定 MCP 中找到工具" in result_text:
+                            mcp_failure_kind = "tool_missing"
+                        elif _is_mcp_connect_failure(result_text):
+                            mcp_failure_kind = "unreachable"
                     if (
-                        action == "mcp_tool_call"
+                        mcp_failure_kind
+                        and ctx.mcp_ids
                         and state.mcp_route_attempts < 2
-                        and (
-                            "未在绑定 MCP 中找到工具" in result_text
-                            or _is_mcp_connect_failure(result_text)
-                        )
                     ):
                         state.mcp_route_attempts += 1
                         decision = await route_mcp_candidates(
@@ -1863,17 +2651,39 @@ class AgentRuntime:
                             cm.add_coach_hint(
                                 f"【MCP 自动补选】已因工具不可用补充加载: {', '.join(newly_selected)}。"
                             )
+                            # Empty selection and missing-tool failures occur before
+                            # an MCP tool is invoked, so one immediate retry is safe.
+                            # Connection failures remain model-visible because their
+                            # remote side-effect status can be ambiguous.
+                            if mcp_failure_kind in {"empty_selection", "tool_missing"}:
+                                try:
+                                    retry_result = await execute_action(
+                                        action, normalized,
+                                        ctx.db, ctx.agent, sandbox,
+                                        ctx.skill_ids, state.selected_mcp_ids,
+                                        ctx.rag_ids,
+                                        httpmcp_ids=ctx.httpmcp_ids,
+                                        mcp_sessions=mcp_sessions,
+                                    )
+                                    result_text = retry_result or ""
+                                except Exception as exc:
+                                    result_text = f"工具执行异常: {exc}"
+                                    err = f"{type(exc).__name__}: {exc}"[:400]
                         _record_mcp_route_event(
                             state, user_message=state.goal or ctx.user_message,
                             candidates=candidates, decision=decision,
-                            trigger=(
-                                "selected_mcp_tool_missing"
-                                if "未在绑定 MCP 中找到工具" in result_text
-                                else "selected_mcp_unreachable"
-                            ),
+                            trigger={
+                                "empty_selection": "empty_mcp_selection",
+                                "tool_missing": "selected_mcp_tool_missing",
+                                "unreachable": "selected_mcp_unreachable",
+                            }[mcp_failure_kind],
                             supplement_index=state.mcp_route_attempts,
                             mcp_load_results=getattr(tools_block, "mcp_load_results", []) if newly_selected else [],
                         )
+                        if mcp_failure_kind == "empty_selection" and not newly_selected:
+                            result_text = (
+                                "本轮 MCP 路由未选中可用能力；已尝试补选但仍无匹配 MCP。"
+                            )
                     cached_mcp_reference = action == "mcp_tool_call" and _is_cached_reference(result_text)
                     if cached_mcp_reference:
                         cache_hit = True
@@ -2628,6 +3438,7 @@ def _tool_dead_end(text: str) -> bool:
         return False
     return any(k in t for k in (
         "文件不存在", "无相关结果", "no mcp configured",
+        "本轮 MCP 路由未选中可用能力",
         "skill not found", "skill not matched", "非法路径", "非法写入路径",
     ))
 
@@ -2637,7 +3448,7 @@ def _tool_result_failed(text: str) -> bool:
     t = (text or "").strip()
     return t.startswith((
         "MCP 错误", "MCP 调用失败", "MCP URL 未配置", "MCP 无响应",
-        "工具执行异常", "[exit ",
+        "工具执行异常", "[exit ", "[sandbox_unavailable]", "[sandbox_busy]",
     )) or _tool_dead_end(t)
 
 

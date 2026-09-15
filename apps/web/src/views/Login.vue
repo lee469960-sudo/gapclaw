@@ -4,7 +4,7 @@
       <ThemeSwitch />
     </div>
     <div class="login-card">
-      <img v-if="siteLogo" :src="siteLogo" class="login-logo" alt="" />
+      <img :src="siteLogo" class="login-logo" alt="" />
       <h1>{{ siteTitle }}</h1>
       <p class="sub">{{ siteSub }}</p>
       <el-form @submit.prevent="onLogin">
@@ -40,6 +40,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { postCgi } from '../api'
 import { clearShell, setLoginExpiry } from '../session'
+import { applySiteBrand, loadPublicBrand, logoUrl } from '../branding'
 import ThemeSwitch from '../components/ThemeSwitch.vue'
 
 const router = useRouter()
@@ -48,24 +49,19 @@ const captchaCode = ref('')
 const form = reactive({ username: 'admin', password: 'admin123', captcha: '' })
 const siteTitle = ref('GAP')
 const siteSub = ref('智能工作台')
-const siteLogo = ref('')
+const siteLogo = ref(logoUrl(''))
 const footer = ref('')
 
 onMounted(async () => {
   await loadCaptcha()
-  try {
-    const res = await fetch('/site-brand.cgi', { credentials: 'include' })
-    const data = await res.json()
-    if (data.code === 0 && data.data) {
-      const name = data.data.site_name || 'GAP — 智能工作台'
-      siteLogo.value = data.data.site_logo || ''
-      footer.value = data.data.footer || ''
-      const parts = name.split(/[—\-–]/)
-      siteTitle.value = parts[0]?.trim() || name
-      siteSub.value = parts.slice(1).join(' ').trim() || '智能工作台'
-    }
-  } catch {
-    /* use defaults */
+  const data = await loadPublicBrand()
+  if (data) {
+    const name = data.site_name || 'GAP — 智能工作台'
+    siteLogo.value = logoUrl(data.site_logo)
+    footer.value = data.footer || ''
+    const parts = name.split(/[—\-–]/)
+    siteTitle.value = parts[0]?.trim() || name
+    siteSub.value = parts.slice(1).join(' ').trim() || '智能工作台'
   }
 })
 

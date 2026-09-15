@@ -30,8 +30,28 @@ def test_tools_desc_prompts_batch_and_forbids_single():
     ))
     assert "无依赖" in desc
     assert "可同轮" in desc
+    assert "BATCH:" in desc
+    assert '"mode":"parallel"' in desc
+    assert 'mode:"sequence"' in desc
+    assert 'mode:"transaction"' in desc
+    assert "不要跨安全域/MCP/权限边界混批" in desc
+    assert "多个相关 SHELL 不要拆成多个 parallel child" in desc
+    assert "禁止把 `WRITE:` 全文件覆盖放进 transaction" in desc
     assert "一次只输出一个工具" not in desc
     assert "调用一个工具" not in desc
+
+
+def test_minimal_tools_desc_includes_batch_contract():
+    desc = SystemPromptBuilder.build_minimal_tools_desc(
+        allowed_actions=["file_read", "file_search_replace"],
+    )
+    assert "BATCH:" in desc
+    assert '"mode":"parallel"' in desc
+    assert 'mode:"sequence"' in desc
+    assert 'mode:"transaction"' in desc
+    assert "只允许 `PATCH:` child" in desc
+    assert "不要跨安全域/MCP/权限边界混批" in desc
+    assert "多个相关 SHELL 优先合成一条完整脚本/命令" in desc
 
 
 def test_coach_hint_prompts_batch_not_single():

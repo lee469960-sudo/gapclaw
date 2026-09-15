@@ -149,6 +149,14 @@ def _steps_tail_for_message(raw: str | None, limit: int | None = None) -> dict:
                 "failure": str(detail.get("failure") or "")[:80],
                 "duration_ms": max(0, int(detail.get("duration_ms") or 0)),
             }
+        if isinstance(s.get("batch"), dict):
+            try:
+                from app.services.agent_runtime.runtime import AgentRuntime
+                batch = AgentRuntime._slim_batch_detail(s.get("batch"))
+            except Exception:
+                batch = None
+            if batch:
+                item["batch"] = batch
         content = s.get("content")
         if isinstance(content, str) and content.strip():
             # The execution accordion is the user's audit trail.  Returning

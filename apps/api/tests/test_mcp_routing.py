@@ -216,6 +216,26 @@ def test_route_does_not_run_for_unavailable_or_unauthorized_candidates():
     assert decision.failure == "no_candidates"
 
 
+def test_native_mcp_tools_are_hidden_when_agent_has_no_mcp_bindings():
+    names = {
+        item["function"]["name"]
+        for item in SystemPromptBuilder.build_tool_schemas(
+            ["mcp_tool_call"], mcp_configured=False,
+        )
+    }
+
+    assert "mcp_tool_call" not in names
+    assert "mcp_route_request" not in names
+
+    configured_names = {
+        item["function"]["name"]
+        for item in SystemPromptBuilder.build_tool_schemas(
+            ["mcp_tool_call"], mcp_configured=True,
+        )
+    }
+    assert {"mcp_tool_call", "mcp_route_request"} <= configured_names
+
+
 def test_selected_subset_is_the_only_catalog_discovery_input():
     selected = SimpleNamespace(id="clickhouse", name="ClickHouse docs")
     db = _db(selected)
@@ -386,3 +406,88 @@ def test_runtime_auto_supplements_after_selected_mcp_lacks_requested_tool():
 
     assert route.await_count == 2
     assert builds == [["clickhouse"], ["clickhouse", "ads"]]
+
+
+def test_runtime_auto_selects_and_retries_once_after_empty_mcp_selection():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database import Base
+    from app.services.agent_runtime.mcp_routing import McpRouteDecision
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(id="a4", llm_timeout=30, sandbox_id=None, name="t", max_iterations=3, prompt="", memory=""),
+        session_id="s4", chat_key="a4:s4", user_message="export orders", db=db,
+        llm=SimpleNamespace(id="llm1", provider="anthropic"), sandbox=None,
+        mcp_ids=["m1", "m2"], skill_ids=[], skill_names=[], mcp_names=[], skill_mds=[],
+        httpmcp_ids=[], rag_ids=[], allowed_actions=["mcp_tool_call"], save_dir="", im_source="",
+        note_content="", message_meta={},
+    )
+    builds = []
+
+    async def build_tools(**kwargs):
+        builds.append(list(kwargs["mcp_ids"]))
+        return "catalog"
+
+    replies = iter(["MCP: export_orders {}", "FINAL: done"])
+    route = AsyncMock(side_effect=[McpRouteDecision([]), McpRouteDecision(["ads"])])
+    execute = AsyncMock(side_effect=["no mcp configured", "exported"])
+    with patch("app.services.agent_runtime.mcp_routing.build_mcp_route_candidates", return_value=_candidates()), patch(
+        "app.services.agent_runtime.mcp_routing.route_mcp_candidates", new=route,
+    ), patch("app.services.llm_client.chat_completion", new=AsyncMock(side_effect=lambda *_a, **_k: ChatResult(text=next(replies)))), patch(
+        "app.services.agent_runtime.system_prompt.SystemPromptBuilder.build_tools_desc", new=build_tools,
+    ), patch("app.services.agent_tools.execute_action", new=execute), patch.object(
+        AgentRuntime, "_reflect_final", new=AsyncMock(return_value=None),
+    ):
+        assert asyncio.run(AgentRuntime().run(ctx)) == "done"
+
+    assert route.await_count == 2
+    assert execute.await_count == 2
+    assert builds == [[], ["ads"]]
+
+
+def test_batch_mcp_child_auto_selects_and_retries_after_empty_selection():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database import Base
+    from app.services.agent_runtime.mcp_routing import McpRouteDecision
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(id="a5", llm_timeout=30, sandbox_id=None, name="t", max_iterations=3, prompt="", memory=""),
+        session_id="s5", chat_key="a5:s5", user_message="export orders", db=db,
+        llm=SimpleNamespace(id="llm1", provider="anthropic"), sandbox=None,
+        mcp_ids=["m1", "m2"], skill_ids=[], skill_names=[], mcp_names=[], skill_mds=[],
+        httpmcp_ids=[], rag_ids=[], allowed_actions=["mcp_tool_call"], save_dir="", im_source="",
+        note_content="", message_meta={},
+    )
+    builds = []
+
+    async def build_tools(**kwargs):
+        builds.append(list(kwargs["mcp_ids"]))
+        return "catalog"
+
+    replies = iter([
+        'BATCH: {"mode":"parallel","children":['
+        '{"id":"m1","reply":"MCP: export_orders {}"}]}',
+        "FINAL: done",
+    ])
+    route = AsyncMock(side_effect=[McpRouteDecision([]), McpRouteDecision(["ads"])])
+    execute = AsyncMock(side_effect=["no mcp configured", "exported"])
+    with patch("app.services.agent_runtime.mcp_routing.build_mcp_route_candidates", return_value=_candidates()), patch(
+        "app.services.agent_runtime.mcp_routing.route_mcp_candidates", new=route,
+    ), patch("app.services.llm_client.chat_completion", new=AsyncMock(side_effect=lambda *_a, **_k: ChatResult(text=next(replies)))), patch(
+        "app.services.agent_runtime.system_prompt.SystemPromptBuilder.build_tools_desc", new=build_tools,
+    ), patch("app.services.agent_tools.execute_action", new=execute), patch.object(
+        AgentRuntime, "_reflect_final", new=AsyncMock(return_value=None),
+    ):
+        assert asyncio.run(AgentRuntime().run(ctx)) == "done"
+
+    assert route.await_count == 2
+    assert execute.await_count == 2
+    assert execute.await_args_list[-1].args[6] == ["ads"]
+    assert builds == [[], ["ads"]]

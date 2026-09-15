@@ -3,6 +3,8 @@ import logging
 import os
 import re
 import tempfile
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 _client = None
 _client_failed = False
+_exec_locks: dict[str, threading.Lock] = {}
+_exec_locks_guard = threading.Lock()
 
 
 def get_docker_client():
@@ -468,6 +472,7 @@ def destroy_sandbox(container_id: str, container_name: str) -> None:
 
 
 _SHELL_STDOUT_MAX_BYTES = 128 * 1024  # 128KB hard cap for chat/tool UX
+_EXEC_RECOVERY_WAIT_SECONDS = 3.0
 
 
 def _truncate_exec_output(output) -> str:
@@ -499,29 +504,100 @@ def _truncate_exec_output(output) -> str:
     return text
 
 
+def _exec_lock(container_id: str) -> threading.Lock:
+    """Return the process-wide serialization lock for one sandbox container."""
+    with _exec_locks_guard:
+        return _exec_locks.setdefault(container_id, threading.Lock())
+
+
+def _docker_status_code(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _container_status(container) -> str:
+    container.reload()
+    return str(getattr(container, "status", "") or "unknown").lower()
+
+
+def _prepare_container_for_exec(container, *, wait_seconds: float) -> tuple[bool, str, str]:
+    """Refresh and recover a sandbox state before a Docker exec.
+
+    Sandbox tool execution implies that this persistent container should be
+    runnable. Recover states Docker can safely reverse and bound any wait for a
+    container that is already restarting.
+    """
+    try:
+        status = _container_status(container)
+        if status in {"created", "exited"}:
+            container.start()
+        elif status == "paused":
+            container.unpause()
+
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while status in {"created", "exited", "paused", "restarting"}:
+            status = _container_status(container)
+            if status == "running":
+                return True, status, ""
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        return status == "running", status, ""
+    except Exception as exc:
+        return False, "unknown", _format_docker_error(exc)
+
+
 def exec_in_sandbox(container_id: str, command: str, timeout: int = 60) -> str:
     client = get_docker_client()
     if not client or not container_id:
         return f"[simulated] $ {command}\n(no docker)"
+    timeout = int(timeout) if timeout else 60
+    if timeout < 1:
+        timeout = 60
+    lock = _exec_lock(container_id)
+    if not lock.acquire(timeout=timeout):
+        return f"[sandbox_busy] 同一容器已有命令执行超过 {timeout}s，本次命令未执行。"
     try:
-        timeout = int(timeout) if timeout else 60
-        if timeout < 1:
-            timeout = 60
         c = client.containers.get(container_id)
+        ready, status, prepare_error = _prepare_container_for_exec(
+            c, wait_seconds=min(_EXEC_RECOVERY_WAIT_SECONDS, float(timeout)),
+        )
+        if not ready:
+            detail = f"：{prepare_error}" if prepare_error else ""
+            return f"[sandbox_unavailable] 容器状态为 {status}，无法执行命令{detail}"
 
         def _run():
             return c.exec_run(["/bin/sh", "-c", command], demux=False)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            fut = pool.submit(_run)
+        for attempt in range(2):
             try:
-                exit_code, output = fut.result(timeout=timeout)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(_run)
+                    exit_code, output = fut.result(timeout=timeout)
+                del exit_code  # retained for future status surfacing
+                return _truncate_exec_output(output)
             except concurrent.futures.TimeoutError:
                 return f"exec timeout after {timeout}s"
-        del exit_code  # retained for future status surfacing
-        return _truncate_exec_output(output)
+            except Exception as exc:
+                if _docker_status_code(exc) != 409:
+                    return f"exec error: {exc}"
+                ready, status, prepare_error = _prepare_container_for_exec(
+                    c, wait_seconds=min(_EXEC_RECOVERY_WAIT_SECONDS, float(timeout)),
+                )
+                if ready and attempt == 0:
+                    continue
+                detail = f"：{prepare_error}" if prepare_error else ""
+                return f"[sandbox_unavailable] Docker 拒绝执行，容器状态为 {status}{detail}"
+        return "[sandbox_unavailable] Docker 拒绝执行。"
     except Exception as e:
         return f"exec error: {e}"
+    finally:
+        lock.release()
 
 
 def attach_shell(container_id: str, shell: str = "/bin/bash", workdir: str = "/workplace"):

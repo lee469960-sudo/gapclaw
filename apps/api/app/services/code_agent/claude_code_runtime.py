@@ -487,6 +487,7 @@ def materialize_claude_code_mcp_config(db, run, workspace_path: str) -> ClaudeCo
     from pathlib import Path
 
     from app.models import MCP
+    from app.services.mcp_client import normalize_stdio_command_args
 
     root = Path(workspace_path).resolve()
     config_dir = root / ".claude"
@@ -502,6 +503,7 @@ def materialize_claude_code_mcp_config(db, run, workspace_path: str) -> ClaudeCo
             continue
         name = _skill_slug(mcp.name, mcp.id)
         args = _json_list(getattr(mcp, "command_args", "") or "[]")
+        args = normalize_stdio_command_args(getattr(mcp, "command", ""), args)
         server_config: dict[str, Any] = {}
         if getattr(mcp, "command", ""):
             server_config["command"] = mcp.command

@@ -16,6 +16,7 @@ from app.services.agent_runtime.utils import (
     _format_mcp_tools_for_prompt,
     _get_mcp_tools_cached,
     _mcp_tools_cache,
+    normalize_mcp_tool_args,
 )
 
 
@@ -91,8 +92,74 @@ def test_format_mcp_tools_for_prompt_is_neutral():
 
 
 def test_format_mcp_tools_for_prompt_lists_live_tool_names_only():
-    tools = [{"name": "get_note", "description": "fetch a note"}]
+    tools = [{
+        "name": "get_note",
+        "description": "fetch a note",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+    }]
     lines = _format_mcp_tools_for_prompt("notes", tools)
     joined = "\n".join(lines)
     assert "get_note" in joined
+    assert "id:string" in joined
+    assert "required=[id]" in joined
     assert "硬规则" not in joined  # no describe/query → no SOP hard-rule
+
+
+def test_normalize_mcp_tool_args_uses_schema_without_tool_name_hardcoding():
+    tool = {
+        "name": "arbitrary_provider_tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "cursor": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                "count": {"type": "integer"},
+                "enabled": {"type": "string"},
+                "nested": {
+                    "type": "object",
+                    "properties": {"parent_id": {"type": ["string", "null"]}},
+                },
+                "ids": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    }
+    huge = 1917542058656307880
+    original = {
+        "id": huge,
+        "cursor": huge,
+        "count": 20,
+        "enabled": True,
+        "nested": {"parent_id": huge},
+        "ids": [huge, "2"],
+        "unknown": huge,
+    }
+
+    normalized = normalize_mcp_tool_args(tool, original)
+
+    assert normalized == {
+        "id": str(huge),
+        "cursor": str(huge),
+        "count": 20,
+        "enabled": True,
+        "nested": {"parent_id": str(huge)},
+        "ids": [str(huge), "2"],
+        "unknown": huge,
+    }
+    assert original["id"] == huge
+
+
+def test_normalize_mcp_tool_args_preserves_safe_integer_when_schema_accepts_it():
+    tool = {
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cursor": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+            },
+        },
+    }
+
+    assert normalize_mcp_tool_args(tool, {"cursor": 123}) == {"cursor": 123}

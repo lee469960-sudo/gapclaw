@@ -247,6 +247,12 @@ class SystemPromptBuilder:
             "【重要】每次从行首输出工具调用，禁止使用 XML/tool_call 格式。"
             "无依赖的独立步骤可同轮输出多个工具调用（如多个 READ/SEARCH、多个独立 SHELL、"
             "一次 describe 多个 view）；一旦下一步依赖上一步结果，就停下来等观察后再继续（有依赖仍分轮）。",
+            "【批量工具】适合一次性读取多个文件/范围、多个互不依赖查询或多个同域诊断时，优先输出一行 "
+            '`BATCH: {"mode":"parallel","children":[{"id":"r1","reply":"READ: a.py"},{"id":"r2","reply":"READ: b.py"}]}`；'
+            "有顺序依赖但不需要中间 LLM 推理时用 `mode:\"sequence\"`；多文件 patch 必须用 "
+            '`mode:"transaction"` 且 child 只能是 `PATCH:`，禁止把 `WRITE:` 全文件覆盖放进 transaction。'
+            "不要跨安全域/MCP/权限边界混批；需要观察上一步结果再决定下一步时不要 batch。"
+            "多个相关 SHELL 不要拆成多个 parallel child；优先合成一条完整脚本/命令，确需多条时用 sequence。",
             (
                 "【格式】SHELL:/WRITE:/FINAL: 必须单独占一行，不要在说明文字同一行内夹杂工具指令。"
                 if has_shell
@@ -369,12 +375,15 @@ class SystemPromptBuilder:
         return McpToolsCatalog("\n".join(lines), mcp_load_results)
 
     @staticmethod
-    def build_tool_schemas(allowed_actions: list[str]) -> list[dict]:
+    def build_tool_schemas(
+        allowed_actions: list[str], *, mcp_configured: bool = True,
+    ) -> list[dict]:
         """Build OpenAI-compatible function schemas for the fixed meta-tool set.
 
-        Only declares tools the agent is allowed to call; `done` is always
-        declared as the completion signal. Tool names here must match the
-        tool_calls normalization in ``llm_client.extract_chat_response_text``.
+        Only declares tools the agent is allowed and configured to call;
+        `done` is always declared as the completion signal. Tool names here
+        must match the tool_calls normalization in
+        ``llm_client.extract_chat_response_text``.
         """
         allowed = set(allowed_actions or [])
 
@@ -460,7 +469,7 @@ class SystemPromptBuilder:
                 "code_git", "Run a read-only Git status, diff or log query.",
                 {"operation": {"type": "string", "enum": ["status", "diff", "log"]}}, ["operation"],
             ))
-        if "mcp_tool_call" in allowed:
+        if "mcp_tool_call" in allowed and mcp_configured:
             tools.append(fn(
                 "mcp_tool_call", "Call a bound MCP tool by name.",
                 {
@@ -531,6 +540,10 @@ class SystemPromptBuilder:
         lines = [
             "【可用工具·精简模式】",
             "【格式】每次从行首输出工具调用；可批量输出互不依赖的调用，依赖上一步结果时停下来等观察。",
+            "【批量工具】互不依赖的同域读/查/诊断优先用一行 "
+            '`BATCH: {"mode":"parallel","children":[{"id":"r1","reply":"READ: a.py"},{"id":"r2","reply":"READ: b.py"}]}`；'
+            "有顺序依赖但无需中间推理用 `mode:\"sequence\"`；多文件 patch 用 `mode:\"transaction\"` 且只允许 `PATCH:` child。"
+            "不要跨安全域/MCP/权限边界混批。多个相关 SHELL 优先合成一条完整脚本/命令，确需多条时用 sequence。",
         ]
         if save_dir:
             lines.append(

@@ -5,7 +5,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from sqlalchemy import text
@@ -115,6 +115,16 @@ def create_app() -> FastAPI:
     static_dir.mkdir(parents=True, exist_ok=True)
     site_upload_dir = Path(settings.data_dir).resolve() / "uploads" / "site"
     site_upload_dir.mkdir(parents=True, exist_ok=True)
+    from app.services.site_config import ensure_default_site_logo, resolved_site_logo_file
+    ensure_default_site_logo()
+
+    @app.get("/favicon.ico")
+    def favicon():
+        logo = resolved_site_logo_file()
+        if logo is None:
+            return Response(status_code=404)
+        return FileResponse(logo, media_type="image/png")
+
     app.mount("/statics/site", StaticFiles(directory=str(site_upload_dir)), name="statics_site")
     app.mount("/statics", StaticFiles(directory=str(static_dir)), name="statics")
 

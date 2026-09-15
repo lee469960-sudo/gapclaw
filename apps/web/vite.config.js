@@ -13,6 +13,7 @@ export default defineConfig({
       '/captcha.cgi': { target: apiTarget, changeOrigin: true },
       '/render.cgi': { target: apiTarget, changeOrigin: true },
       '/health': { target: apiTarget, changeOrigin: true },
+      '/favicon.ico': { target: apiTarget, changeOrigin: true },
       '/statics': { target: apiTarget, changeOrigin: true },
       '/site-brand.cgi': { target: apiTarget, changeOrigin: true },
       '/api': { target: apiTarget, changeOrigin: true },

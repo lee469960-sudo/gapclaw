@@ -80,6 +80,7 @@ def test_tool_result_failed_prefixes():
     assert _tool_result_failed("MCP 调用失败") is True
     assert _tool_result_failed("工具执行异常: boom") is True
     assert _tool_result_failed("[exit 1] cat: no such file") is True
+    assert _tool_result_failed("本轮 MCP 路由未选中可用能力；已尝试补选但仍无匹配 MCP。") is True
 
 
 def test_tool_result_failed_ok_and_empty():

@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 from sqlalchemy.orm import Session
 
@@ -6,6 +7,11 @@ from app.models import SiteConfig
 from app.version import app_version, format_footer
 
 DEFAULT_SITE_NAME = "GAP — 智能工作台"
+DEFAULT_SITE_LOGO_URL = "/statics/site/logo.png"
+
+
+def bundled_site_logo_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "static" / "site" / "logo.png"
 
 
 def _site_logo_path() -> Path:
@@ -19,15 +25,40 @@ def site_logo_path() -> Path:
     return path
 
 
+def ensure_default_site_logo() -> Path:
+    dest = site_logo_path()
+    if dest.is_file():
+        return dest
+    bundled = bundled_site_logo_path()
+    if bundled.is_file():
+        shutil.copyfile(bundled, dest)
+    return dest
+
+
+def resolved_site_logo_file() -> Path | None:
+    ensure_default_site_logo()
+    dest = _site_logo_path()
+    if dest.is_file():
+        return dest
+    bundled = bundled_site_logo_path()
+    if bundled.is_file():
+        return bundled
+    return None
+
+
+def _logo_url_for(path: Path) -> str:
+    return f"{DEFAULT_SITE_LOGO_URL}?v={int(path.stat().st_mtime)}"
+
+
 def _resolve_site_logo(raw: str) -> str:
+    logo = resolved_site_logo_file()
     if not raw:
-        return ""
+        return _logo_url_for(logo) if logo else ""
     base = raw.split("?", 1)[0]
-    if base not in ("/statics/site/logo.png", "/statics/uploads/site/logo.png"):
+    if base not in (DEFAULT_SITE_LOGO_URL, "/statics/uploads/site/logo.png"):
         return raw
-    logo = _site_logo_path()
-    if logo.is_file():
-        return f"/statics/site/logo.png?v={int(logo.stat().st_mtime)}"
+    if logo:
+        return _logo_url_for(logo)
     return ""
 
 

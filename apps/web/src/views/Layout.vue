@@ -3,7 +3,7 @@
     <el-header class="header">
       <div class="left">
         <el-icon class="toggle" @click="collapsed = !collapsed"><Fold v-if="!collapsed" /><Expand v-else /></el-icon>
-        <img v-if="siteLogo" :src="siteLogo" class="brand-logo" alt="" />
+        <img :src="siteLogo" class="brand-logo" alt="" />
         <span class="brand">{{ siteName }}</span>
       </div>
       <div class="right">
@@ -45,6 +45,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { fetchShell, clearShell } from '../session'
+import { applySiteBrand, logoUrl } from '../branding'
 import { theme } from '../theme'
 import ThemeSwitch from '../components/ThemeSwitch.vue'
 
@@ -52,7 +53,7 @@ const route = useRoute()
 const collapsed = ref(false)
 const username = ref('')
 const siteName = ref('GAP — 智能工作台')
-const siteLogo = ref('')
+const siteLogo = ref(logoUrl(''))
 const footerText = ref('')
 const serverTime = ref('')
 const menuGroups = ref([])
@@ -68,8 +69,9 @@ function tick() {
 function applySite(data) {
   if (!data) return
   if (data.site_name) siteName.value = data.site_name
-  siteLogo.value = data.site_logo || ''
+  siteLogo.value = logoUrl(data.site_logo)
   footerText.value = data.footer || ''
+  applySiteBrand({ site_name: siteName.value, site_logo: siteLogo.value })
 }
 
 function onSiteUpdated(e) {

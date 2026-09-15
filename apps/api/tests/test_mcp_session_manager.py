@@ -9,7 +9,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.services.mcp_client import McpSessionManager
+from app.services.mcp_client import McpSessionManager, normalize_stdio_command_args
 from app.services.agent_tools import execute_action
 
 
@@ -240,7 +240,7 @@ class _Sessions:
         self.called = []
 
     async def call_tool(self, mcp, tool, args):
-        self.called.append((mcp.id, tool))
+        self.called.append((mcp.id, tool, args))
         return f"ok:{mcp.id}:{tool}"
 
 
@@ -268,7 +268,40 @@ def test_execute_action_dispatches_mcp_by_tool_name():
             )
         )
     assert result == "ok:b:list_notes"
-    assert sessions.called == [("b", "list_notes")]
+    assert sessions.called == [("b", "list_notes", {"since_id": 0})]
+
+
+def test_execute_action_normalizes_large_integer_from_selected_tool_schema():
+    mcp = _MCP("notes")
+    db = _FakeDB([mcp])
+    huge = 1917542058656307880
+
+    async def _get(_mcp):
+        return ([{
+            "name": "get_note",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        }], "")
+
+    sessions = _Sessions()
+    with patch("app.services.agent_tools._get_mcp_tools_cached", new=_get):
+        result = asyncio.run(execute_action(
+            "mcp_tool_call",
+            f'MCP: get_note {{"id":{huge}}}',
+            db,
+            SimpleNamespace(allowed_actions="[]"),
+            None,
+            [],
+            ["notes"],
+            None,
+            mcp_sessions=sessions,
+        ))
+
+    assert result == "ok:notes:get_note"
+    assert sessions.called == [("notes", "get_note", {"id": str(huge)})]
 
 
 def test_execute_action_mcp_dispatch_no_hit_message():
@@ -322,3 +355,51 @@ def test_execute_action_mcp_falls_back_to_call_mcp_tool_without_sessions():
                 )
             )
     assert result == "legacy:list_ads_views"
+
+
+def test_execute_action_normalizes_schema_args_without_session_manager():
+    mcp = _MCP("notes")
+    db = _FakeDB([mcp])
+    huge = 1917542058656307880
+    calls = []
+
+    async def _get(_mcp):
+        return ([{
+            "name": "get_note",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+            },
+        }], "")
+
+    async def _call(_mcp, tool, args):
+        calls.append((tool, args))
+        return "ok"
+
+    with patch("app.services.agent_tools._get_mcp_tools_cached", new=_get), patch(
+        "app.services.agent_tools.call_mcp_tool", new=_call,
+    ):
+        result = asyncio.run(execute_action(
+            "mcp_tool_call",
+            f'MCP: get_note {{"id":{huge}}}',
+            db,
+            SimpleNamespace(allowed_actions="[]"),
+            None,
+            [],
+            ["notes"],
+            None,
+        ))
+
+    assert result == "ok"
+    assert calls == [("get_note", {"id": str(huge)})]
+
+
+def test_getnote_npx_package_is_pinned_without_rewriting_other_commands():
+    assert normalize_stdio_command_args("npx", ["-y", "@getnote/mcp"]) == [
+        "-y", "@getnote/mcp@1.7.2",
+    ]
+    assert normalize_stdio_command_args("npx", ["-y", "@getnote/mcp@1.6.0"]) == [
+        "-y", "@getnote/mcp@1.6.0",
+    ]
+    assert normalize_stdio_command_args("npx", ["-y", "other-mcp"]) == ["-y", "other-mcp"]
+    assert normalize_stdio_command_args("node", ["@getnote/mcp"]) == ["@getnote/mcp"]

@@ -57,6 +57,7 @@ def _tool_required_fields(tool: dict) -> list[str]:
 # Pagination-related inputSchema params surfaced in the tool catalog so the model
 # knows a tool supports paging (react-engine-v7 R1). Includes non-required fields.
 _PAGINATION_PARAM_KEYS = ("offset", "limit", "page", "page_size", "cursor")
+_JS_MAX_SAFE_INTEGER = (1 << 53) - 1
 
 
 def _tool_pagination_params(tool: dict) -> list[str]:
@@ -65,6 +66,70 @@ def _tool_pagination_params(tool: dict) -> list[str]:
     if not isinstance(props, dict):
         return []
     return [k for k in _PAGINATION_PARAM_KEYS if k in props]
+
+
+def _schema_types(schema: dict) -> set[str]:
+    raw = schema.get("type") if isinstance(schema, dict) else None
+    types = {raw} if isinstance(raw, str) else {
+        item for item in raw or [] if isinstance(item, str)
+    }
+    for key in ("anyOf", "oneOf"):
+        variants = schema.get(key) or [] if isinstance(schema, dict) else []
+        for variant in variants:
+            if isinstance(variant, dict):
+                types.update(_schema_types(variant))
+    return types
+
+
+def _schema_type_label(schema: dict) -> str:
+    types = sorted(_schema_types(schema))
+    return "|".join(types) if types else "any"
+
+
+def _tool_param_types(tool: dict, limit: int = 12) -> list[str]:
+    schema = _tool_input_schema(tool)
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return []
+    return [
+        f"{name}:{_schema_type_label(prop)}"
+        for name, prop in list(props.items())[:limit]
+        if isinstance(prop, dict)
+    ]
+
+
+def _normalize_mcp_schema_value(value, schema: dict):
+    if not isinstance(schema, dict):
+        return value
+    types = _schema_types(schema)
+    if isinstance(value, int) and not isinstance(value, bool):
+        numeric_allowed = bool({"integer", "number"} & types)
+        if "string" in types and (
+            not numeric_allowed or abs(value) > _JS_MAX_SAFE_INTEGER
+        ):
+            return str(value)
+    if isinstance(value, dict):
+        props = schema.get("properties")
+        if not isinstance(props, dict):
+            return dict(value)
+        return {
+            key: _normalize_mcp_schema_value(item, props.get(key, {}))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        item_schema = schema.get("items")
+        if not isinstance(item_schema, dict):
+            return list(value)
+        return [_normalize_mcp_schema_value(item, item_schema) for item in value]
+    return value
+
+
+def normalize_mcp_tool_args(tool: dict, args: dict) -> dict:
+    """Coerce only lossless integer-to-string conversions declared by JSON Schema."""
+    if not isinstance(args, dict):
+        return args
+    normalized = _normalize_mcp_schema_value(args, _tool_input_schema(tool))
+    return normalized if isinstance(normalized, dict) else args
 
 
 async def _get_mcp_tools_cached(mcp: MCP) -> tuple[list[dict], str]:
@@ -104,15 +169,17 @@ def _format_mcp_tools_for_prompt(mcp_name: str, tools: list[dict]) -> list[str]:
         desc = re.sub(r"\s+", " ", str(t.get("description") or "")).strip()[:80]
         req = _tool_required_fields(t)
         req_bit = f" required=[{', '.join(req)}]" if req else ""
+        params = _tool_param_types(t)
+        params_bit = f" 参数=[{', '.join(params)}]" if params else ""
         paging = _tool_pagination_params(t)
         paging_bit = f" 分页参数=[{', '.join(paging)}]" if paging else ""
         example = _MCP_TOOL_EXAMPLES.get(name)
         if example:
-            lines.append(f"  - {example}{('  # ' + desc) if desc else ''}{req_bit}{paging_bit}")
+            lines.append(f"  - {example}{('  # ' + desc) if desc else ''}{params_bit}{req_bit}{paging_bit}")
         elif desc:
-            lines.append(f"  - MCP: {name} {{...}}  # {desc}{req_bit}{paging_bit}")
+            lines.append(f"  - MCP: {name} {{...}}  # {desc}{params_bit}{req_bit}{paging_bit}")
         else:
-            lines.append(f"  - MCP: {name} {{...}}{req_bit}{paging_bit}")
+            lines.append(f"  - MCP: {name} {{...}}{params_bit}{req_bit}{paging_bit}")
     if len(tools) > _MCP_TOOLS_PROMPT_LIMIT:
         lines.append(f"  - …共 {len(tools)} 个工具，其余名称以服务端 tools/list 为准")
     return lines

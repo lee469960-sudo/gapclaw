@@ -23,6 +23,7 @@ _STREAMABLE_CALL_TIMEOUT = httpx.Timeout(180.0, connect=30.0)
 _STREAMABLE_LIST_TIMEOUT = httpx.Timeout(60.0, connect=20.0)
 _TRANSPORT_RETRY_MAX = 3  # includes first attempt
 _TRANSPORT_RETRY_BACKOFF_S = (0.5, 1.5)
+GETNOTE_MCP_PACKAGE = "@getnote/mcp@1.7.2"
 _QUERY_LIKE_TOOLS = frozenset({
     "query_ads_view",
     "query_ads_metric",
@@ -46,6 +47,14 @@ def _parse_json_obj(raw: str | None, default):
         return data if isinstance(data, type(default)) else default
     except Exception:
         return default
+
+
+def normalize_stdio_command_args(command: str, args: list) -> list[str]:
+    """Pin only the known unversioned GetNote npx package; preserve all others."""
+    values = [str(item) for item in (args or [])]
+    if os.path.basename((command or "").strip()).lower() not in {"npx", "npx.cmd"}:
+        return values
+    return [GETNOTE_MCP_PACKAGE if item == "@getnote/mcp" else item for item in values]
 
 
 def _parse_sse_json(text: str, expect_id: int | str | None = None) -> dict | None:
@@ -167,7 +176,7 @@ def _looks_like_html_404(text: str) -> bool:
 def _short_err_body(text: str, limit: int = 200) -> str:
     if _looks_like_html_404(text):
         if "路由未注册" in (text or ""):
-            return "HTTP 404 路由未注册（该 URL 不是 MCP Streamable 端点；得到大脑请用 stdio: npx @getnote/mcp）"
+            return f"HTTP 404 路由未注册（该 URL 不是 MCP Streamable 端点；得到大脑请用 stdio: npx {GETNOTE_MCP_PACKAGE}）"
         return "HTTP 404 HTML 错误页"
     return (text or "").replace("\n", " ")[:limit]
 
@@ -442,6 +451,7 @@ async def _stdio_list_tools(mcp) -> tuple[list[dict], str]:
     args = _parse_json_obj(getattr(mcp, "command_args", None), [])
     if isinstance(getattr(mcp, "command_args", None), list):
         args = mcp.command_args
+    args = normalize_stdio_command_args(command, args)
     env = _parse_json_obj(getattr(mcp, "command_env", None), {})
     if isinstance(getattr(mcp, "command_env", None), dict):
         env = mcp.command_env
@@ -455,7 +465,7 @@ async def _stdio_list_tools(mcp) -> tuple[list[dict], str]:
     if headers.get("X-Client-ID") and "GETNOTE_CLIENT_ID" not in env:
         env["GETNOTE_CLIENT_ID"] = headers["X-Client-ID"]
 
-    session = _StdioSession(command, [str(a) for a in args], env)
+    session = _StdioSession(command, args, env)
     try:
         await session.start()
         init = await session.request(
@@ -486,6 +496,7 @@ async def _stdio_call_tool(mcp, tool: str, args: dict) -> str:
     arg_list = _parse_json_obj(getattr(mcp, "command_args", None), [])
     if isinstance(getattr(mcp, "command_args", None), list):
         arg_list = mcp.command_args
+    arg_list = normalize_stdio_command_args(command, arg_list)
     env = _parse_json_obj(getattr(mcp, "command_env", None), {})
     if isinstance(getattr(mcp, "command_env", None), dict):
         env = mcp.command_env
@@ -495,7 +506,7 @@ async def _stdio_call_tool(mcp, tool: str, args: dict) -> str:
     if headers.get("X-Client-ID") and "GETNOTE_CLIENT_ID" not in env:
         env["GETNOTE_CLIENT_ID"] = headers["X-Client-ID"]
 
-    session = _StdioSession(command, [str(a) for a in arg_list], env)
+    session = _StdioSession(command, arg_list, env)
     try:
         await session.start()
         init = await session.request(
@@ -676,7 +687,7 @@ async def connect_mcp_detail(mcp) -> dict[str, Any]:
                     "tools": [],
                     "error": _streamable_empty_hint(
                         mcp.url,
-                        "tools/list 无结果。若是得到大脑，请改用协议 stdio + 命令 npx -y @getnote/mcp",
+                        f"tools/list 无结果。若是得到大脑，请改用协议 stdio + 命令 npx -y {GETNOTE_MCP_PACKAGE}",
                     ),
                 }
         except Exception as e:
@@ -777,6 +788,7 @@ def _stdio_config(mcp) -> tuple[str, list[str], dict]:
     arg_list = _parse_json_obj(getattr(mcp, "command_args", None), [])
     if isinstance(getattr(mcp, "command_args", None), list):
         arg_list = mcp.command_args
+    arg_list = normalize_stdio_command_args(command, arg_list)
     env = _parse_json_obj(getattr(mcp, "command_env", None), {})
     if isinstance(getattr(mcp, "command_env", None), dict):
         env = mcp.command_env
@@ -787,7 +799,7 @@ def _stdio_config(mcp) -> tuple[str, list[str], dict]:
         env["GETNOTE_API_KEY"] = headers["Authorization"]
     if headers.get("X-Client-ID") and "GETNOTE_CLIENT_ID" not in env:
         env["GETNOTE_CLIENT_ID"] = headers["X-Client-ID"]
-    return command, [str(a) for a in arg_list], env
+    return command, arg_list, env
 
 
 def _json_keys_summary(text: str, *, max_keys: int = 24, max_chars: int = 320) -> str:

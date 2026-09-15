@@ -92,7 +92,7 @@
             <el-option value="http" label="HTTP 简易协议" />
           </el-select>
           <div class="field-hint">
-            得到大脑没有远程 SSE 地址；官方是 <code>npx -y @getnote/mcp</code>。
+            得到大脑没有远程 SSE 地址；使用固定版本 <code>npx -y @getnote/mcp@1.7.2</code>。
             <code>https://openapi.biji.com/open</code> 是 OpenAPI REST，不是 MCP。
           </div>
         </el-form-item>
@@ -101,7 +101,7 @@
             <el-input v-model="form.command" placeholder="npx" />
           </el-form-item>
           <el-form-item label="参数">
-            <el-input v-model="form.commandArgsStr" placeholder='JSON 数组，如 ["-y","@getnote/mcp"]' />
+            <el-input v-model="form.commandArgsStr" placeholder='JSON 数组，如 ["-y","@getnote/mcp@1.7.2"]' />
             <div class="field-hint">
               <el-button link type="primary" @click="fillGetnoteStdio">一键填入得到大脑模板</el-button>
             </div>
@@ -223,7 +223,7 @@ const form = reactive({
   headers: '{}',
   protocol: 'stdio',
   command: 'npx',
-  commandArgsStr: '["-y","@getnote/mcp"]',
+  commandArgsStr: '["-y","@getnote/mcp@1.7.2"]',
   commandEnvStr: '{}',
   description: '',
   visibility: 'private',
@@ -286,7 +286,7 @@ function resetForm() {
     headers: '{}',
     protocol: 'stdio',
     command: 'npx',
-    commandArgsStr: '["-y","@getnote/mcp"]',
+    commandArgsStr: '["-y","@getnote/mcp@1.7.2"]',
     commandEnvStr: '{}',
     description: '',
     visibility: 'private',
@@ -297,7 +297,7 @@ function resetForm() {
 function fillGetnoteStdio() {
   form.protocol = 'stdio'
   form.command = 'npx'
-  form.commandArgsStr = '["-y","@getnote/mcp"]'
+  form.commandArgsStr = '["-y","@getnote/mcp@1.7.2"]'
   let key = ''
   let client = ''
   try {
@@ -329,7 +329,7 @@ function openForm(row) {
       headers: row.headers || '{}',
       protocol: row.protocol || 'sse',
       command: row.command || 'npx',
-      commandArgsStr: JSON.stringify(row.command_args?.length ? row.command_args : ['-y', '@getnote/mcp']),
+      commandArgsStr: JSON.stringify(row.command_args?.length ? row.command_args : ['-y', '@getnote/mcp@1.7.2']),
       commandEnvStr: JSON.stringify(row.command_env || {}, null, 2),
       description: row.description || '',
       visibility: row.visibility || 'private',

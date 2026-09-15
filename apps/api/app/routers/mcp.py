@@ -8,7 +8,11 @@ from app.deps import can_access_resource, get_session_user
 from app.models import User, MCP
 from app.schemas import ok, fail
 from app.security import new_id, now_str
-from app.services.mcp_client import call_mcp_tool, connect_mcp_detail
+from app.services.mcp_client import (
+    call_mcp_tool,
+    connect_mcp_detail,
+    normalize_stdio_command_args,
+)
 
 router = APIRouter(prefix="/pages/page_mcp.cgi", tags=["mcp"])
 
@@ -90,7 +94,8 @@ async def mcp_post(body: MCPBody, user: User = Depends(get_session_user), db: Se
         m.protocol = body.protocol
         m.command = body.command or ""
         if body.command_args is not None:
-            m.command_args = json.dumps(body.command_args, ensure_ascii=False)
+            command_args = normalize_stdio_command_args(m.command, body.command_args)
+            m.command_args = json.dumps(command_args, ensure_ascii=False)
         if body.command_env is not None:
             m.command_env = json.dumps(body.command_env, ensure_ascii=False)
         m.description = body.description

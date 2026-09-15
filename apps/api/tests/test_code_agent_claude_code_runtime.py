@@ -813,6 +813,40 @@ def test_materializes_only_authorized_mcp_config_and_visible_audit(tmp_path):
     assert facts["servers"][0]["config_path"] == ".claude/mcp.json"
 
 
+def test_materialized_getnote_mcp_config_pins_unversioned_npx_package(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base
+    from app.models import CodeAgentRun, MCP
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    db.add(MCP(
+        id="mcp-a",
+        name="notes",
+        command="npx",
+        command_args='["-y","@getnote/mcp"]',
+    ))
+    run = CodeAgentRun(
+        id="run1",
+        agent_id="agent1",
+        project_id="project1",
+        manifest_id="manifest1",
+        manifest_version=1,
+        task_contract=json.dumps({"authorized_mcp_servers": ["mcp-a"]}),
+        runner_facts="{}",
+    )
+    db.add(run)
+    db.commit()
+
+    result = materialize_claude_code_mcp_config(db, run, str(tmp_path))
+    config = json.loads(result.config_json)
+
+    assert config["mcpServers"]["notes"]["args"] == ["-y", "@getnote/mcp@1.7.2"]
+
+
 def test_mcp_config_uses_env_references_and_never_plaintext_secrets(tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker

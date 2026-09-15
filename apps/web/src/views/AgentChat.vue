@@ -72,7 +72,7 @@
           <div
             v-for="item in displayMessages"
             :key="item.key"
-            v-memo="[item.key, item.m.content, item.stepCount, isExecOpen(item.execKey), item.stepsLoading, item.steps.length, item.steps[0]?.title, item.steps[item.steps.length - 1]?.title, toolDetailRevision]"
+            v-memo="[item.key, item.m.content, item.stepCount, isExecOpen(item.execKey), item.stepsLoading, item.steps.length, item.steps[0]?.title, item.steps[item.steps.length - 1]?.title, item.steps[item.steps.length - 1]?.batch?.children?.length, toolDetailRevision]"
             :class="['msg-row', item.m.role === 'user' ? 'user-row' : 'assistant-row']"
           >
             <div v-if="item.m.role !== 'user'" class="agent-avatar">
@@ -217,7 +217,7 @@
                     <div
                       v-for="(step, si) in liveStepsView.steps"
                       :key="`${step.type}-${step.iteration || si}-${step.action || ''}-${si}`"
-                      v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length, step.snippet?.length, toolDetailRevision]"
+                      v-memo="[step.status, step.title, step.iteration, step.action, step.content?.length, step.preview?.length, step.snippet?.length, step.batch?.children?.length, toolDetailRevision]"
                       :class="['exec-step', { 'is-expandable': isStepDetailExpandable(step) }]"
                       :role="isStepDetailExpandable(step) ? 'button' : undefined"
                       :tabindex="isStepDetailExpandable(step) ? 0 : undefined"
@@ -689,6 +689,15 @@ function stepLabel(step) {
 }
 
 function stepTitle(step) {
+  if (step?.action === 'tool_batch' && step?.batch) {
+    const batch = step.batch || {}
+    const mode = batch.mode ? ` · ${batch.mode}` : ''
+    const total = Number(batch.total || batch.children?.length || 0)
+    const done = Number(batch.done || 0)
+    const error = Number(batch.error || 0)
+    const skipped = Number(batch.skipped || 0)
+    return `${step.title || '批量工具调用'}${mode} · ${done}/${total} 成功 · ${error} 失败 · ${skipped} 跳过`
+  }
   return step.title || stepLabel(step)
 }
 
@@ -729,11 +738,53 @@ function stepDetail(step) {
 }
 
 function toolStepDetail(step) {
+  if (step?.action === 'tool_batch' && step?.batch) return batchStepDetail(step)
   const detail = stepDetail(step)
   if (detail) return detail
   // Earlier messages stored only the action title.  Make the expansion
   // visibly meaningful instead of leaving a rotated arrow with an empty pane.
   return '此历史步骤未保存工具输出；后续执行会显示已脱敏、限长的执行结果。'
+}
+
+function batchStepDetail(step) {
+  const batch = step?.batch || {}
+  const header = [
+    `batch_id: ${String(batch.batch_id || 'unknown')}`,
+    `mode: ${String(batch.mode || 'unknown')}`,
+    `total: ${Number(batch.total || 0)}`,
+    `done: ${Number(batch.done || 0)}`,
+    `error: ${Number(batch.error || 0)}`,
+    `skipped: ${Number(batch.skipped || 0)}`,
+    `duration_ms: ${Number(batch.duration_ms || 0)}`,
+  ]
+  if (batch.phase) header.push(`phase: ${String(batch.phase)}`)
+  if (batch.validation_ok != null) header.push(`validation_ok: ${Boolean(batch.validation_ok)}`)
+  if (batch.committed != null) header.push(`committed: ${Number(batch.committed || 0)}`)
+  const lines = [`批量工具调用`, header.join(' · '), '']
+  const children = Array.isArray(batch.children) ? batch.children : []
+  if (!children.length) {
+    lines.push('（没有保存 child 明细）')
+    return lines.join('\n')
+  }
+  children.forEach((child, index) => {
+    const title = `${index + 1}. [${String(child.status || 'unknown')}] ${String(child.id || '?')} · ${String(child.action || '?')}`
+    const attrs = []
+    if (child.phase) attrs.push(`phase=${String(child.phase)}`)
+    if (child.attempts != null) attrs.push(`attempts=${Number(child.attempts || 0)}`)
+    if (child.duration_ms != null) attrs.push(`duration_ms=${Number(child.duration_ms || 0)}`)
+    if (child.complete != null) attrs.push(`complete=${Boolean(child.complete)}`)
+    if (child.coalesced != null) attrs.push(`coalesced=${Boolean(child.coalesced)}`)
+    if (child.range) attrs.push(`range=${String(child.range.path || '')}#L${Number(child.range.start || 0)}-L${Number(child.range.end || 0)}`)
+    if (child.target) attrs.push(`target=${String(child.target)}`)
+    if (child.detail_path) attrs.push(`detail_path=${String(child.detail_path)}`)
+    if (child.error) attrs.push(`error=${String(child.error)}`)
+    if (child.reason) attrs.push(`reason=${String(child.reason)}`)
+    if (child.retry_hint) attrs.push(`retry_hint=${String(child.retry_hint)}`)
+    lines.push(title)
+    if (attrs.length) lines.push(`  ${attrs.join(' · ')}`)
+    if (child.args_preview) lines.push(`  args: ${String(child.args_preview)}`)
+  })
+  return lines.join('\n')
 }
 
 function modelRouteStepDetail(step) {
