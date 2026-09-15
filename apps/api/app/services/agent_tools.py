@@ -64,6 +64,19 @@ def _extract_json_object(text: str) -> dict | None:
     return None
 
 
+def _skill_md_token(reply: str, skill_ids: list[str]) -> str:
+    text = (reply or "").strip()
+    if text.upper().startswith("SKILL_MD"):
+        for sep in (":", "："):
+            if sep in text:
+                text = text.split(sep, 1)[1]
+                break
+        else:
+            text = text[len("SKILL_MD"):]
+    token = text.strip().strip("`\"'")
+    return token or (skill_ids[0] if skill_ids else "")
+
+
 async def execute_action(
     action: str,
     reply: str,
@@ -115,10 +128,12 @@ async def execute_action(
             return text
         return _write_workplace(sandbox, rel.lstrip("/"), text.replace(old, new, 1))
 
-    if action == "skill_read_md" or reply.startswith("SKILL_MD:"):
-        sid = reply[8:].strip() if reply.startswith("SKILL_MD:") else (skill_ids[0] if skill_ids else "")
-        sk = db.query(Skill).filter(Skill.id == sid).first()
-        return skill_runtime.read_md(sk) if sk else "skill not found"
+    if action == "skill_read_md" or reply.startswith("SKILL_MD:") or reply.startswith("SKILL_MD："):
+        sid = _skill_md_token(reply, skill_ids)
+        bound = [db.query(Skill).filter(Skill.id == item).first() for item in skill_ids]
+        bound = [sk for sk in bound if sk]
+        sk, rel = skill_runtime.split_skill_md_request(bound, sid)
+        return skill_runtime.read_md(sk, rel) if sk else "skill not found"
 
     if action == "skill_run_script" or reply.startswith("RUN_SKILL:"):
         name = reply[10:].strip() if reply.startswith("RUN_SKILL:") else reply

@@ -1079,6 +1079,7 @@ class AgentRuntime:
         from app.services.llm_client import LLMProviderThrottled, LLMTransportError
         from app.services.mcp_client import McpSessionManager
         from app.services.agent_runtime.mcp_routing import (
+            apply_empty_route_fallback,
             build_mcp_route_candidates,
             route_mcp_candidates,
         )
@@ -1191,6 +1192,7 @@ class AgentRuntime:
             candidates=candidates,
             timeout=llm_timeout,
         )
+        route_decision = apply_empty_route_fallback(route_decision, candidates)
         state.selected_mcp_ids = route_decision.selected_mcp_ids
         view_catalog = build_ads_view_catalog(state.selected_mcp_ids)
         if state.resumed:
@@ -1940,6 +1942,10 @@ class AgentRuntime:
                                                     trigger=f"batch_mcp_empty_selection:{child_reply}"[:500],
                                                     timeout=llm_timeout,
                                                 )
+                                                decision = apply_empty_route_fallback(
+                                                    decision, candidates,
+                                                    already_selected=state.selected_mcp_ids,
+                                                )
                                                 newly_selected = [
                                                     mid for mid in decision.selected_mcp_ids
                                                     if mid not in state.selected_mcp_ids
@@ -2518,6 +2524,9 @@ class AgentRuntime:
                                 selected_mcp_ids=state.selected_mcp_ids,
                                 trigger=normalized[:500], timeout=llm_timeout,
                             )
+                            decision = apply_empty_route_fallback(
+                                decision, candidates, already_selected=state.selected_mcp_ids,
+                            )
                             newly_selected = [
                                 mid for mid in decision.selected_mcp_ids
                                 if mid not in state.selected_mcp_ids
@@ -2637,6 +2646,9 @@ class AgentRuntime:
                             candidates=candidates,
                             selected_mcp_ids=state.selected_mcp_ids,
                             trigger=f"mcp_failure:{normalized}"[:500], timeout=llm_timeout,
+                        )
+                        decision = apply_empty_route_fallback(
+                            decision, candidates, already_selected=state.selected_mcp_ids,
                         )
                         newly_selected = [mid for mid in decision.selected_mcp_ids if mid not in state.selected_mcp_ids]
                         if newly_selected:

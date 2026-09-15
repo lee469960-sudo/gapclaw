@@ -341,7 +341,10 @@ class SystemPromptBuilder:
             for sid in skill_ids:
                 sk = db.query(Skill).filter(Skill.id == sid).first()
                 if sk:
-                    lines.append(f"- skill {sk.name}: RUN_SKILL: {sk.name} | SKILL_MD: {sid}")
+                    lines.append(
+                        f"- skill {sk.name}: RUN_SKILL: {sk.name} | SKILL_MD: {sk.name} | "
+                        f"包内文档 SKILL_MD: {sk.name} references/<file>.md（不要用 READ）"
+                    )
         if mcp_ids and "mcp_tool_call" not in allowed:
             lines.append(
                 "- 【软提示】Agent 已绑定 MCP，但未开启 mcp_tool_call 权限；"
@@ -500,8 +503,18 @@ class SystemPromptBuilder:
             ))
         if "skill_read_md" in allowed:
             tools.append(fn(
-                "skill_read_md", "Read a bound skill's markdown documentation.",
-                {"skill_id": {"type": "string"}},
+                "skill_read_md",
+                "Read a bound skill's SKILL.md or a markdown file inside that skill package.",
+                {
+                    "skill_id": {"type": "string", "description": "Bound skill name or id."},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Optional skill-package relative path such as "
+                            "references/report-sop.md. Do not use workplace READ."
+                        ),
+                    },
+                },
                 ["skill_id"],
             ))
         if "skill_run_script" in allowed:

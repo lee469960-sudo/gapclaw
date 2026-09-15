@@ -42,8 +42,8 @@
           <el-tag size="small" :type="row.visibility === 'public' ? 'success' : 'info'">
             {{ row.visibility === 'public' ? '公共' : '私有' }}
           </el-tag>
-          <el-tag v-if="row.routing_eligible === false" size="small" type="warning">
-            不参与自动路由：请补充描述或标签
+          <el-tag v-if="row.routing_status === 'missing_capability_metadata'" size="small" type="warning">
+            缺少描述或标签，仍参与路由
           </el-tag>
         </div>
         <div class="card-actions">

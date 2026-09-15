@@ -370,9 +370,13 @@ def _tool_call_to_step(call: dict) -> ToolStep | None:
         if q:
             step = ToolStep("rag_query", f"RAG: {q}")
     elif lower_name == "skill_read_md":
-        sid = _tool_arg(args_obj, "skill_id", "id")
+        sid = _tool_arg(args_obj, "skill_id", "id", "name")
+        path = _tool_arg(args_obj, "path", "rel_path", "file")
         if sid:
-            step = ToolStep("skill_read_md", f"SKILL_MD: {sid}")
+            payload = f"SKILL_MD: {sid}"
+            if path:
+                payload = f"{payload} {path}"
+            step = ToolStep("skill_read_md", payload)
     elif lower_name == "skill_run_script":
         n = _tool_arg(args_obj, "name", "skill_id")
         if n:

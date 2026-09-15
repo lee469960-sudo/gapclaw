@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.services.agent_runtime.mcp_routing import (
     McpRouteCandidate,
     McpRouteDecision,
+    apply_empty_route_fallback,
     build_mcp_route_candidates,
     route_mcp_candidates,
 )
@@ -22,7 +23,7 @@ def test_mcp_to_dict_exposes_routing_metadata_status():
     legacy = MCP(id="legacy", name="Legacy MCP", tags=" ", description="")
     described = MCP(id="described", name="Docs MCP", tags="docs", description="")
 
-    assert legacy.to_dict()["routing_eligible"] is False
+    assert legacy.to_dict()["routing_eligible"] is True
     assert legacy.to_dict()["routing_status"] == "missing_capability_metadata"
     assert described.to_dict()["routing_eligible"] is True
     assert described.to_dict()["routing_status"] == "eligible"
@@ -117,7 +118,7 @@ def test_route_candidates_require_mcp_action_without_querying_resources():
     db.query.assert_not_called()
 
 
-def test_route_candidates_keep_only_described_or_tagged_bound_mcps_in_binding_order():
+def test_route_candidates_include_bound_mcps_without_metadata_in_binding_order():
     described = SimpleNamespace(
         id="m1", name="ClickHouse docs", tags="", description="ClickHouse performance tuning", modified_at="v1"
     )
@@ -131,14 +132,15 @@ def test_route_candidates_keep_only_described_or_tagged_bound_mcps_in_binding_or
         db, ["m1", "m2", "m3", "m1"], ["mcp_tool_call"]
     )
 
-    assert [candidate.id for candidate in candidates] == ["m1", "m3"]
+    assert [candidate.id for candidate in candidates] == ["m1", "m2", "m3"]
     assert candidates[0].to_prompt_dict() == {
         "id": "m1",
         "name": "ClickHouse docs",
         "tags": "",
         "description": "ClickHouse performance tuning",
     }
-    assert candidates[1].tags == "query, export"
+    assert candidates[1].name == "legacy"
+    assert candidates[2].tags == "query, export"
 
 
 def _candidates():
@@ -202,6 +204,22 @@ def test_explicit_mcp_name_is_a_router_signal_but_unknown_ids_are_rejected():
     assert decision.selected_mcp_ids == ["ads"]
     body = json.loads(route_call.await_args.args[1][1]["content"])
     assert body["explicitly_named_mcp_ids"] == ["ads"]
+
+
+def test_empty_route_fallback_selects_all_eligible_when_nothing_is_loaded():
+    decision = apply_empty_route_fallback(McpRouteDecision([], failure="low_confidence"), _candidates())
+    assert decision.selected_mcp_ids == ["clickhouse", "ads"]
+    assert decision.reason == "empty_route_fallback_all_eligible"
+
+
+def test_empty_route_fallback_does_not_expand_an_existing_selection():
+    decision = apply_empty_route_fallback(
+        McpRouteDecision([], failure="low_confidence"),
+        _candidates(),
+        already_selected=["clickhouse"],
+    )
+    assert decision.selected_mcp_ids == []
+    assert decision.failure == "low_confidence"
 
 
 def test_route_does_not_run_for_unavailable_or_unauthorized_candidates():
@@ -432,8 +450,8 @@ def test_runtime_auto_selects_and_retries_once_after_empty_mcp_selection():
         return "catalog"
 
     replies = iter(["MCP: export_orders {}", "FINAL: done"])
-    route = AsyncMock(side_effect=[McpRouteDecision([]), McpRouteDecision(["ads"])])
-    execute = AsyncMock(side_effect=["no mcp configured", "exported"])
+    route = AsyncMock(side_effect=[McpRouteDecision([])])
+    execute = AsyncMock(return_value="exported")
     with patch("app.services.agent_runtime.mcp_routing.build_mcp_route_candidates", return_value=_candidates()), patch(
         "app.services.agent_runtime.mcp_routing.route_mcp_candidates", new=route,
     ), patch("app.services.llm_client.chat_completion", new=AsyncMock(side_effect=lambda *_a, **_k: ChatResult(text=next(replies)))), patch(
@@ -443,9 +461,10 @@ def test_runtime_auto_selects_and_retries_once_after_empty_mcp_selection():
     ):
         assert asyncio.run(AgentRuntime().run(ctx)) == "done"
 
-    assert route.await_count == 2
-    assert execute.await_count == 2
-    assert builds == [[], ["ads"]]
+    assert route.await_count == 1
+    assert execute.await_count == 1
+    assert execute.await_args.args[6] == ["clickhouse", "ads"]
+    assert builds == [["clickhouse", "ads"]]
 
 
 def test_batch_mcp_child_auto_selects_and_retries_after_empty_selection():
@@ -476,8 +495,8 @@ def test_batch_mcp_child_auto_selects_and_retries_after_empty_selection():
         '{"id":"m1","reply":"MCP: export_orders {}"}]}',
         "FINAL: done",
     ])
-    route = AsyncMock(side_effect=[McpRouteDecision([]), McpRouteDecision(["ads"])])
-    execute = AsyncMock(side_effect=["no mcp configured", "exported"])
+    route = AsyncMock(side_effect=[McpRouteDecision([])])
+    execute = AsyncMock(return_value="exported")
     with patch("app.services.agent_runtime.mcp_routing.build_mcp_route_candidates", return_value=_candidates()), patch(
         "app.services.agent_runtime.mcp_routing.route_mcp_candidates", new=route,
     ), patch("app.services.llm_client.chat_completion", new=AsyncMock(side_effect=lambda *_a, **_k: ChatResult(text=next(replies)))), patch(
@@ -487,7 +506,7 @@ def test_batch_mcp_child_auto_selects_and_retries_after_empty_selection():
     ):
         assert asyncio.run(AgentRuntime().run(ctx)) == "done"
 
-    assert route.await_count == 2
-    assert execute.await_count == 2
-    assert execute.await_args_list[-1].args[6] == ["ads"]
-    assert builds == [[], ["ads"]]
+    assert route.await_count == 1
+    assert execute.await_count == 1
+    assert execute.await_args.args[6] == ["clickhouse", "ads"]
+    assert builds == [["clickhouse", "ads"]]

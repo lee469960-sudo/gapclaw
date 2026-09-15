@@ -233,7 +233,7 @@ class MCP(Base):
     modified_at: Mapped[str] = mapped_column(String(32), default="")
 
     def to_dict(self) -> dict:
-        routing_eligible = bool((self.description or "").strip() or (self.tags or "").strip())
+        has_capability_metadata = bool((self.description or "").strip() or (self.tags or "").strip())
         env = {}
         try:
             env = json.loads(self.command_env or "{}")
@@ -256,8 +256,8 @@ class MCP(Base):
             "allowed_users": _json_list(self.allowed_users),
             "creator": self.creator,
             "modified_at": self.modified_at,
-            "routing_eligible": routing_eligible,
-            "routing_status": "eligible" if routing_eligible else "missing_capability_metadata",
+            "routing_eligible": True,
+            "routing_status": "eligible" if has_capability_metadata else "missing_capability_metadata",
         }
 
 

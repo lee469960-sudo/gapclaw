@@ -23,7 +23,7 @@ _MIN_ROUTE_CONFIDENCE = 0.5
 
 @dataclass(frozen=True)
 class McpRouteCandidate:
-    """A bound MCP that contains enough capability metadata for LLM routing."""
+    """A bound MCP that the Agent is authorized to call."""
 
     id: str
     name: str
@@ -159,7 +159,7 @@ def build_mcp_route_candidates(
     mcp_ids: list[str],
     allowed_actions: list[str],
 ) -> list[McpRouteCandidate]:
-    """Return authorized, describable bound MCPs without performing MCP I/O."""
+    """Return authorized bound MCPs without performing MCP I/O."""
     if "mcp_tool_call" not in set(allowed_actions or []):
         return []
     # Lightweight unit-test/runtime adapters may provide only persistence
@@ -181,8 +181,6 @@ def build_mcp_route_candidates(
             continue
         tags = str(mcp.tags or "").strip()
         description = str(mcp.description or "").strip()
-        if not tags and not description:
-            continue
         candidates.append(
             McpRouteCandidate(
                 id=str(mcp.id or mcp_id),
@@ -193,3 +191,20 @@ def build_mcp_route_candidates(
             )
         )
     return candidates
+
+
+def apply_empty_route_fallback(
+    decision: McpRouteDecision,
+    candidates: list[McpRouteCandidate],
+    *,
+    already_selected: list[str] | None = None,
+) -> McpRouteDecision:
+    """If the router chose nothing and nothing is loaded yet, keep all eligible MCPs."""
+    if decision.selected_mcp_ids or already_selected or not candidates:
+        return decision
+    return McpRouteDecision(
+        selected_mcp_ids=[candidate.id for candidate in candidates],
+        reason=decision.reason or "empty_route_fallback_all_eligible",
+        needs_more_capability=decision.needs_more_capability,
+        failure="",
+    )
