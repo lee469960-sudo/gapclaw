@@ -6,17 +6,17 @@ Publish the current verified GAP changes under the next patch tag and validate t
 
 ## Current Phase
 
-ICP/provider access is now reported as cleared. A fresh `v1.0.23` release is being prepared from the latest code so the full GitHub Actions → signed Hook → Release Agent → Deploy Runner → production health/audit path can be validated without bypassing CI.
+ICP/provider access is cleared and the production Hook secret mapping has been fixed. A fresh `v1.0.24` release is being prepared so the committed compose fix and latest code are validated through the full GitHub Actions → signed Hook → Release Agent → Deploy Runner → production health/audit path.
 
 ## Phases
 
 | Phase | Status |
 |---|---|
 | 1. Inspect release contents and CI/production prerequisites | complete |
-| 2. Run pre-release tests and prepare versioned commit | complete (`v1.0.23` tests passed; commit pending) |
-| 3. Create and push the next patch tag | in_progress (`v1.0.23`) |
-| 4. Monitor GitHub build, image push and signed hook delivery | pending (`v1.0.23`) |
-| 5. Verify Release Agent, Runner, production health and audit evidence | pending (`v1.0.23`) |
+| 2. Run pre-release tests and prepare versioned commit | in_progress (`v1.0.24`) |
+| 3. Create and push the next patch tag | pending (`v1.0.24`) |
+| 4. Monitor GitHub build, image push and signed hook delivery | pending (`v1.0.24`) |
+| 5. Verify Release Agent, Runner, production health and audit evidence | pending (`v1.0.24`) |
 
 ## Release Safety Rules
 
@@ -48,5 +48,12 @@ ICP/provider access is now reported as cleared. A fresh `v1.0.23` release is bei
 | First password-SSH expect wrapper captured the password prompt but returned no remote output | 1 | Do not treat as authenticated; test login with a simpler exact prompt matcher before issuing Runner reads. |
 | First authenticated Actions API call returned 401 because the bearer environment variable was expanded by the parent shell before `env` applied it | 1 | Expand the token only inside a child shell that receives the environment variable; do not classify the credential itself as invalid. |
 | GitHub rerun-failed-jobs API returned 403 | 1 | Token has Actions read but not Actions write. Do not mutate tags to force a rerun; record the ingress blocker and request rerun authority only after public TLS is fixed. |
+| GitHub run logs API returned 404 while `v1.0.23` run was still in progress | 1 | Treat as unavailable archive for an active run; continue polling job/step status and only fetch logs after completion or failure. |
+| Production inspection command failed because remote shell received an unescaped `find (...)` expression | 1 | Avoid grouped `find` predicates over the SSH/expect quoting layer; use simpler path discovery commands. |
+| Production inspection command failed because Tcl tried to expand `$RELEASE_HOOK_SECRET` locally | 1 | Avoid shell variable interpolation in expect strings; use `printenv RELEASE_HOOK_SECRET` inside the container instead. |
+| Production compose patch command failed because Tcl tried to expand `${GAP_VERSION...}` locally | 1 | Generate dollar-prefixed Compose interpolation text on the remote host with `chr(36)` instead of embedding `${...}` in the expect string. |
+| Production API recreate command failed because `ubuntu` cannot `cd /opt/gap-runner/compose` | 1 | Use absolute compose file paths with `sudo docker compose` instead of relying on shell cwd access. |
+| Production compose recreate failed because release-scoped variables are not in `/opt/gap/.env` | 1 | Recover `GAP_VERSION` and immutable image references from Runner state or current containers before recreating API. |
+| Production compose recreate accidentally used default project name `compose` and created a separate failed stack | 1 | Remove the accidental `compose` project and rerun with explicit `-p gap-production` to target the existing production containers. |
 | First release-ledger SSH query failed because Tcl expanded the container-only `$POSTGRES_USER` variable locally | 1 | Wrap the complete remote command in a Tcl braced literal so PostgreSQL environment variables expand only inside the DB container. |
 | Second release-ledger query reached PostgreSQL but nested quoting mangled SQL string labels | 2 | Remove all SQL string constants and query the latest fixed fields directly; check for the target release id in output. |
