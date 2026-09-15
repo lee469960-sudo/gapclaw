@@ -6,7 +6,7 @@ Publish the current verified GAP changes under the next patch tag and validate t
 
 ## Current Phase
 
-ICP/provider access is cleared and the production Hook secret mapping has been fixed. `v1.0.24` proved image/manifest publication and public Hook reachability, but Hook delivery is blocked at signature validation because the available GitHub token cannot update `GAP_RELEASE_HOOK_SECRET` and the existing GitHub/production secrets do not match.
+ICP/provider access is cleared, production Hook secret mapping is fixed, and production now uses the user-supplied long Hook secret. `v1.0.24` proved image/manifest publication and public Hook reachability, but final delivery remains blocked until GitHub Actions `GAP_RELEASE_HOOK_SECRET` is set to the same value and the failed job is rerun or a new tag is pushed.
 
 ## Phases
 
