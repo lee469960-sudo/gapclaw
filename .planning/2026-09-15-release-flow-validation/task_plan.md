@@ -6,17 +6,17 @@ Publish the current verified GAP changes under the next patch tag and validate t
 
 ## Current Phase
 
-ICP/provider access is cleared and the production Hook secret mapping has been fixed. A fresh `v1.0.24` release is being prepared so the committed compose fix and latest code are validated through the full GitHub Actions → signed Hook → Release Agent → Deploy Runner → production health/audit path.
+ICP/provider access is cleared and the production Hook secret mapping has been fixed. `v1.0.24` proved image/manifest publication and public Hook reachability, but Hook delivery is blocked at signature validation because the available GitHub token cannot update `GAP_RELEASE_HOOK_SECRET` and the existing GitHub/production secrets do not match.
 
 ## Phases
 
 | Phase | Status |
 |---|---|
 | 1. Inspect release contents and CI/production prerequisites | complete |
-| 2. Run pre-release tests and prepare versioned commit | in_progress (`v1.0.24`) |
-| 3. Create and push the next patch tag | pending (`v1.0.24`) |
-| 4. Monitor GitHub build, image push and signed hook delivery | pending (`v1.0.24`) |
-| 5. Verify Release Agent, Runner, production health and audit evidence | pending (`v1.0.24`) |
+| 2. Run pre-release tests and prepare versioned commit | complete (`v1.0.24`) |
+| 3. Create and push the next patch tag | complete (`v1.0.24` pushed) |
+| 4. Monitor GitHub build, image push and signed hook delivery | blocked (`v1.0.24` Hook returns 403) |
+| 5. Verify Release Agent, Runner, production health and audit evidence | pending (blocked before Runner) |
 
 ## Release Safety Rules
 
@@ -55,5 +55,7 @@ ICP/provider access is cleared and the production Hook secret mapping has been f
 | Production API recreate command failed because `ubuntu` cannot `cd /opt/gap-runner/compose` | 1 | Use absolute compose file paths with `sudo docker compose` instead of relying on shell cwd access. |
 | Production compose recreate failed because release-scoped variables are not in `/opt/gap/.env` | 1 | Recover `GAP_VERSION` and immutable image references from Runner state or current containers before recreating API. |
 | Production compose recreate accidentally used default project name `compose` and created a separate failed stack | 1 | Remove the accidental `compose` project and rerun with explicit `-p gap-production` to target the existing production containers. |
+| Production Hook returned 503 again after aligning to the previously supplied Hook value | 1 | The supplied value is shorter than the API's 32-character minimum, so generate a new 32+ character secret and update both GitHub Actions and production. |
+| GitHub Actions secret update API returned 403 with current PAT | 1 | Current token cannot read/update repository Actions secrets; user must provide a token with Actions secrets administration permission or update `GAP_RELEASE_HOOK_SECRET` manually in GitHub. |
 | First release-ledger SSH query failed because Tcl expanded the container-only `$POSTGRES_USER` variable locally | 1 | Wrap the complete remote command in a Tcl braced literal so PostgreSQL environment variables expand only inside the DB container. |
 | Second release-ledger query reached PostgreSQL but nested quoting mangled SQL string labels | 2 | Remove all SQL string constants and query the latest fixed fields directly; check for the target release id in output. |
