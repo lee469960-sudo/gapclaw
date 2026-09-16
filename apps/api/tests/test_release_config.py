@@ -25,6 +25,10 @@ def _settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def test_release_runner_default_timeout_covers_the_synchronous_health_gate():
+    assert Settings().release_runner_timeout_seconds == 60.0
+
+
 def test_release_config_builds_fixed_runner_tls_and_hides_certificate_references():
     config = ReleaseManagementConfig.from_settings(_settings())
 

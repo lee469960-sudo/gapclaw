@@ -50,7 +50,7 @@ RELEASE_ENVIRONMENT=production
 RELEASE_RUNNER_CA_FILE=/run/gap-release-mtls/ca.crt
 RELEASE_RUNNER_CLIENT_CERT_FILE=/run/gap-release-mtls/gap-client.crt
 RELEASE_RUNNER_CLIENT_KEY_FILE=/run/gap-release-mtls/gap-client.key
-RELEASE_RUNNER_TIMEOUT_SECONDS=10
+RELEASE_RUNNER_TIMEOUT_SECONDS=60
 RELEASE_HOOK_SECRET=replace-with-the-same-32-plus-character-github-secret
 RELEASE_HOOK_MAX_AGE_SECONDS=300
 ```

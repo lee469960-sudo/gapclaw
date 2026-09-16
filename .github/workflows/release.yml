@@ -203,7 +203,7 @@ jobs:
               output.write(f"sha256={signature}")
           PY
           http_code="$(
-            curl --silent --show-error --max-time 20 --retry 2 --retry-all-errors \
+            curl --silent --show-error --max-time 90 --retry 2 --retry-all-errors \
               --output .release/release-hook.response \
               --write-out "%{http_code}" \
               --request POST "https://gapclaw.online/internal/release-hook" \

@@ -29,7 +29,7 @@ class ReleaseRunnerTls:
     ca_file: Path
     cert_file: Path
     key_file: Path
-    timeout_seconds: float = 10.0
+    timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if self.base_url.rstrip("/") not in ALLOWED_RELEASE_RUNNER_URLS:
