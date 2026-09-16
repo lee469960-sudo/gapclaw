@@ -1,7 +1,7 @@
 ARG NODE_IMAGE=node:20-alpine
 # 生产默认同源：由 nginx 反代 /captcha.cgi、/pages 等到 api 服务
 ARG VITE_API_BASE=
-FROM ${NODE_IMAGE} AS build
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
 WORKDIR /app
 ARG VITE_API_BASE
 ENV VITE_API_BASE=${VITE_API_BASE}
