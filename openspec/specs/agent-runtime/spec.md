@@ -1205,3 +1205,76 @@ The runtime MUST preserve the diagnostic value of repeated no-progress condition
 - **WHEN** 已执行至少一个工具后模型调用失败
 - **THEN** 系统不切换模型重放任务或工具调用
 - **AND** 返回可续跑或可行动的失败状态
+
+### Requirement: ReAct runtime supports explicit batched tool actions
+The runtime SHALL allow one LLM iteration to request `parallel`, `sequence`, or `transaction` batches, applying standalone authorization before execution while preserving legacy single calls.
+
+#### Scenario: Independent batch executes after one model turn
+- **WHEN** a valid authorized parallel batch is returned
+- **THEN** child actions execute without an intermediate LLM turn and produce one compact aggregate result
+
+#### Scenario: Invalid batch does not partially execute
+- **WHEN** mode or child authorization is invalid
+- **THEN** the batch is rejected before any child executes
+
+### Requirement: Batched execution respects dependency modes
+The runtime SHALL enforce distinct dependency contracts for parallel, sequence, and transaction modes.
+
+#### Scenario: Parallel batch reports independent child outcomes
+- **WHEN** one independent child fails
+- **THEN** successful and failed child statuses are returned without retrying successful children
+
+#### Scenario: Sequence batch stops after dependency failure
+- **WHEN** a prerequisite child fails
+- **THEN** dependent children are marked skipped and not executed
+
+#### Scenario: Transaction batch commits only after validation
+- **WHEN** any patch validation fails
+- **THEN** no patch is committed
+
+### Requirement: File read batching is complete-aware and token bounded
+Batch file reads SHALL indicate completeness, omitted ranges, and follow-up locations while allowing adjacent ranges to be coalesced physically.
+
+#### Scenario: Small files return complete content in one batch
+- **WHEN** small files fit the result budget
+- **THEN** each result contains complete content and `complete: true`
+
+#### Scenario: Large file read is explicitly incomplete
+- **WHEN** a file exceeds the batch budget
+- **THEN** the result contains `complete: false` and omitted-range metadata
+
+#### Scenario: Adjacent page reads can be coalesced
+- **WHEN** adjacent ranges of one file are requested
+- **THEN** one physical read MAY satisfy them while child ranges remain observable
+
+### Requirement: File write batching is transactional patch-only by default
+Batch writes SHALL dry-run validate patch children as a group and reject unrestricted overwrite by default.
+
+#### Scenario: All patches apply and commit together
+- **WHEN** every patch validates
+- **THEN** all patches commit together
+
+#### Scenario: One patch conflict prevents all writes
+- **WHEN** one patch conflicts
+- **THEN** no sibling patch is committed
+
+### Requirement: Batch results are compact but inspectable
+Batch results SHALL provide compact model summaries and expandable child details with statuses, timings, redacted arguments, and references.
+
+#### Scenario: User can inspect child details
+- **WHEN** a batch appears in the execution UI
+- **THEN** the user can expand each child detail
+
+### Requirement: Batching does not expand security or routing authority
+Every batch child SHALL use the same sandbox, MCP routing, path, redaction, and permission checks as a standalone call, and cross-domain transactions SHALL be rejected.
+
+#### Scenario: Unauthorized child blocks or fails safely
+- **WHEN** a child targets an unauthorized resource
+- **THEN** it is rejected without committing transaction siblings
+
+### Requirement: Batch execution avoids unbounded automatic retries
+The runtime SHALL avoid silent splitting or retry loops; any safe fallback is bounded and recorded.
+
+#### Scenario: Validation failure returns without retry storm
+- **WHEN** transaction validation fails
+- **THEN** the failure is returned without repeated retries
