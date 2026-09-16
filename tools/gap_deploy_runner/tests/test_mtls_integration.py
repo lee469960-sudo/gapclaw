@@ -189,6 +189,35 @@ def test_deploy_ack_precedes_api_restart(tmp_path):
         thread.join(timeout=2)
 
 
+def test_mtls_server_accepts_input_free_rollback(tmp_path):
+    ca_cert, server_cert, server_key, client_cert, client_key = _certificate_files(tmp_path)
+
+    class RollbackRunner:
+        def dispatch(self, operation, **_kwargs):
+            assert operation == "rollback"
+            return {"status": "rolled_back", "release": {"phase": "succeeded"}}
+
+    server = create_server(
+        ("127.0.0.1", 0),
+        RunnerHttpApi(RollbackRunner()),
+        MtlsFiles(ca_file=ca_cert, cert_file=server_cert, key_file=server_key),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        trusted = ssl.create_default_context(cafile=str(ca_cert))
+        trusted.load_cert_chain(certfile=str(client_cert), keyfile=str(client_key))
+        request = b"POST /v1/rollback HTTP/1.1\r\nHost: runner\r\nConnection: close\r\n\r\n"
+        response = _request(trusted, server.server_address, request)
+        assert b"200 OK" in response
+        body = json.loads(response.split(b"\r\n\r\n", 1)[1])
+        assert body["status"] == "rolled_back"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_mtls_server_accepts_trusted_client_and_rejects_client_without_certificate(tmp_path):
     ca_cert, server_cert, server_key, client_cert, client_key = _certificate_files(tmp_path)
     runner = DeployRunner(

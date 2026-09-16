@@ -104,6 +104,22 @@ def create_server(address: tuple[str, int], api: RunnerHttpApi, mtls: MtlsFiles)
             self._reply(*api.handle("GET", self.path, client_common_name=self._client_common_name()))
 
         def do_POST(self) -> None:
+            # Rollback is deliberately input-free.  Do not route it through
+            # the manifest JSON parser, which would reject the valid empty
+            # request sent by GAP's ReleaseRollbackService.
+            if self.path == "/v1/rollback":
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._reply(400, {"reason": "runner_request_length_invalid"})
+                    return
+                if content_length != 0:
+                    if content_length > 0:
+                        self.rfile.read(min(content_length, 64 * 1024))
+                    self._reply(400, {"reason": "runner_rollback_input_not_allowed"})
+                    return
+                self._reply(*api.handle("POST", self.path, client_common_name=self._client_common_name()))
+                return
             payload, error = self._json_body()
             if error is not None:
                 self._reply(400, {"reason": error})
