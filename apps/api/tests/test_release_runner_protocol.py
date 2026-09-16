@@ -54,8 +54,20 @@ def test_runner_client_allows_the_distinct_staging_private_runner_host():
     assert tls.base_url == "https://gap-runner-staging.internal:9443"
 
 
-def test_runner_client_uses_fixed_mtls_files_and_fixed_operation_path():
+def test_runner_client_uses_fixed_mtls_files_and_fixed_operation_path(monkeypatch):
     captured = {}
+
+    class SslContext:
+        def load_cert_chain(self, *, certfile, keyfile):
+            captured["cert"] = (certfile, keyfile)
+
+    ssl_context = SslContext()
+
+    def create_default_context(*, cafile):
+        captured["ca"] = cafile
+        return ssl_context
+
+    monkeypatch.setattr("app.services.release_runner.ssl.create_default_context", create_default_context)
 
     class Response:
         def raise_for_status(self): pass
@@ -74,13 +86,19 @@ def test_runner_client_uses_fixed_mtls_files_and_fixed_operation_path():
         client_factory=Client,
     )
     assert client.health() == {"status": "ok"}
-    assert captured["verify"] == "ca"
+    assert captured["ca"] == "ca"
+    assert captured["verify"] is ssl_context
     assert captured["cert"] == ("cert", "key")
     assert captured["request"] == ("GET", "https://gap-runner.internal:9443/v1/health")
 
 
-def test_runner_client_sends_only_the_verified_manifest_to_fixed_deploy_path():
+def test_runner_client_sends_only_the_verified_manifest_to_fixed_deploy_path(monkeypatch):
     captured = {}
+
+    class SslContext:
+        def load_cert_chain(self, **_kwargs): pass
+
+    monkeypatch.setattr("app.services.release_runner.ssl.create_default_context", lambda **_kwargs: SslContext())
 
     class Response:
         def raise_for_status(self): pass

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -53,14 +54,16 @@ class ReleaseRunnerClient:
 
     def _request(self, method: str, path: str, *, json_payload: dict[str, object] | None = None) -> dict[str, Any]:
         try:
+            ssl_context = ssl.create_default_context(cafile=str(self.tls.ca_file))
+            ssl_context.load_cert_chain(certfile=str(self.tls.cert_file), keyfile=str(self.tls.key_file))
             with self.client_factory(
-                verify=str(self.tls.ca_file), cert=(str(self.tls.cert_file), str(self.tls.key_file)), timeout=self.tls.timeout_seconds,
+                verify=ssl_context, timeout=self.tls.timeout_seconds,
             ) as client:
                 request_kwargs = {"json": json_payload} if json_payload is not None else {}
                 response = client.request(method, f"{self.tls.base_url.rstrip('/')}{path}", **request_kwargs)
                 response.raise_for_status()
                 payload = response.json()
-        except httpx.HTTPError as exc:
+        except (OSError, httpx.HTTPError) as exc:
             raise ReleaseRunnerError("release_runner_request_failed") from exc
         if not isinstance(payload, dict):
             raise ReleaseRunnerError("release_runner_response_invalid")
