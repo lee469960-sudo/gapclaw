@@ -34,4 +34,4 @@
 - [x] 5.1 更新部署与运维文档，说明 GitHub CI Hook secret、Caddy 固定 Hook、服务器无 GitHub Runner、tag 规则、主机 ACR 凭据、mTLS 轮换、首个健康基线与权限边界；验证文档命令与配置路径同实现一致。
 - [x] 5.2 增加 CI Hook manifest 到固定 Runner 的端到端/契约测试，覆盖签名、重放拒绝、digest 部署、健康成功/失败回滚和回传重试。
 - [x] 5.3 执行 API、Runner、Web、CI Hook 和 production Caddy/Compose 配置检查；记录命令和结果，并修复本变更引入的失败。
-- [ ] 5.4 在用户已明确授权的 production 主机完成一次受控 CI Hook 发布验证，保留 Caddy 备份、健康门槛与自动回滚；验证不暴露 ACR 拉取凭据、签名/重放保护、Runner 独立 status/health、管理员确认回滚与审计闭环，并将结果记录为上线证据。
+- [x] 5.4 在用户已明确授权的 production 主机完成一次受控 CI Hook 发布验证，保留 Caddy 备份、健康门槛与自动回滚；验证不暴露 ACR 拉取凭据、签名/重放保护、Runner 独立 status/health、管理员确认回滚与审计闭环，并将结果记录为上线证据。
