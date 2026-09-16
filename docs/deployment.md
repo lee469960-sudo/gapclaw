@@ -125,7 +125,7 @@ git tag v1.2.3
 git push origin v1.2.3
 ```
 
-随后在 GitHub Actions 中确认 `Release` 的 Hook 步骤收到 202；在 Release Management 中确认同一 delivery 的 `received` 审计及后续 Runner 回传。若 GAP 到 Runner 的请求中断，保留 `dispatch_failed`/`reconciliation_required` 记录并执行对账；不要重放 delivery、手工改 Hook URL 或传递新镜像。
+随后在 GitHub Actions 中确认 `Release` 的 Hook 步骤收到 202；在 Release Management 中确认同一 delivery 的 `received` 审计及后续 Runner 回传。Runner 会先校验并持久化清单，在发出 `202 accepted` 后独立执行 Compose，避免正在处理 Hook 的 API 自更新时切断原请求。`accepted` 仅表示接收，CI Hook 成功不代表部署已成功；仍须检查同一 release 的 Runner `succeeded`、API/Compose 健康和终态审计。Runner 重启后的未终态接收记录显示 `reconciliation_required`，不会自动重跑。若 GAP 到 Runner 的请求中断，保留 `dispatch_failed`/`reconciliation_required` 记录并执行对账；不要重放 delivery、手工改 Hook URL 或传递新镜像。
 
 通过「发布管理」查看状态、健康、自动回滚和历史。只有管理员可见受确认回滚；必须选择 Runner 显示的已知健康目标并输入 `ROLLBACK`。界面不能接受 tag、镜像或 digest。
 

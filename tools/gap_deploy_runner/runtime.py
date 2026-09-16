@@ -7,7 +7,8 @@ import logging
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Mapping
+import threading
+from typing import Any, Callable, Mapping
 from urllib.request import urlopen
 
 from tools.gap_deploy_runner.config import RunnerConfig, RunnerConfigError, _read_env
@@ -114,6 +115,8 @@ class DeployRunnerRuntime:
         except (RunnerInstallationError, RunnerConfigError, ValueError) as exc:
             raise RunnerRuntimeError(getattr(exc, "reason", "runner_runtime_config_invalid")) from exc
         self.store = ReleaseStateStore(root / "state" / "release-state.json", target_id=self.config.target_id)
+        self._operation_lock = threading.Lock()
+        self.store.load()  # Reconcile an interrupted operation once, at startup.
         callbacks = ResultCallbackDispatcher(
             self.store,
             HttpsCallbackTransport(GapCallbackTls(*self.installation.tls_files, target_id=self.config.target_id)),
@@ -134,15 +137,17 @@ class DeployRunnerRuntime:
         except ValueError as exc:
             raise RunnerCommandError("runner_operation_not_allowed") from exc
         if action is RunnerOperation.DEPLOY:
-            return self._deploy(manifest_payload)
+            with self._operation_lock:
+                return self._deploy(manifest_payload)
         if action is RunnerOperation.STATUS:
             return {"status": "ok", "release": self._release_state()}
         if action is RunnerOperation.HEALTH:
             state = self._release_state()
             return {"status": "ok" if state["phase"] == "succeeded" else "unavailable", "release": state}
-        return self._rollback()
+        with self._operation_lock:
+            return self._rollback()
 
-    def _deploy(self, payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    def _validated_manifest(self, payload: Mapping[str, Any] | None) -> ReleaseManifest:
         if payload is None:
             raise RunnerCommandError("runner_manifest_required")
         try:
@@ -151,6 +156,48 @@ class DeployRunnerRuntime:
             raise RunnerCommandError(exc.reason) from exc
         if manifest.target_id != self.config.target_id:
             raise RunnerCommandError("runner_target_not_allowed")
+        return manifest
+
+    def prepare_deploy(
+        self, payload: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, Any], Callable[[], None] | None]:
+        manifest = self._validated_manifest(payload)
+        self._operation_lock.acquire()
+        try:
+            with self.store.locked():
+                current = self.store.load().get("current")
+                if isinstance(current, dict) and current.get("release_id") == manifest.release_id:
+                    if current != manifest.to_dict():
+                        raise RunnerCommandError("runner_release_conflict")
+                    duplicate = {"status": "duplicate", "release": self._release_state()}
+                    self._operation_lock.release()
+                    return duplicate, None
+                self.store.record_received(manifest)
+            accepted = {"status": "accepted", "release": self._release_state()}
+        except Exception:
+            self._operation_lock.release()
+            raise
+
+        def execute() -> None:
+            try:
+                self.deployment.deploy(manifest)
+            except Exception:
+                logger.warning("GAP asynchronous deployment requires reconciliation")
+                with self.store.locked():
+                    state = self.store.load()
+                    if state["phase"] == "received":
+                        self.store.record_terminal(manifest, phase="reconciliation_required")
+                        self.deployment._complete(
+                            manifest, {"phase": "reconciliation_required"},
+                            health_result="failed", failure_summary="runner_deployment_interrupted",
+                        )
+            finally:
+                self._operation_lock.release()
+
+        return accepted, execute
+
+    def _deploy(self, payload: Mapping[str, Any] | None) -> dict[str, Any]:
+        manifest = self._validated_manifest(payload)
         try:
             return self.deployment.deploy(manifest)
         except RunnerRuntimeError as exc:

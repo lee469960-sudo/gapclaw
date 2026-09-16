@@ -65,6 +65,8 @@ GitHub CI calls `POST /internal/release-hook` through Caddy. GAP verifies the ex
 
 The Hook and Runner protocol use fixed envelopes only. GAP records accepted delivery ids before deploy so retries cannot produce a second deployment; signature, timestamp, source event, target or manifest validation failure has no state transition. The HMAC secret is not exposed through API/UI/audit/logs; it is a GitHub CI secret and host-provisioned GAP secret, not an ACR credential.
 
+For self-updates, the Runner validates and durably records the manifest before returning HTTP 202 with `status=accepted`. Its network handler flushes this acknowledgement before starting the independent host deployment worker; it does not synchronously wait for Compose to recreate the API serving the Hook. Acceptance is not success: only the existing health gate and terminal callback may produce `succeeded`. Target mutation remains serialized with rollback/deploy, duplicate release manifests do not execute twice, and an accepted but interrupted operation is surfaced as `reconciliation_required` after Runner restart without automatic replay. The local CLI remains synchronous for emergency operations.
+
 ### 5. Implement Release Agent as a deterministic management surface
 
 The API adds release manifest/audit persistence, a Runner client, reconciliation logic, and an internal Release Agent registration. The Web UI has a release status/history surface; all authenticated users with current management access can read redacted status, while rollback controls are rendered and accepted only for administrators.

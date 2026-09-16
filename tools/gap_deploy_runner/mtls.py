@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import ssl
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import threading
 
 from tools.gap_deploy_runner.runner import DeployRunner, RunnerCommandError
 from tools.gap_deploy_runner.state import ReleaseStateStore
@@ -46,6 +47,23 @@ class RunnerHttpApi:
         self.callbacks = callbacks
         self.state_store = state_store
         self.expected_client_common_name = expected_client_common_name
+
+    def prepare_deploy(
+        self, payload: dict[str, Any] | None, *, client_common_name: str,
+    ) -> tuple[int, dict[str, Any], Callable[[], None] | None]:
+        if client_common_name != self.expected_client_common_name:
+            return 403, {"reason": "runner_client_identity_not_allowed"}, None
+        prepare = getattr(self.runner, "prepare_deploy", None)
+        if prepare is None:
+            status, body = self.handle(
+                "POST", "/v1/deploy", manifest_payload=payload, client_common_name=client_common_name,
+            )
+            return status, body, None
+        try:
+            body, execute = prepare(payload)
+            return 202, body, execute
+        except RunnerCommandError as exc:
+            return 409, {"reason": exc.reason}, None
 
     def handle(
         self,
@@ -89,6 +107,16 @@ def create_server(address: tuple[str, int], api: RunnerHttpApi, mtls: MtlsFiles)
             payload, error = self._json_body()
             if error is not None:
                 self._reply(400, {"reason": error})
+                return
+            if self.path == "/v1/deploy":
+                status, body, execute = api.prepare_deploy(payload, client_common_name=self._client_common_name())
+                try:
+                    self._reply(status, body)
+                    self.wfile.flush()
+                finally:
+                    # The durable intent must execute even if the client disconnects.
+                    if execute is not None:
+                        threading.Thread(target=execute, name="gap-deploy").start()
                 return
             self._reply(*api.handle("POST", self.path, manifest_payload=payload, client_common_name=self._client_common_name()))
 

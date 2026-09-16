@@ -27,6 +27,7 @@ class ReleaseStateStore:
     def __init__(self, path: Path, *, target_id: str):
         self.path = path
         self.target_id = target_id
+        self._recover_on_load = True
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -36,6 +37,8 @@ class ReleaseStateStore:
             yield
 
     def load(self) -> dict[str, object]:
+        recover = self._recover_on_load
+        self._recover_on_load = False
         if not self.path.exists():
             return self._empty()
         try:
@@ -47,7 +50,7 @@ class ReleaseStateStore:
         if not isinstance(state.get("pending_callbacks", []), list):
             return {**self._empty(), "phase": "reconciliation_required"}
         state.setdefault("pending_callbacks", [])
-        if state.get("phase") in _ACTIVE_PHASES:
+        if recover and state.get("phase") in _ACTIVE_PHASES:
             state["phase"] = "reconciliation_required"
             self._write(state)
         return state

@@ -90,6 +90,12 @@ Deploy Runner 与 GAP 发布管理控制面 SHALL 通过双向 mTLS 通信。GAP
 - **THEN** 请求仅经 `gap-runner.internal:9443` 的 mTLS 私有路径到达 Runner
 - **AND** 公网 `runner.gapclaw.online` 不代理或暴露这些控制路径
 
+#### Scenario: 自更新先确认接收再部署
+- **WHEN** 固定 GAP 身份提交的完整 manifest 通过 Runner 校验
+- **THEN** Runner 持久化非终态接收记录并返回 `202 accepted` 后独立执行部署
+- **AND** API 容器重建不要求原 Hook 连接一直存活，接收响应不得被视为部署成功
+- **AND** 仅健康门禁通过后的终态回调可记录成功；Runner 重启后的中断接收记录需要对账而不自动重跑
+
 ### Requirement: 主机 Caddy 按显式域名隔离 Compose 栈与 Runner mTLS 回调
 系统 SHALL 以宿主机已安装的 Caddy 作为唯一公网 HTTP(S) 入口并独占 80/443。`gapclaw.online` SHALL 路由 GAP Web 及固定 API/WebSocket 路径；GAP API/Web MUST 仅绑定 host loopback，由 Caddy 访问。`runner.gapclaw.online` SHALL 仅暴露固定的 Runner 回调路径，并在转发前要求由受信任私有 CA 签发的客户端证书。后续 Compose 栈 MAY 使用独立的显式 Caddy site 和 loopback upstream，但 MUST 不得取得默认 catch-all、80/443 端口绑定或任意 GAP API 容器网络访问权。production Caddyfile MUST NOT 复用 staging 的域名、CA、证书或 site 配置，且不得启动或加载 Nginx。
 

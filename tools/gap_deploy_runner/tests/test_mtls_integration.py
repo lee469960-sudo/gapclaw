@@ -4,12 +4,18 @@ import socket
 import ssl
 import subprocess
 import threading
+import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from tools.gap_deploy_runner.mtls import MtlsFiles, RunnerHttpApi, create_server
 from tools.gap_deploy_runner.runner import DeployRunner
+from tools.gap_deploy_runner.runtime import DeployRunnerRuntime
+from tools.gap_deploy_runner.deployment import HealthGatedDeployment
+from tools.gap_deploy_runner.state import ReleaseStateStore
+from tools.gap_deploy_runner.tests.test_release_state import _manifest
 
 
 def _openssl(*args: str) -> None:
@@ -108,7 +114,79 @@ def _request(context: ssl.SSLContext, address: tuple[str, int], request: bytes |
     with socket.create_connection(address, timeout=2) as connection:
         with context.wrap_socket(connection, server_hostname="runner") as tls_connection:
             tls_connection.sendall(request or b"GET /v1/status HTTP/1.1\r\nHost: runner\r\nConnection: close\r\n\r\n")
-            return tls_connection.recv(4096)
+            chunks = []
+            while chunk := tls_connection.recv(4096):
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+
+def test_deploy_ack_precedes_api_restart(tmp_path):
+    ca_cert, server_cert, server_key, client_cert, client_key = _certificate_files(tmp_path)
+    started, allow_restart, completed = (threading.Event() for _ in range(3))
+    callbacks = []
+
+    class Compose:
+        def apply(self, manifest):
+            started.set()
+            assert allow_restart.wait(5)
+
+        def services_healthy(self):
+            return True
+
+    class Callbacks:
+        def publish(self, manifest, **result):
+            callbacks.append(result)
+            completed.set()
+            return {"sent": 1, "failed": 0, "pending": 0}
+
+    runtime = DeployRunnerRuntime.__new__(DeployRunnerRuntime)
+    runtime.config = SimpleNamespace(
+        target_id="production",
+        allowed_images={"api": "registry.example.com/gap-api", "web": "registry.example.com/gap-web"},
+    )
+    runtime.store = ReleaseStateStore(tmp_path / "state.json", target_id="production")
+    runtime.store.record_success(_manifest(0))
+    runtime._operation_lock = threading.Lock()
+    runtime.deployment = HealthGatedDeployment(
+        runtime.store, Compose(), SimpleNamespace(ready=lambda: True),
+        allowed_images=runtime.config.allowed_images, callbacks=Callbacks(),
+    )
+    server = create_server(
+        ("127.0.0.1", 0), RunnerHttpApi(runtime, state_store=runtime.store),
+        MtlsFiles(ca_file=ca_cert, cert_file=server_cert, key_file=server_key),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    payload = json.dumps(_manifest(1).to_dict()).encode()
+    request = (
+        b"POST /v1/deploy HTTP/1.1\r\nHost: runner\r\nContent-Type: application/json\r\nContent-Length: "
+        + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload
+    )
+    try:
+        trusted = ssl.create_default_context(cafile=str(ca_cert))
+        trusted.load_cert_chain(certfile=str(client_cert), keyfile=str(client_key))
+        response = _request(trusted, server.server_address, request)
+        assert b"202 Accepted" in response
+        body = json.loads(response.split(b"\r\n\r\n", 1)[1])
+        assert body["status"] == "accepted"
+        assert started.wait(2)
+        state = runtime.store.load()
+        assert state["phase"] == "received"
+        assert state["last_known_healthy"]["release_id"] == _manifest(0).release_id
+        assert callbacks == []
+        status = json.loads(_request(trusted, server.server_address).split(b"\r\n\r\n", 1)[1])
+        assert status["release"]["phase"] == "received"
+        assert callbacks == []
+        allow_restart.set()
+        assert completed.wait(2)
+        assert runtime.store.load()["phase"] == "succeeded"
+        assert callbacks[0]["status"] == "succeeded"
+        assert callbacks[0]["health_result"] == "ok"
+    finally:
+        allow_restart.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_mtls_server_accepts_trusted_client_and_rejects_client_without_certificate(tmp_path):

@@ -67,3 +67,16 @@ def test_status_returns_only_persisted_known_healthy_rollback_target(tmp_path):
 
     assert status == 200
     assert payload["last_known_healthy"] == {"release_id": "v1.2.1-01234567", "target_id": "production"}
+
+
+def test_async_deploy_rejects_wrong_identity_before_preparing():
+    class Runner:
+        def prepare_deploy(self, payload):
+            raise AssertionError("untrusted requests must not reach preparation")
+
+    status, body, execute = RunnerHttpApi(Runner()).prepare_deploy(
+        _manifest(1).to_dict(), client_common_name="other-client",
+    )
+    assert status == 403
+    assert body["reason"] == "runner_client_identity_not_allowed"
+    assert execute is None
