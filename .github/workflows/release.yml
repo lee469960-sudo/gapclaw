@@ -200,7 +200,7 @@ jobs:
           with open(".release/release-hook.json", "wb") as output:
               output.write(canonical)
           with open(".release/release-hook.signature", "w", encoding="utf-8") as output:
-              output.write(f"sha256={signature}\\n")
+              output.write(f"sha256={signature}")
           PY
           http_code="$(
             curl --silent --show-error --max-time 20 --retry 2 --retry-all-errors \
