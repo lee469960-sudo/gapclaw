@@ -329,7 +329,7 @@ def _fake_ctx(**overrides):
         save_dir="",
         im_source="",
         note_content="",
-        message_meta={},
+        message_meta={"execution_mode": "task"},
     )
     base.update(overrides)
     return SimpleNamespace(**base)

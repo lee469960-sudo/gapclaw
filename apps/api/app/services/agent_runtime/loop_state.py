@@ -38,6 +38,10 @@ class AgentLoopState:
     model_route_decision_id: str = ""  # Persisted task-level route decision
     frozen_llm_id: str = ""  # Single leaf model reused throughout this task
     model_route_events: list[dict] = field(default_factory=list)  # Redacted decision/fallback audit records
+    execution_mode: str = "task"
+    llm_turn_count: int = 0
+    retry_count: int = 0
+    human_loop_reason: str = ""
 
     def add_progress(self, line: str) -> None:
         """Append a progress line, avoiding dupes and capping length."""

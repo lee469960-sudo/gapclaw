@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -47,6 +48,22 @@ _EXECUTION_DETAIL_LIMIT = 12_000
 _BATCH_FILE_WRITE_ACTIONS = frozenset({"file_write", "file_search_replace"})
 
 logger = logging.getLogger(__name__)
+
+
+def _set_runtime_metrics(ctx, *, route_mode: str, llm_turn_count: int, retry_count: int,
+                         stop_reason: str = "", human_loop_reason: str = "") -> dict:
+    """Store a redacted terminal metric payload for persistence and websocket use."""
+    metrics = {
+        "route_mode": str(route_mode or "")[:32],
+        "llm_turn_count": max(0, int(llm_turn_count or 0)),
+        "retry_count": max(0, int(retry_count or 0)),
+        "stop_reason": str(stop_reason or "")[:80],
+        "human_loop_reason": str(human_loop_reason or "")[:120],
+    }
+    metadata = getattr(ctx, "message_meta", None)
+    if isinstance(metadata, dict):
+        metadata["runtime_metrics"] = metrics
+    return metrics
 
 # The loop ends only on a strictly-formatted FINAL line (or cancel / LLM error /
 # max_iters budget). There are no static "stall" thresholds that force-stop the run;
@@ -91,6 +108,27 @@ def _looks_like_completion_declaration(text: str) -> bool:
     matches plus a dedicated LLM confirmation, and the Verifier stays in the loop.
     """
     return bool(_COMPLETION_DECL_RE.search(text)) and not bool(_COMPLETION_NEG_RE.search(text))
+
+
+def _canonical_reply_fingerprint(text: str) -> str:
+    """Stable digest for comparing consecutive model replies."""
+    normalized = re.sub(r"\s+", " ", str(text or "").strip()).lower()
+    return hashlib.sha256(normalized.encode("utf-8", "ignore")).hexdigest()
+
+
+def _runtime_state_fingerprint(state) -> str:
+    """Digest only progress-bearing state (excluding the current reply)."""
+    payload = {
+        "saved_paths": list(getattr(state, "saved_paths", []) or []),
+        "files_written": int(getattr(state, "files_written", 0) or 0),
+        "progress_lines": list(getattr(state, "progress_lines", []) or []),
+        "subtasks": list(getattr(state, "subtasks", []) or []),
+        "mcp_results": list(getattr(state, "mcp_results", []) or []),
+        "query_cache": getattr(state, "query_cache", {}) or {},
+        "plan_text": str(getattr(state, "plan_text", "") or ""),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8", "ignore")).hexdigest()
 
 
 _BOILERPLATE_FIX_RE = re.compile(
@@ -342,6 +380,7 @@ class AgentRuntime:
     async def run(self, ctx: AgentContext) -> str:
         """Execute the LLM-driven ReAct loop for a given invocation context."""
         from app.services.agent_runtime.hub import _running
+        from app.services.agent_runtime.execution_policy import ExecutionMode, classify_request, requires_human_wait
 
         key = ctx.chat_key
         if _running.get(key):
@@ -355,6 +394,28 @@ class AgentRuntime:
 
         terminal_status = "completed"
         try:
+            explicit_mode = ""
+            if isinstance(getattr(ctx, "message_meta", None), dict):
+                explicit_mode = str(ctx.message_meta.get("execution_mode") or "")
+            execution_mode = classify_request(ctx.user_message, explicit_mode=explicit_mode)
+            if requires_human_wait(ctx.user_message, getattr(ctx, "message_meta", None)):
+                execution_mode = ExecutionMode.HUMAN_WAIT
+            if execution_mode is ExecutionMode.HUMAN_WAIT:
+                result = "当前请求需要人工确认，自动推理已暂停。"
+                metrics = _set_runtime_metrics(
+                    ctx, route_mode=execution_mode.value, llm_turn_count=0,
+                    retry_count=0, stop_reason="human_wait",
+                    human_loop_reason="需要人工确认",
+                )
+                self._save_assistant_message(ctx, result, steps=[{
+                    "type": "info",
+                    "action": "human_wait",
+                    "title": "等待人工确认",
+                    "status": "done",
+                    "content": "自动 LLM 循环已暂停",
+                }])
+                await self._publish_modular_done(ctx, result, files_written=0, saved_paths=[], metrics=metrics)
+                return result
             if self._is_conversational(ctx):
                 logger.info(
                     "agent_run conversational agent=%s session=%s msg_len=%d",
@@ -381,6 +442,7 @@ class AgentRuntime:
             )
             await self._publish_modular_done(
                 ctx, result, files_written=files_written, saved_paths=saved_paths,
+                metrics=(getattr(ctx, "message_meta", None) or {}).get("runtime_metrics"),
             )
             return result
         except Exception:
@@ -657,6 +719,9 @@ class AgentRuntime:
             "step_count": max(len(visible), 1),
             "saved_paths": list(saved_paths or [])[:20],
         }
+        runtime_metrics = (ctx.message_meta or {}).get("runtime_metrics") if isinstance(ctx.message_meta, dict) else None
+        if isinstance(runtime_metrics, dict):
+            meta["runtime_metrics"] = dict(runtime_metrics)
         if context_available_percent is not None:
             meta["context_available_percent"] = context_available_percent
         user_meta = dict(ctx.message_meta or {})
@@ -697,10 +762,31 @@ class AgentRuntime:
 
     @staticmethod
     def _is_conversational(ctx: AgentContext) -> bool:
-        """True only for a tool-free chat: no bound resource AND no tool action."""
-        if ctx.mcp_ids or ctx.rag_ids or ctx.skill_ids or ctx.httpmcp_ids:
+        """Whether this request can use the no-tool, single-turn chat path.
+
+        Resource bindings describe what an agent *can* do, not what every
+        request *must* do.  Route ordinary messages to chat even when MCPs or
+        skills are bound; explicit operational intent still enters modular.
+        """
+        if getattr(ctx, "code_execution", None) is not None or getattr(ctx, "profile", "") == "code":
             return False
-        return not (set(ctx.allowed_actions) & AgentRuntime._TOOL_ACTIONS)
+        user_message = str(getattr(ctx, "user_message", "") or "").strip()
+        # A missing request is not ordinary chat. Preserve the conservative
+        # legacy route for synthetic/empty invocations that expose direct tools.
+        if not user_message and (set(getattr(ctx, "allowed_actions", [])) & AgentRuntime._TOOL_ACTIONS):
+            return False
+        from app.services.agent_runtime.execution_policy import classify_request, requires_human_wait
+
+        explicit_mode = ""
+        metadata = getattr(ctx, "message_meta", None)
+        if isinstance(metadata, dict):
+            explicit_mode = str(metadata.get("execution_mode") or "")
+        if requires_human_wait(user_message, metadata if isinstance(metadata, dict) else None):
+            return False
+        return classify_request(
+            user_message,
+            explicit_mode=explicit_mode,
+        ).value == "chat"
 
     @staticmethod
     def _llm_step_preview(reply: str) -> str:
@@ -793,17 +879,21 @@ class AgentRuntime:
         result: str,
         files_written: int = 0,
         saved_paths: list[str] | None = None,
+        metrics: dict | None = None,
     ) -> None:
         """Publish final result to WebSocket hub."""
         from app.services.agent_runtime.hub import hub
         key = ctx.chat_key
         try:
-            await hub.publish(key, {
+            event = {
                 "type": "done",
                 "content": (result or "")[:500],
                 "content_truncated": len(result or "") > 500,
                 "workplace_changed": files_written > 0 or bool(saved_paths),
-            })
+            }
+            if isinstance(metrics, dict):
+                event["runtime_metrics"] = dict(metrics)
+            await hub.publish(key, event)
         except Exception:
             pass
 
@@ -842,6 +932,7 @@ class AgentRuntime:
         from app.services.llm_client import chat_completion
         from app.services.tool_parser import clean_final_answer
         from app.models import ChatMessage
+        from app.services.agent_runtime.execution_policy import policy_for_context
 
         key = ctx.chat_key
         effective = ctx.user_message
@@ -866,49 +957,77 @@ class AgentRuntime:
             })
 
         final = ""
+        policy = policy_for_context(ctx)
+        max_calls = max(1, policy.chat_max_turns + policy.chat_max_retries)
+        attempts_used = 0
         try:
-            try:
-                if not ctx.llm:
-                    raise RuntimeError("未配置 LLM")
-                reply = await chat_completion(
-                    ctx.llm, messages,
-                    max_tokens=1024,
-                    db=ctx.db,
-                    timeout=getattr(ctx.agent, 'llm_timeout', None) or 60,
-                )
-                final = clean_final_answer(reply or "")
-                if not final.strip():
-                    raise RuntimeError("empty conversational reply")
-            except Exception:
-                logger.exception("Conversational LLM failed, using light fallback")
-                final = SystemPromptBuilder.build_light_agent_reply(
-                    ctx.agent, ctx.user_message,
-                )
+            if not ctx.llm:
+                raise RuntimeError("未配置 LLM")
+            last_error: Exception | None = None
+            for attempt in range(max_calls):
+                attempts_used = attempt + 1
+                try:
+                    request_messages = messages
+                    if attempt:
+                        request_messages = [*messages, {
+                            "role": "system",
+                            "content": "上一轮普通对话未能返回有效文本。请直接、简洁地回答用户问题，不要输出工具协议行。",
+                        }]
+                    reply = await chat_completion(
+                        ctx.llm, request_messages,
+                        max_tokens=1024,
+                        db=ctx.db,
+                        timeout=getattr(ctx.agent, 'llm_timeout', None) or 60,
+                    )
+                    final = clean_final_answer(reply or "")
+                    if final.strip():
+                        break
+                    last_error = RuntimeError("empty conversational reply")
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Conversational LLM attempt failed agent=%s attempt=%d/%d",
+                        ctx.agent.id, attempt + 1, max_calls, exc_info=True,
+                    )
+            if not final.strip() and last_error is not None:
+                raise last_error
+        except Exception:
+            logger.exception("Conversational LLM failed, using light fallback")
+            final = SystemPromptBuilder.build_light_agent_reply(
+                ctx.agent, ctx.user_message,
+            )
 
-            try:
-                await hub.publish(key, {
-                    "type": "step",
-                    "op": "append",
-                    "index": 0,
-                    "step": {
-                        "type": "info",
-                        "action": "conversational_reply",
-                        "title": "对话回复",
-                        "status": "done",
-                        "content": (final or "")[:500],
-                    },
-                })
-            except Exception:
-                pass
+        _set_runtime_metrics(
+            ctx, route_mode="chat", llm_turn_count=attempts_used,
+            retry_count=max(0, attempts_used - 1),
+            stop_reason="fallback" if not final.strip() else "completed",
+        )
 
-            try:
-                await hub.publish(key, {
-                    "type": "done",
+        try:
+            await hub.publish(key, {
+                "type": "step",
+                "op": "append",
+                "index": 0,
+                "step": {
+                    "type": "info",
+                    "action": "conversational_reply",
+                    "title": "对话回复",
+                    "status": "done",
                     "content": (final or "")[:500],
-                    "workplace_changed": False,
-                })
-            except Exception:
-                pass
+                },
+            })
+        except Exception:
+            pass
+
+        try:
+            await hub.publish(key, {
+                "type": "done",
+                "content": (final or "")[:500],
+                "workplace_changed": False,
+                "runtime_metrics": (ctx.message_meta or {}).get("runtime_metrics", {}),
+            })
+        except Exception:
+            pass
         finally:
             _running[key] = False
 
@@ -1088,6 +1207,7 @@ class AgentRuntime:
             route_mcp_candidates,
         )
         from app.services.tool_parser import extract_tool_steps, _strip_reasoning_blocks
+        from app.services.agent_runtime.execution_policy import policy_for_context
 
         state = AgentLoopState()
         state.model_route_decision_id = getattr(ctx, "model_route_decision_id", "")
@@ -1111,6 +1231,14 @@ class AgentRuntime:
 
         def _ret(final: str) -> tuple[str, list[dict], list[str], int, int]:
             _capture_deliverable_paths(ctx, state, pre_existing_deliverables)
+            _set_runtime_metrics(
+                ctx,
+                route_mode=state.execution_mode,
+                llm_turn_count=state.llm_turn_count,
+                retry_count=state.retry_count,
+                stop_reason=state.terminal_reason or ("completed" if state.final else "stopped"),
+                human_loop_reason=state.human_loop_reason,
+            )
             return final, list(state.run_steps), list(state.saved_paths), state.files_written, _context_available_percent(ctx, cm)
 
         def _apply_no_progress_hint(made_progress: bool, round_no: int) -> None:
@@ -1157,7 +1285,20 @@ class AgentRuntime:
             raise RuntimeError("未配置 LLM")
 
         llm_timeout = getattr(ctx.agent, 'llm_timeout', None) or 120
-        max_iters = max(1, int(getattr(ctx.agent, 'max_iterations', None) or 50))
+        execution_policy = policy_for_context(ctx)
+        from app.services.agent_runtime.execution_policy import ExecutionMode, classify_request
+        requested_mode = ""
+        if isinstance(getattr(ctx, "message_meta", None), dict):
+            requested_mode = str(ctx.message_meta.get("execution_mode") or "")
+        loop_mode = classify_request(ctx.user_message, explicit_mode=requested_mode)
+        if loop_mode not in {ExecutionMode.TASK, ExecutionMode.TOOL}:
+            loop_mode = ExecutionMode.TASK
+        state.execution_mode = loop_mode.value
+        max_iters = max(1, min(
+            int(getattr(ctx.agent, 'max_iterations', None) or 50),
+            execution_policy.max_turns(loop_mode),
+        ))
+        no_progress_limit = execution_policy.no_progress_limit
         soft_circuit = max(1, int(getattr(ctx.agent, 'mcp_soft_circuit', None) or 5))
         tool_result_clip = max(1, int(getattr(ctx.agent, 'tool_result_clip', None) or 6000))
 
@@ -1378,6 +1519,9 @@ class AgentRuntime:
         tool_materialize_seq = 0  # READ/SHELL oversized-result dump sequence (R2)
         route_fallbacks = list(getattr(ctx, "model_route_fallbacks", []) or [])
         route_fallback_used = False
+        previous_reply_fingerprint = ""
+        previous_state_fingerprint = _runtime_state_fingerprint(state)
+        duplicate_no_progress_streak = 0
 
         async with McpSessionManager(
             query_cache=state.query_cache,
@@ -1393,6 +1537,7 @@ class AgentRuntime:
                     return _ret(state.final or "任务已取消")
 
                 round_no = iteration + 1
+                state.llm_turn_count = round_no
                 tool_executor = getattr(ctx, "tool_executor", None)
                 if tool_executor is not None and hasattr(tool_executor, "record_iteration"):
                     tool_executor.record_iteration(round_no)
@@ -1423,6 +1568,7 @@ class AgentRuntime:
                         collect_native=True,
                     )
                 except Exception as exc:
+                    state.retry_count += 1
                     if isinstance(exc, ChatStopped) or not _running.get(ctx.chat_key, False):
                         await self._patch_last_step(ctx, state, status="error", content="已停止")
                         _clear_run_state(ctx)
@@ -1541,6 +1687,7 @@ class AgentRuntime:
                     reply = result.text or ""
                     tool_steps = extract_tool_steps(reply)
 
+                previous_reply = state.last_reply
                 state.last_reply = reply
                 preview = (
                     self._native_tool_step_preview(tool_steps)
@@ -1557,6 +1704,49 @@ class AgentRuntime:
                     cm.push_assistant_native(result.content or "", result.tool_calls)
                 elif reply.strip():
                     cm.push_assistant_reply(_history_reply(reply))
+
+                # Stop only when the model repeats itself and the progress
+                # snapshot is unchanged. This protects task/tool runs without
+                # treating two different useful text updates as a stall.
+                current_reply_fingerprint = _canonical_reply_fingerprint(reply)
+                current_state_fingerprint = _runtime_state_fingerprint(state)
+                repeated_reply = bool(previous_reply_fingerprint) and (
+                    current_reply_fingerprint == previous_reply_fingerprint
+                    or _is_duplicate_reply(previous_reply, reply)
+                )
+                unchanged_state = current_state_fingerprint == previous_state_fingerprint
+                # Positive completion declarations are handled by the existing
+                # soft-conversion/Verifier path below; do not preempt that path
+                # with duplicate detection.
+                completion_declaration = _looks_like_completion_declaration(reply)
+                if repeated_reply and unchanged_state and not tool_steps and not completion_declaration:
+                    duplicate_no_progress_streak += 1
+                else:
+                    duplicate_no_progress_streak = 0
+                previous_reply_fingerprint = current_reply_fingerprint
+                previous_state_fingerprint = current_state_fingerprint
+                # The first repeated transition already represents the second
+                # unchanged round, so a limit of 2 stops on that second round.
+                duplicate_stop_at = max(1, no_progress_limit - 1)
+                if duplicate_no_progress_streak >= duplicate_stop_at:
+                    state.terminal_reason = "duplicate_output_stop"
+                    state.final = _forced_stop_reply(
+                        state,
+                        "连续输出重复且没有新的工具、文件或计划进展，已停止自动推理",
+                    )
+                    await self._append_step(ctx, state, {
+                        "type": "info",
+                        "action": "duplicate_output_stop",
+                        "iteration": round_no,
+                        "title": "检测到重复推理，已停止",
+                        "status": "done",
+                        "content": "连续输出重复且状态未变化",
+                    })
+                    if any((s.get("status") or "pending") != "done" for s in state.subtasks):
+                        _save_run_state(ctx, state)
+                    else:
+                        _clear_run_state(ctx)
+                    return _ret(state.final)
 
                 # v17 R3: length truncation after bounded continuations — never accept
                 # FINAL / completion-signal from a mid-sentence reply.

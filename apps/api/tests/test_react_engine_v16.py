@@ -171,7 +171,9 @@ def test_completion_signal_negative_not_triggered():
 
     result = asyncio.run(_run())
 
-    assert result == "（超时）"
+    # Negative completion text is not converted to FINAL; repeated no-progress
+    # output now terminates with the duplicate-stop result.
+    assert "重复" in result
     confirm.assert_not_awaited()
     reflect.assert_not_awaited()
 

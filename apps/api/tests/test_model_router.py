@@ -338,6 +338,7 @@ def _routed_loop_context(db):
     )
     ctx = AgentContext.from_params(
         db=db, agent=db.get(Agent, "agent"), session_id="session", user_message="do work",
+        message_meta={"execution_mode": "task"},
         llm=primary, allowed_actions=["shell"], model_route_decision_id="initial-decision",
         model_route_policy_id="policy", model_route_policy_version=2,
         model_route_fallbacks=[candidate],

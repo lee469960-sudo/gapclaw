@@ -508,6 +508,14 @@ function execSummary(message) {
   const errors = Array.isArray(meta.cte_attempt_errors) ? meta.cte_attempt_errors : []
   const artifactCount = Number(meta.attempt_artifact_count) || 0
   const latestArtifact = meta.latest_attempt_artifact || {}
+  const runtimeMetrics = meta.runtime_metrics || {}
+  if (runtimeMetrics.route_mode) {
+    const turns = Number(runtimeMetrics.llm_turn_count) || 0
+    const retries = Number(runtimeMetrics.retry_count) || 0
+    const stop = String(runtimeMetrics.stop_reason || '').trim()
+    lines.push(`执行模式: ${runtimeMetrics.route_mode} · LLM ${turns} 轮 · 重试 ${retries} 次`)
+    if (stop) lines.push(`终止原因: ${stop}`)
+  }
   if (meta.context_available_percent != null) {
     lines.push(`上下文可用: ${clampPercent(meta.context_available_percent)}%`)
   }

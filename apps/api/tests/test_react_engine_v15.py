@@ -122,11 +122,11 @@ def test_no_progress_injects_breakthrough_hint_and_does_not_stop():
 
     result = asyncio.run(_run())
 
-    assert result == "诚实总结：已完成 X，缺少 Y"
-    # 全程跑满预算（8 轮），未因无进展提前终止。
-    assert len(seen) == 8
-    # 连续无进展 → 注入「破局复盘」提示。
-    assert _hint_seen(seen, "【破局复盘】")
+    # New runtime contract: identical no-progress replies stop before the old
+    # max-iteration distillation fallback.
+    assert "重复" in result
+    # 连续两轮相同且状态未变化即停止，不再跑满旧预算或继续注入软提示。
+    assert len(seen) == 2
 
 
 def test_progress_resets_streak_and_does_not_inject():

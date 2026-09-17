@@ -21,6 +21,10 @@ from app.services.tool_parser import extract_tool_steps
 
 def _ctx(*, mcp=(), rag=(), skill=(), httpmcp=(), actions=()):
     return SimpleNamespace(
+        user_message="",
+        profile="standard",
+        code_execution=None,
+        message_meta={},
         mcp_ids=list(mcp),
         rag_ids=list(rag),
         skill_ids=list(skill),
@@ -49,11 +53,17 @@ def test_is_conversational_resource_action_only_still_conversational():
     ) is True
 
 
-def test_is_conversational_resource_binding_goes_modular():
-    assert AgentRuntime._is_conversational(_ctx(mcp=["m1"])) is False
-    assert AgentRuntime._is_conversational(_ctx(httpmcp=["h1"])) is False
-    assert AgentRuntime._is_conversational(_ctx(rag=["r1"])) is False
-    assert AgentRuntime._is_conversational(_ctx(skill=["s1"])) is False
+def test_is_conversational_resource_binding_does_not_force_modular():
+    assert AgentRuntime._is_conversational(_ctx(mcp=["m1"])) is True
+    assert AgentRuntime._is_conversational(_ctx(httpmcp=["h1"])) is True
+    assert AgentRuntime._is_conversational(_ctx(rag=["r1"])) is True
+    assert AgentRuntime._is_conversational(_ctx(skill=["s1"])) is True
+
+
+def test_is_conversational_explicit_operation_with_binding_goes_modular():
+    ctx = _ctx(mcp=["m1"])
+    ctx.user_message = "查询数据库中的订单"
+    assert AgentRuntime._is_conversational(ctx) is False
 
 
 # ---- R2: httpmcp_call (task 5.2) ----

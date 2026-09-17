@@ -333,7 +333,7 @@ def test_runtime_supplements_only_new_mcp_and_bounds_requests():
         llm=SimpleNamespace(id="llm1", provider="anthropic"), sandbox=None,
         mcp_ids=["m1", "m2"], skill_ids=[], skill_names=[], mcp_names=[], skill_mds=[],
         httpmcp_ids=[], rag_ids=[], allowed_actions=["mcp_tool_call"], save_dir="", im_source="",
-        note_content="", message_meta={},
+        note_content="", message_meta={"execution_mode": "task"},
     )
     candidates = _candidates()
     builds = []
@@ -374,7 +374,7 @@ def test_runtime_blocks_a_third_supplement_request():
         llm=SimpleNamespace(id="llm1", provider="anthropic"), sandbox=None,
         mcp_ids=["m1", "m2"], skill_ids=[], skill_names=[], mcp_names=[], skill_mds=[],
         httpmcp_ids=[], rag_ids=[], allowed_actions=["mcp_tool_call"], save_dir="", im_source="",
-        note_content="", message_meta={},
+        note_content="", message_meta={"execution_mode": "task"},
     )
     replies = iter(["MCP_ROUTE: first", "MCP_ROUTE: second", "MCP_ROUTE: third", "FINAL: done"])
     route = AsyncMock(side_effect=[

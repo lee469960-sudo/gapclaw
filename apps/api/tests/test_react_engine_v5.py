@@ -57,7 +57,7 @@ def _fake_ctx(db, *, max_iterations=10, allowed_actions=("shell",), memory=""):
         save_dir="",
         im_source="",
         note_content="",
-        message_meta={},
+        message_meta={"execution_mode": "task"},
     )
 
 
@@ -91,7 +91,7 @@ def test_budget_exhaustion_persists_latest_state():
 
     result = _run(ctx, _chat)
 
-    assert "已尽力完成部分" in result
+    assert "重复" in result
     # The budget-exhaustion branch re-saved the checkpoint with the latest reply.
     loaded = _load_run_state(ctx)
     assert loaded is not None
