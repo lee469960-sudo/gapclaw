@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.services.agent_runtime.runtime import AgentRuntime
+from app.services.agent_runtime.runtime import AgentRuntime, _bound_mcp_capability_hints
 from app.services.llm_client import ChatResult
 
 
@@ -26,6 +26,32 @@ class _DB:
 
     def query(self, _model):
         return _Query()
+
+
+class _MCPQuery(_Query):
+    def __init__(self, mcp):
+        self.mcp = mcp
+
+    def first(self):
+        return self.mcp
+
+
+class _MetadataDB(_DB):
+    def __init__(self, mcp):
+        self.mcp = mcp
+
+    def query(self, _model):
+        return _MCPQuery(self.mcp)
+
+
+def test_bound_mcp_metadata_snapshot_does_not_connect_or_list_tools():
+    ctx = SimpleNamespace(
+        db=_MetadataDB(SimpleNamespace(id="mcp1", name="okx-trader", tags="持仓", description="账户查询")),
+        mcp_ids=["mcp1"],
+    )
+    assert _bound_mcp_capability_hints(ctx) == [{
+        "id": "mcp1", "name": "okx-trader", "tags": "持仓", "description": "账户查询",
+    }]
 
 
 def test_bound_mcp_ordinary_message_uses_one_turn_chat_path():
@@ -144,3 +170,27 @@ def test_human_wait_does_not_call_llm():
         return result
 
     assert "人工确认" in asyncio.run(run())
+
+
+def test_unbound_named_mcp_stops_before_llm_and_records_reason():
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(id="a1", llm_timeout=30, name="test"),
+        session_id="s5", chat_key="a1:s5", user_message="使用 okx-trader 查询当前持仓", db=_DB(),
+        llm=SimpleNamespace(id="llm1"), mcp_ids=[], skill_ids=[], rag_ids=[], httpmcp_ids=[],
+        allowed_actions=[], profile="standard", code_execution=None, message_meta={}, note_content="",
+    )
+
+    async def run():
+        events = []
+        with patch("app.services.llm_client.chat_completion", new=AsyncMock()) as completion, patch(
+            "app.services.agent_runtime.hub.hub"
+        ) as hub:
+            hub.publish = AsyncMock(side_effect=lambda _key, event: events.append(event))
+            result = await AgentRuntime().run(ctx)
+        completion.assert_not_awaited()
+        done = [event for event in events if event.get("type") == "done"]
+        assert done[-1]["runtime_metrics"]["route_mode"] == "task"
+        assert done[-1]["runtime_metrics"]["stop_reason"] == "mcp_not_bound"
+        return result
+
+    assert "未绑定" in asyncio.run(run())

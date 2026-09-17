@@ -89,8 +89,79 @@ _HUMAN_CONFIRM_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RESOURCE_AFTER_VERB_RE = re.compile(
+    r"(?:使用|调用|通过|use|call|via)\s*[`\"']?([A-Za-z][A-Za-z0-9._-]{2,})",
+    re.IGNORECASE,
+)
+_RESOURCE_SUFFIX_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\b",
+    re.IGNORECASE,
+)
+_RESOURCE_SUFFIXES = ("mcp", "trader", "hub", "docs", "api")
+_CAPABILITY_STOPWORDS = frozenset({
+    "当前", "现在", "信息", "情况", "内容", "数据", "查询", "查看", "看看", "帮我",
+    "请问", "一下", "这个", "那个", "the", "current", "please", "query", "show",
+})
+_CAPABILITY_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}")
+_CAPABILITY_OPERATION_RE = re.compile(
+    r"(?:帮我|请|想要|需要|看看|查看|查询|获取|列出|显示|检查|读取|使用|调用|通过|查一下|看一下|show|check|fetch|list|use|call)",
+    re.IGNORECASE,
+)
 
-def classify_request(user_message: str, *, explicit_mode: str | None = None) -> ExecutionMode:
+
+def extract_named_resource_mentions(user_message: str) -> list[str]:
+    """Extract explicit, tool-like resource names without a resource allowlist."""
+    text = str(user_message or "")
+    names: list[str] = []
+    for match in _RESOURCE_AFTER_VERB_RE.finditer(text):
+        value = match.group(1).strip("`\"'.,;:!?，。；：！？")
+        if value and value.lower() not in {item.lower() for item in names}:
+            names.append(value)
+    for match in _RESOURCE_SUFFIX_RE.finditer(text):
+        value = match.group(1)
+        if any(value.lower().endswith(suffix) for suffix in _RESOURCE_SUFFIXES):
+            if value.lower() not in {item.lower() for item in names}:
+                names.append(value)
+    return names
+
+
+def _capability_tokens(value: str) -> set[str]:
+    tokens: set[str] = set()
+    for token in _CAPABILITY_TOKEN_RE.findall(str(value or "")):
+        normalized = token.strip().lower()
+        if len(normalized) >= 2 and normalized not in _CAPABILITY_STOPWORDS:
+            tokens.add(normalized)
+    return tokens
+
+
+def _matches_bound_capability(user_message: str, capability_hints: list[dict[str, Any]] | None) -> bool:
+    if not _CAPABILITY_OPERATION_RE.search(str(user_message or "")):
+        return False
+    request_tokens = _capability_tokens(user_message)
+    if not request_tokens:
+        return False
+    for hint in capability_hints or []:
+        if not isinstance(hint, dict):
+            continue
+        name = str(hint.get("name") or "").strip()
+        if name and name.lower() in str(user_message or "").lower():
+            return True
+        capability_tokens = _capability_tokens(
+            " ".join(str(hint.get(key) or "") for key in ("name", "tags", "description"))
+        )
+        for request_token in request_tokens:
+            for capability_token in capability_tokens:
+                if request_token in capability_token or capability_token in request_token:
+                    return True
+    return False
+
+
+def classify_request(
+    user_message: str,
+    *,
+    explicit_mode: str | None = None,
+    capability_hints: list[dict[str, Any]] | None = None,
+) -> ExecutionMode:
     """Classify one user request without making an LLM call.
 
     Explicit mode metadata is honored first. Otherwise operational intent maps
@@ -107,6 +178,8 @@ def classify_request(user_message: str, *, explicit_mode: str | None = None) -> 
     if _OPERATION_RE.search(text):
         return ExecutionMode.TASK
     if _MULTI_STEP_RE.search(text):
+        return ExecutionMode.TASK
+    if extract_named_resource_mentions(text) or _matches_bound_capability(text, capability_hints):
         return ExecutionMode.TASK
     return ExecutionMode.CHAT
 

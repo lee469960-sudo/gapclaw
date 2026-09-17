@@ -2,6 +2,7 @@ from app.services.agent_runtime.execution_policy import (
     ExecutionMode,
     ExecutionPolicy,
     classify_request,
+    extract_named_resource_mentions,
 )
 
 
@@ -46,3 +47,18 @@ def test_high_risk_production_operation_waits_for_human():
 
 def test_explicit_mode_metadata_wins():
     assert classify_request("随便聊聊", explicit_mode="human_wait") is ExecutionMode.HUMAN_WAIT
+
+
+def test_bound_mcp_capability_promotes_implicit_query_to_task():
+    hints = [{
+        "name": "okx-trader",
+        "tags": "交易账户,持仓,余额,订单",
+        "description": "查询 OKX 当前账户持仓和余额",
+    }]
+    assert classify_request("帮我看看okx当前持仓", capability_hints=hints) is ExecutionMode.TASK
+    assert classify_request("解释一下什么是持仓", capability_hints=hints) is ExecutionMode.CHAT
+
+
+def test_explicit_resource_name_is_operational_without_hardcoded_mcp_name():
+    assert extract_named_resource_mentions("使用 okx-trader 查询当前持仓") == ["okx-trader"]
+    assert classify_request("okx-trader 当前持仓") is ExecutionMode.TASK

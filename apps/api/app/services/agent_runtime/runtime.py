@@ -65,6 +65,30 @@ def _set_runtime_metrics(ctx, *, route_mode: str, llm_turn_count: int, retry_cou
         metadata["runtime_metrics"] = metrics
     return metrics
 
+
+def _bound_mcp_capability_hints(ctx) -> list[dict[str, str]]:
+    """Read bound MCP metadata for mode routing without connecting to MCPs."""
+    if not getattr(ctx, "mcp_ids", None) or not hasattr(getattr(ctx, "db", None), "query"):
+        return []
+    try:
+        from app.models import MCP
+
+        hints: list[dict[str, str]] = []
+        for mcp_id in ctx.mcp_ids:
+            mcp = ctx.db.query(MCP).filter(MCP.id == str(mcp_id)).first()
+            if mcp is None:
+                continue
+            hints.append({
+                "id": str(mcp.id or mcp_id),
+                "name": str(mcp.name or mcp.id or mcp_id),
+                "tags": str(mcp.tags or ""),
+                "description": str(mcp.description or ""),
+            })
+        return hints
+    except Exception:
+        logger.debug("bound MCP capability hints unavailable", exc_info=True)
+        return []
+
 # The loop ends only on a strictly-formatted FINAL line (or cancel / LLM error /
 # max_iters budget). There are no static "stall" thresholds that force-stop the run;
 # convergence nudges are delivered as soft coach hints (see _run_modular).
@@ -380,7 +404,12 @@ class AgentRuntime:
     async def run(self, ctx: AgentContext) -> str:
         """Execute the LLM-driven ReAct loop for a given invocation context."""
         from app.services.agent_runtime.hub import _running
-        from app.services.agent_runtime.execution_policy import ExecutionMode, classify_request, requires_human_wait
+        from app.services.agent_runtime.execution_policy import (
+            ExecutionMode,
+            classify_request,
+            extract_named_resource_mentions,
+            requires_human_wait,
+        )
 
         key = ctx.chat_key
         if _running.get(key):
@@ -397,7 +426,40 @@ class AgentRuntime:
             explicit_mode = ""
             if isinstance(getattr(ctx, "message_meta", None), dict):
                 explicit_mode = str(ctx.message_meta.get("execution_mode") or "")
-            execution_mode = classify_request(ctx.user_message, explicit_mode=explicit_mode)
+            capability_hints = _bound_mcp_capability_hints(ctx)
+            named_resources = extract_named_resource_mentions(ctx.user_message)
+            bound_names = {
+                re.sub(r"[^a-z0-9]", "", str(hint.get("name") or "").lower())
+                for hint in capability_hints
+            }
+            unbound_resources = [
+                name for name in named_resources
+                if re.sub(r"[^a-z0-9]", "", name.lower()) not in bound_names
+            ]
+            if unbound_resources:
+                result = (
+                    "当前 Agent 未绑定请求中的 MCP/工具："
+                    + ", ".join(unbound_resources[:4])
+                    + "。请先绑定后再执行查询。"
+                )
+                metrics = _set_runtime_metrics(
+                    ctx, route_mode=ExecutionMode.TASK.value, llm_turn_count=0,
+                    retry_count=0, stop_reason="mcp_not_bound",
+                )
+                self._save_assistant_message(ctx, result, steps=[{
+                    "type": "error",
+                    "action": "mcp_not_bound",
+                    "title": "MCP 未绑定",
+                    "status": "error",
+                    "content": result,
+                }])
+                await self._publish_modular_done(ctx, result, files_written=0, saved_paths=[], metrics=metrics)
+                return result
+            execution_mode = classify_request(
+                ctx.user_message,
+                explicit_mode=explicit_mode,
+                capability_hints=capability_hints,
+            )
             if requires_human_wait(ctx.user_message, getattr(ctx, "message_meta", None)):
                 execution_mode = ExecutionMode.HUMAN_WAIT
             if execution_mode is ExecutionMode.HUMAN_WAIT:
@@ -416,7 +478,7 @@ class AgentRuntime:
                 }])
                 await self._publish_modular_done(ctx, result, files_written=0, saved_paths=[], metrics=metrics)
                 return result
-            if self._is_conversational(ctx):
+            if self._is_conversational(ctx, capability_hints=capability_hints):
                 logger.info(
                     "agent_run conversational agent=%s session=%s msg_len=%d",
                     ctx.agent.id, ctx.session_id, len(ctx.user_message or ""),
@@ -761,7 +823,11 @@ class AgentRuntime:
     }
 
     @staticmethod
-    def _is_conversational(ctx: AgentContext) -> bool:
+    def _is_conversational(
+        ctx: AgentContext,
+        *,
+        capability_hints: list[dict[str, str]] | None = None,
+    ) -> bool:
         """Whether this request can use the no-tool, single-turn chat path.
 
         Resource bindings describe what an agent *can* do, not what every
@@ -786,6 +852,7 @@ class AgentRuntime:
         return classify_request(
             user_message,
             explicit_mode=explicit_mode,
+            capability_hints=capability_hints,
         ).value == "chat"
 
     @staticmethod
