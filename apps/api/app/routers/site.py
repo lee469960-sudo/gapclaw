@@ -21,6 +21,7 @@ class SiteBody(BaseModel):
     site_logo: str | None = None
     footer: str | None = None
     feature_flags: str | None = None
+    version: str | None = None
 
 
 def _site_logo_dest() -> Path:
@@ -62,6 +63,7 @@ async def site_post(request: Request, user: User = Depends(get_session_user), db
                 "site_logo": body.site_logo if body.site_logo is not None else "",
                 "footer": body.footer if body.footer is not None else "",
                 "feature_flags": body.feature_flags if body.feature_flags is not None else "{}",
+                "version": body.version if body.version is not None else "",
             },
         )
         return ok(get_site_config(db), "保存成功")

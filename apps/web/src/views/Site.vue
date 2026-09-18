@@ -55,6 +55,10 @@
             />
             <div class="field-hint">打包版本来自 deploy/gap.version，页脚会自动带上该版本号。</div>
           </el-form-item>
+          <el-form-item label="显示版本">
+            <el-input v-model="form.version" placeholder="留空则使用构建版本" />
+            <div class="field-hint">发布成功后可由 Release Agent 自动同步；留空时使用 deploy/gap.version。</div>
+          </el-form-item>
         </el-form>
       </div>
 
@@ -157,6 +161,7 @@ async function save() {
       site_name: form.site_name,
       site_logo: form.site_logo,
       footer: form.footer,
+      version: form.version,
     })
     if (res.data) {
       Object.assign(form, {

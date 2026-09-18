@@ -64,7 +64,7 @@ def _resolve_site_logo(raw: str) -> str:
 
 def get_site_config(db: Session) -> dict:
     configs = {c.key: c.value for c in db.query(SiteConfig).all()}
-    version = app_version()
+    version = configs.get("version") or app_version()
     footer = configs.get("footer") or ""
     return {
         "site_name": configs.get("site_name") or DEFAULT_SITE_NAME,

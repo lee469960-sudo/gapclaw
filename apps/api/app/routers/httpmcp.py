@@ -1,7 +1,7 @@
 import json
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,9 @@ class HttpMcpBody(BaseModel):
     test_body: dict | None = None
     variables: dict | None = None
     tool: str | None = None
+    release_id: str | None = None
+    target_id: str | None = None
+    agent_id: str | None = None
 
 
 @router.get("")
@@ -106,5 +109,28 @@ async def httpmcp_handler(body: HttpMcpBody | None = None, user: User = Depends(
             vars_["tool"] = body.tool
         result = await call_httpmcp(h, vars_)
         return ok({"result": result})
+
+    if action == "release_version_sync":
+        # Fixed internal capability: only the built-in Release Agent flow may
+        # apply an already verified, healthy release manifest.
+        try:
+            roles = json.loads(user.roles or "[]")
+        except json.JSONDecodeError:
+            roles = []
+        if "master" not in roles and "admin" not in roles:
+            raise HTTPException(status_code=403, detail="release_version_sync_admin_required")
+        if (body.agent_id or "") != "release-agent":
+            raise HTTPException(status_code=403, detail="release_version_sync_agent_forbidden")
+        if not body.release_id or not body.target_id:
+            raise HTTPException(status_code=422, detail="release_version_sync_identity_required")
+        from app.services.release_lifecycle import ReleaseLifecycleError, sync_site_version
+        try:
+            result = sync_site_version(
+                db, release_id=body.release_id, target_id=body.target_id,
+                source=body.agent_id,
+            )
+        except ReleaseLifecycleError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ok(result, "站点版本已同步")
 
     return fail("未知操作")

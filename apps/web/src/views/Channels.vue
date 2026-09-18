@@ -45,7 +45,7 @@
           <div class="bind-row">
             <span class="label">绑定 Agent</span>
             <el-tag v-if="row.agent_id" size="small" type="success" effect="plain">
-              {{ agentName(row.agent_id) }}
+              {{ row.agent_name || agentName(row.agent_id) }}
             </el-tag>
             <el-tag v-else size="small" type="danger" effect="plain">未绑定（手机无法对话）</el-tag>
           </div>
@@ -133,6 +133,7 @@
         </el-form-item>
         <el-form-item label="绑定 Agent" required>
           <el-select v-model="form.agent_id" filterable clearable style="width:100%" placeholder="选择 Agent（未绑定则手机无法对话）">
+            <el-option v-if="form.provider === 'feishu'" label="Release Agent（仅发布通知）" value="release-agent" />
             <el-option v-for="a in agents" :key="a.id" :label="`${a.name} (${a.id})`" :value="a.id" />
           </el-select>
           <div class="field-tip">选中的 Agent 会处理该渠道所有私聊/群消息并回发到飞书等客户端</div>
@@ -168,6 +169,10 @@
           <el-form-item label="App ID"><el-input v-model="form.config.app_id" /></el-form-item>
           <el-form-item label="App Secret"><el-input v-model="form.config.app_secret" type="password" show-password /></el-form-item>
           <el-form-item label="Verification Token"><el-input v-model="form.config.verification_token" /></el-form-item>
+          <el-form-item v-if="form.agent_id === 'release-agent'" label="通知 Chat ID">
+            <el-input v-model="form.config.release_chat_id" placeholder="飞书 chat_id 或 open_id" />
+            <div class="field-tip">发布成功、失败或回滚后，Release Agent 会向该目标推送一次通知。</div>
+          </el-form-item>
         </template>
         <template v-else-if="form.provider === 'dingtalk'">
           <el-form-item label="App Secret"><el-input v-model="form.config.app_secret" type="password" show-password placeholder="用于签名校验" /></el-form-item>

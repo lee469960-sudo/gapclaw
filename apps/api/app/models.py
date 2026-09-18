@@ -1236,3 +1236,37 @@ class ReleaseHookDelivery(Base):
     target_id: Mapped[str] = mapped_column(String(64), index=True)
     state: Mapped[str] = mapped_column(String(32), default="accepted")
     accepted_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class ReleaseVersionSync(Base):
+    """Auditable, idempotent public-site version synchronization attempt."""
+
+    __tablename__ = "release_version_syncs"
+    __table_args__ = (UniqueConstraint("release_id", "transition", name="uq_release_version_sync_transition"),)
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
+    transition: Mapped[str] = mapped_column(String(32), index=True)
+    version: Mapped[str] = mapped_column(String(64), default="")
+    commit_sha: Mapped[str] = mapped_column(String(64), default="")
+    state: Mapped[str] = mapped_column(String(32), default="applied")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    occurred_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class ReleaseNotificationDelivery(Base):
+    """Deduplicated, sanitized lifecycle notification delivery audit."""
+
+    __tablename__ = "release_notification_deliveries"
+    __table_args__ = (UniqueConstraint("release_id", "transition", "channel_id", name="uq_release_notification_delivery"),)
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), index=True)
+    transition: Mapped[str] = mapped_column(String(32), index=True)
+    channel_id: Mapped[str] = mapped_column(String(16), index=True)
+    state: Mapped[str] = mapped_column(String(32), default="pending")
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    error: Mapped[str] = mapped_column(Text, default="")
+    attempted_at: Mapped[str] = mapped_column(String(32), default="")
+    delivered_at: Mapped[str] = mapped_column(String(32), default="")

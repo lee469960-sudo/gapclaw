@@ -18,6 +18,7 @@ from app.services.channels.base import list_providers, create_adapter
 from app.services.channels.runtime import process_inbound_bg, log_event, ensure_im_web_session
 from app.services.channels.base import InboundMessage
 from app.services.channels.telegram import build_webhook_url, sync_telegram_registration
+from app.services.release_agent import RELEASE_AGENT_ID, RELEASE_AGENT
 
 router = APIRouter(prefix="/pages/page_channel.cgi", tags=["channel"])
 
@@ -53,6 +54,8 @@ def _channel_dict(db: Session, row: ImChannel) -> dict:
                 d["web_session_id"] = ensure_im_web_session(db, agent, row.provider)
             except Exception:
                 d["web_session_id"] = ""
+        elif row.agent_id == RELEASE_AGENT_ID:
+            d["agent_name"] = RELEASE_AGENT.name
     return d
 
 
@@ -179,11 +182,17 @@ async def channel_handler(
             row.enabled = bool(body.enabled)
         if body.agent_id is not None:
             if body.agent_id:
-                ag = db.query(Agent).filter(Agent.id == body.agent_id).first()
-                if not ag:
-                    return fail("Agent 不存在")
-                if not can_access_resource(user, ag.visibility, ag.allowed_users, ag.creator):
-                    return fail("无权绑定该 Agent")
+                if body.agent_id == RELEASE_AGENT_ID:
+                    if body.provider != "feishu" and row.provider != "feishu":
+                        return fail("Release Agent 仅支持独立飞书渠道")
+                    if "master" not in json.loads(user.roles or "[]") and "admin" not in json.loads(user.roles or "[]"):
+                        return fail("仅管理员可绑定 Release Agent")
+                else:
+                    ag = db.query(Agent).filter(Agent.id == body.agent_id).first()
+                    if not ag:
+                        return fail("Agent 不存在")
+                    if not can_access_resource(user, ag.visibility, ag.allowed_users, ag.creator):
+                        return fail("无权绑定该 Agent")
             row.agent_id = body.agent_id or ""
         if body.visibility is not None:
             row.visibility = body.visibility if body.visibility in ("public", "private") else "private"
