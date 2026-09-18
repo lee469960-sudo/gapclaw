@@ -42,6 +42,7 @@ class AgentLoopState:
     llm_turn_count: int = 0
     retry_count: int = 0
     human_loop_reason: str = ""
+    tool_free_final_attempts: int = 0  # Bounded rescue before accepting an MCP-free FINAL
 
     def add_progress(self, line: str) -> None:
         """Append a progress line, avoiding dupes and capping length."""

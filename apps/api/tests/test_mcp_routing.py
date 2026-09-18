@@ -359,6 +359,36 @@ def test_runtime_supplements_only_new_mcp_and_bounds_requests():
     assert builds == [["clickhouse"], ["clickhouse", "ads"]]
 
 
+def test_bound_mcp_task_retries_tool_free_final_once():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(id="a-tool-retry", llm_timeout=30, sandbox_id=None, name="t", max_iterations=4, prompt="", memory=""),
+        session_id="s-tool-retry", chat_key="a-tool-retry:s-tool-retry", user_message="查询沪深300涨停股票", db=db,
+        llm=SimpleNamespace(id="llm1", provider="anthropic"), sandbox=None,
+        mcp_ids=["clickhouse"], skill_ids=[], skill_names=[], mcp_names=[], skill_mds=[],
+        httpmcp_ids=[], rag_ids=[], allowed_actions=["mcp_tool_call"], save_dir="", im_source="",
+        note_content="", message_meta={"execution_mode": "task"},
+    )
+    replies = iter(["FINAL: 我先并行获取数据", "MCP: query_stocks {\"index\":\"沪深300\"}", "FINAL: 已完成"])
+    with patch("app.services.agent_runtime.mcp_routing.build_mcp_route_candidates", return_value=_candidates()[:1]), patch(
+        "app.services.agent_runtime.mcp_routing.route_mcp_candidates",
+        new=AsyncMock(return_value=McpRouteDecision(["clickhouse"])),
+    ), patch("app.services.llm_client.chat_completion", new=AsyncMock(side_effect=lambda *_a, **_k: ChatResult(text=next(replies)))), patch(
+        "app.services.agent_runtime.system_prompt.SystemPromptBuilder.build_tools_desc", new=AsyncMock(return_value="catalog"),
+    ), patch("app.services.agent_tools.execute_action", new=AsyncMock(return_value='{"rows": []}')), patch.object(
+        AgentRuntime, "_reflect_final", new=AsyncMock(return_value=None),
+    ) as execute_mock:
+        assert asyncio.run(AgentRuntime().run(ctx)) == "已完成"
+
+    execute_mock.assert_awaited_once()
+
+
 def test_runtime_blocks_a_third_supplement_request():
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker

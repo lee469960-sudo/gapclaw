@@ -432,6 +432,10 @@ class AgentRuntime:
                 re.sub(r"[^a-z0-9]", "", str(hint.get("name") or "").lower())
                 for hint in capability_hints
             }
+            bound_names.update(
+                re.sub(r"[^a-z0-9]", "", str(name).lower())
+                for name in (getattr(ctx, "skill_names", None) or [])
+            )
             unbound_resources = [
                 name for name in named_resources
                 if re.sub(r"[^a-z0-9]", "", name.lower()) not in bound_names
@@ -459,6 +463,7 @@ class AgentRuntime:
                 ctx.user_message,
                 explicit_mode=explicit_mode,
                 capability_hints=capability_hints,
+                skill_names=getattr(ctx, "skill_names", None),
             )
             if requires_human_wait(ctx.user_message, getattr(ctx, "message_meta", None)):
                 execution_mode = ExecutionMode.HUMAN_WAIT
@@ -853,6 +858,7 @@ class AgentRuntime:
             user_message,
             explicit_mode=explicit_mode,
             capability_hints=capability_hints,
+            skill_names=getattr(ctx, "skill_names", None),
         ).value == "chat"
 
     @staticmethod
@@ -1915,6 +1921,32 @@ class AgentRuntime:
                         if final_step is not None
                         else completion_candidate
                     )
+                    # A bound MCP task cannot be completed by a prose FINAL on
+                    # its first attempt. Models sometimes announce a plan or
+                    # return FINAL before emitting a native/text tool call; give
+                    # one bounded correction round so external work actually
+                    # starts, while preserving a finite escape hatch.
+                    if (
+                        state.selected_mcp_ids
+                        and tool_call_count == 0
+                        and round_no == 1
+                        and state.tool_free_final_attempts < 1
+                    ):
+                        state.tool_free_final_attempts += 1
+                        await self._append_step(ctx, state, {
+                            "type": "info",
+                            "action": "tool_required_retry",
+                            "iteration": round_no,
+                            "title": "MCP 任务尚未调用工具，继续执行",
+                            "status": "done",
+                            "content": "绑定 MCP 的任务不能仅以文字 FINAL 结束；请先调用 MCP 获取真实结果。",
+                        })
+                        cm.add_coach_hint(
+                            "【必须执行工具】当前任务绑定了 MCP，刚才没有产生任何 MCP 工具调用。"
+                            "请立即调用匹配的 MCP 获取真实数据；不要只输出计划或 FINAL。"
+                        )
+                        state.completion_signal_streak = 0
+                        continue
                     report = await self._reflect_final(ctx, state, candidate)
                     if report is None:
                         state.fix_only_until_final = False
