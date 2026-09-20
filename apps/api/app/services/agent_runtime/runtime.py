@@ -1329,7 +1329,9 @@ class AgentRuntime:
             logger.warning("distill_final failed agent=%s", ctx.agent.id, exc_info=True)
             return _forced_stop_reply(state, reason)
         final = (final or "").strip()
-        return final or _forced_stop_reply(state, reason)
+        if not final:
+            return _forced_stop_reply(state, reason)
+        return _append_execution_receipt(final, state, reason)
 
     # ---- LLM-driven ReAct loop ----
 
@@ -4281,6 +4283,49 @@ def _forced_stop_reply(state, reason: str) -> str:
             f"本轮最后的原始输出：\n{cleaned}"
         )
     return f"任务未完成，已自动结束（{reason}），请检查结果。"
+
+
+def _append_execution_receipt(reply: str, state, reason: str) -> str:
+    """Append deterministic progress evidence to a budget-exhausted summary.
+
+    The distillation LLM may return only a file list or a one-line apology. The
+    receipt is engine-owned, so the user can always see the last completed
+    phases, pending subtasks, and intermediate files without treating them as a
+    final deliverable.
+    """
+    completed = [
+        str(item.get("text") or "").strip()
+        for item in (getattr(state, "subtasks", None) or [])
+        if isinstance(item, dict) and item.get("status") == "done" and str(item.get("text") or "").strip()
+    ]
+    pending = [
+        str(item.get("text") or "").strip()
+        for item in (getattr(state, "subtasks", None) or [])
+        if isinstance(item, dict) and item.get("status") != "done" and str(item.get("text") or "").strip()
+    ]
+    steps = []
+    for step in (getattr(state, "run_steps", None) or []):
+        if not isinstance(step, dict) or step.get("status") == "error":
+            continue
+        label = str(step.get("title") or step.get("action") or "").strip()
+        if label and label not in steps:
+            steps.append(label)
+    progress = [str(item).strip() for item in (getattr(state, "progress_lines", None) or []) if str(item).strip()]
+    files = [str(item).strip() for item in (getattr(state, "saved_paths", None) or []) if str(item).strip()]
+    lines = ["", "---", "执行状态（引擎记录，非最终交付）", f"- 结束原因：{str(reason or '自动结束')[:160]}"]
+    if completed:
+        lines.append("- 已完成子任务：" + "；".join(completed[-8:]))
+    if pending:
+        lines.append("- 尚未完成子任务：" + "；".join(pending[-8:]))
+    if steps:
+        lines.append("- 已执行步骤：" + " → ".join(steps[-8:]))
+    if progress:
+        lines.append("- 最近进度：" + "；".join(progress[-8:]))
+    if files:
+        lines.append("- 中间文件：" + "、".join(f"`{path}`" for path in files[-8:]))
+    if not (completed or pending or steps or progress or files):
+        lines.append("- 尚未记录到可展示的步骤或中间产物。")
+    return (str(reply or "").strip() + "\n" + "\n".join(lines)).strip()
 
 
 def _archive_type_for(action: str) -> str:

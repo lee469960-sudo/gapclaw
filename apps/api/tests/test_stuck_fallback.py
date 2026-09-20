@@ -75,6 +75,26 @@ def test_forced_stop_reply_generic_when_empty():
     assert "50" in reply
 
 
+def test_distillation_receipt_exposes_steps_when_summary_is_file_list():
+    from app.services.agent_runtime.runtime import _append_execution_receipt
+
+    state = AgentLoopState(
+        subtasks=[
+            {"text": "读取数据", "status": "done"},
+            {"text": "生成最终报告", "status": "pending"},
+        ],
+        run_steps=[
+            {"title": "读取分页数据", "action": "mcp_tool_call", "status": "done"},
+        ],
+        progress_lines=["已写入 task/1/raw.json"],
+        saved_paths=["task/1/raw.json"],
+    )
+    reply = _append_execution_receipt("- task/1/raw.json", state, "达到轮次上限")
+    assert "尚未完成子任务：生成最终报告" in reply
+    assert "已执行步骤：读取分页数据" in reply
+    assert "最近进度：已写入 task/1/raw.json" in reply
+
+
 def test_tool_result_failed_prefixes():
     assert _tool_result_failed("MCP 错误: timeout") is True
     assert _tool_result_failed("MCP 调用失败") is True

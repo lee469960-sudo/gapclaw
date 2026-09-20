@@ -134,7 +134,9 @@ def test_distill_final_returns_llm_summary():
         ):
             return await AgentRuntime()._distill_final(ctx, state, "达到上限")
 
-    assert asyncio.run(_run()) == "已完成部分，缺少 xlsx"
+    out = asyncio.run(_run())
+    assert out.startswith("已完成部分，缺少 xlsx")
+    assert "执行状态（引擎记录" in out
 
 
 def test_distill_final_falls_back_on_error():
