@@ -68,7 +68,10 @@
             <div class="msg-col">
               <div v-if="m.role === 'assistant'" class="agent-label">{{ agentLabel(m.agent_id) }}</div>
               <div :class="['msg-bubble', m.role, m.role === 'assistant' ? 'md-body' : '']">
-                <pre v-if="m.role === 'user'" class="content">{{ m.content }}</pre>
+                <CollapsibleUserContent
+                  v-if="m.role === 'user'"
+                  :content="m.content"
+                />
                 <div v-else class="content md-render" v-html="renderMessage(m)" @click="onMarkdownClick" />
               </div>
               <div class="msg-meta">
@@ -178,6 +181,7 @@ import { getCgi, postCgi } from '../api'
 import api from '../api'
 import WorkplacePanel from '../components/WorkplacePanel.vue'
 import VoiceInputButton from '../components/VoiceInputButton.vue'
+import CollapsibleUserContent from '../components/CollapsibleUserContent.vue'
 
 marked.setOptions({ breaks: true, gfm: true })
 

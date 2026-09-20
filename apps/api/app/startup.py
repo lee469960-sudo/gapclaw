@@ -55,6 +55,9 @@ def init_db(db: Session) -> None:
         if "tool_result_clip" not in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agents ADD COLUMN tool_result_clip INTEGER DEFAULT 6000"))
+        if "response_style" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE agents ADD COLUMN response_style VARCHAR(16) DEFAULT 'adaptive'"))
         if "httpmcps" not in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agents ADD COLUMN httpmcps TEXT DEFAULT '[]'"))

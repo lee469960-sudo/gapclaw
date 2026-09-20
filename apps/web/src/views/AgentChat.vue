@@ -519,6 +519,16 @@ function execSummary(message) {
     const stop = String(runtimeMetrics.stop_reason || '').trim()
     lines.push(`执行模式: ${runtimeMetrics.route_mode} · LLM ${turns} 轮 · 重试 ${retries} 次`)
     if (stop) lines.push(`终止原因: ${stop}`)
+    if (runtimeMetrics.response_style) {
+      const qualityState = String(runtimeMetrics.quality_status || 'not_checked')
+      const qualityLabel = {
+        passed: '通过',
+        incomplete: '条件性完成',
+        not_checked: '未检查',
+      }[qualityState] || qualityState
+      const qualityRetry = Number(runtimeMetrics.quality_retry_count) || 0
+      lines.push(`回复风格: ${runtimeMetrics.response_style} · 质量检查: ${qualityLabel} · 补全 ${qualityRetry} 次`)
+    }
   }
   if (meta.context_available_percent != null) {
     lines.push(`上下文可用: ${clampPercent(meta.context_available_percent)}%`)
@@ -725,6 +735,7 @@ function stepInlineDetail(step) {
 function stepGlyph(step) {
   if (step.type === 'llm') return '🤖'
   if (step.type === 'model_route') return '🧭'
+  if (step.type === 'quality_check' || step.action === 'quality_check' || step.action === 'quality_final') return '✅'
   if (step.action === 'skill_loaded' || step.action === 'skill_read_md') return '📘'
   if ((step.action || '').startsWith('code_')) return '🧰'
   if (step.action === 'no_tools' || step.action === 'no_tools_export' || step.action === 'conversational_reply') return '💬'

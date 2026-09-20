@@ -1,13 +1,10 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  GAP 包含 React Engine、MCP、模型路由、Release Agent 和多渠道消息系统。
+  运行时改动优先保证兼容性、幂等性和可回滚性。
+  archived/superseded change 仅作为历史参考，不应直接恢复执行。
+  新 change 开始前必须检查相关历史变更，避免重复实现或冲突设计。
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
@@ -19,14 +16,17 @@ schema: spec-driven
 #     tasks:
 #       - Break tasks into chunks of max 2 hours
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+operations:
+  apply:
+    guidance:
+      - 先检查 archived/superseded changes，识别重复或冲突设计。
+      - 对 MCP、缓存、断点恢复和路由改动明确记录兼容性风险。
+  verify:
+    guidance:
+      - 验证现有 Agent、MCP、渠道和普通对话行为没有回归。
+      - 说明未绑定 Skill 或未配置渠道时的降级行为。
+      - 给出灰度、幂等和回滚检查结果。
+  archive:
+    guidance:
+      - 归档前确认 tasks.md 全部完成。
+      - 有 delta spec 时先同步主规格。

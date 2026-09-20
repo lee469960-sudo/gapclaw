@@ -360,6 +360,22 @@
 
           <section class="cfg-block">
             <h3 class="cfg-title">
+              <el-icon><ChatDotRound /></el-icon>
+              回复风格
+            </h3>
+            <div class="proactivity-row">
+              <el-select v-model="form.response_style" class="proactivity-select">
+                <el-option value="adaptive" label="自适应 · 默认" />
+                <el-option value="concise" label="简洁 · 低延迟" />
+                <el-option value="structured" label="结构化 · 结论/要点" />
+                <el-option value="analytical" label="分析型 · 依据/限制" />
+              </el-select>
+              <p class="proactivity-hint">复杂普通问题最多进行一次质量补全；不会因此加载工具或 MCP</p>
+            </div>
+          </section>
+
+          <section class="cfg-block">
+            <h3 class="cfg-title">
               <el-icon><Lock /></el-icon>
               权限管理
             </h3>
@@ -523,7 +539,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onActivated } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Lock, Unlock, Setting, Grid, Box, Cpu, Connection, Collection, Notebook, ArrowDown, ArrowRight, User } from '@element-plus/icons-vue'
+import { Lock, Unlock, Setting, Grid, Box, Cpu, Connection, Collection, Notebook, ArrowDown, ArrowRight, User, ChatDotRound } from '@element-plus/icons-vue'
 import { getCgi, postCgi } from '../api'
 import { cachedGetCgi, invalidateListCache } from '../listCache'
 import AgentSessionDialog from '../components/AgentSessionDialog.vue'
@@ -610,6 +626,7 @@ const ADV_DEFAULTS = {
   shell_timeout: 1800,
   mcp_soft_circuit: 5,
   tool_result_clip: 6000,
+  response_style: 'adaptive',
 }
 
 const selectedActionCount = computed(() => {
@@ -781,6 +798,7 @@ async function openForm(row) {
       shell_timeout: currentRow.shell_timeout ?? ADV_DEFAULTS.shell_timeout,
       mcp_soft_circuit: currentRow.mcp_soft_circuit ?? ADV_DEFAULTS.mcp_soft_circuit,
       tool_result_clip: currentRow.tool_result_clip ?? ADV_DEFAULTS.tool_result_clip,
+      response_style: currentRow.response_style || ADV_DEFAULTS.response_style,
     })
   } else {
     Object.assign(form, {
@@ -799,6 +817,7 @@ async function openForm(row) {
       code_project_id: '',
       routing_policy_id: '',
       proactivity: 2,
+      response_style: 'adaptive',
       visibility: 'private',
       allowedUsersStr: '',
       ...ADV_DEFAULTS,
@@ -841,6 +860,8 @@ async function save() {
     rags: form.rags,
     httpmcps: form.httpmcps,
     proactivity: form.proactivity,
+    response_style: ['adaptive', 'concise', 'structured', 'analytical'].includes(form.response_style)
+      ? form.response_style : 'adaptive',
     visibility: form.visibility,
     allowed_users,
     max_iterations: form.max_iterations,

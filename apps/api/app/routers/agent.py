@@ -47,6 +47,7 @@ class AgentBody(BaseModel):
     history_length: int = 30
     summary_max_words: int = 5000
     proactivity: int = 2
+    response_style: str | None = None
     llm_timeout: int = 1800
     skill_timeout: int = 1800
     shell_timeout: int = 1800
@@ -74,6 +75,7 @@ DEFAULT_ACTIONS = [
 
 KNOWN_ACTIONS = set(DEFAULT_ACTIONS) | {"rag_query"}
 KNOWN_PROFILES = {"standard", "code"}
+KNOWN_RESPONSE_STYLES = {"adaptive", "concise", "structured", "analytical"}
 
 
 def _normalize_allowed_actions(actions: list[str] | None) -> list[str]:
@@ -136,6 +138,11 @@ def _validate_code_profile_selection(
         if reason:
             return reason
     return None
+
+
+def _normalize_response_style(value: str | None) -> str:
+    normalized = str(value or "adaptive").strip().lower()
+    return normalized if normalized in KNOWN_RESPONSE_STYLES else "adaptive"
 
 
 def _filter_agents(items: list[Agent], user: User, scope: str = "all") -> list[Agent]:
@@ -373,6 +380,10 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
         a.history_length = body.history_length
         a.summary_max_words = max(100, min(int(body.summary_max_words or 5000), 50000))
         a.proactivity = body.proactivity
+        if body.response_style is not None:
+            a.response_style = _normalize_response_style(body.response_style)
+        elif action == "create":
+            a.response_style = "adaptive"
         a.llm_timeout = body.llm_timeout
         a.skill_timeout = body.skill_timeout
         a.shell_timeout = body.shell_timeout

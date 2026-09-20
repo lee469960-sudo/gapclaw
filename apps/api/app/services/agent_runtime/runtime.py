@@ -51,7 +51,10 @@ logger = logging.getLogger(__name__)
 
 
 def _set_runtime_metrics(ctx, *, route_mode: str, llm_turn_count: int, retry_count: int,
-                         stop_reason: str = "", human_loop_reason: str = "") -> dict:
+                         stop_reason: str = "", human_loop_reason: str = "",
+                         response_style: str = "", quality_checked: bool = False,
+                         quality_retry_count: int = 0, quality_reasons: list[str] | None = None,
+                         quality_status: str = "") -> dict:
     """Store a redacted terminal metric payload for persistence and websocket use."""
     metrics = {
         "route_mode": str(route_mode or "")[:32],
@@ -60,6 +63,14 @@ def _set_runtime_metrics(ctx, *, route_mode: str, llm_turn_count: int, retry_cou
         "stop_reason": str(stop_reason or "")[:80],
         "human_loop_reason": str(human_loop_reason or "")[:120],
     }
+    if response_style:
+        metrics.update({
+            "response_style": str(response_style)[:16],
+            "quality_checked": bool(quality_checked),
+            "quality_retry_count": max(0, min(1, int(quality_retry_count or 0))),
+            "quality_reasons": [str(item)[:40] for item in (quality_reasons or [])[:4]],
+            "quality_status": str(quality_status or "not_checked")[:24],
+        })
     metadata = getattr(ctx, "message_meta", None)
     if isinstance(metadata, dict):
         metadata["runtime_metrics"] = metrics
@@ -489,12 +500,25 @@ class AgentRuntime:
                     ctx.agent.id, ctx.session_id, len(ctx.user_message or ""),
                 )
                 result = await self._run_conversational(ctx)
-                self._save_assistant_message(ctx, result, steps=[{
+                chat_steps = [{
                     "type": "info",
                     "action": "conversational_reply",
                     "title": "对话回复",
                     "status": "done",
-                }])
+                }]
+                chat_metrics = (ctx.message_meta or {}).get("runtime_metrics", {})
+                if chat_metrics.get("quality_checked"):
+                    chat_steps.insert(0, {
+                        "type": "quality_check",
+                        "action": "quality_check",
+                        "title": "回复质量检查",
+                        "status": "done",
+                        "content": (
+                            f"最终状态：{str(chat_metrics.get('quality_status') or 'not_checked')[:24]}；"
+                            f"补全次数：{int(chat_metrics.get('quality_retry_count') or 0)}。"
+                        ),
+                    })
+                self._save_assistant_message(ctx, result, steps=chat_steps)
                 return result
 
             logger.info(
@@ -1005,7 +1029,12 @@ class AgentRuntime:
         from app.services.llm_client import chat_completion
         from app.services.tool_parser import clean_final_answer
         from app.models import ChatMessage
-        from app.services.agent_runtime.execution_policy import policy_for_context
+        from app.services.agent_runtime.execution_policy import (
+            is_complex_conversation,
+            normalize_response_style,
+            policy_for_context,
+        )
+        from app.services.agent_runtime.conversational import assess_response_quality
 
         key = ctx.chat_key
         effective = ctx.user_message
@@ -1031,6 +1060,12 @@ class AgentRuntime:
 
         final = ""
         policy = policy_for_context(ctx)
+        response_style = normalize_response_style(getattr(ctx.agent, "response_style", "adaptive"))
+        quality_enabled = is_complex_conversation(effective, response_style=response_style)
+        quality_checked = False
+        quality_retry_count = 0
+        quality_reasons: list[str] = []
+        quality_status = "not_checked"
         max_calls = max(1, policy.chat_max_turns + policy.chat_max_retries)
         attempts_used = 0
         try:
@@ -1044,7 +1079,11 @@ class AgentRuntime:
                     if attempt:
                         request_messages = [*messages, {
                             "role": "system",
-                            "content": "上一轮普通对话未能返回有效文本。请直接、简洁地回答用户问题，不要输出工具协议行。",
+                            "content": (
+                                "上一轮普通对话回复质量不足。请只基于现有对话上下文重新回答，"
+                                "补齐结论/摘要、关键要点和必要说明；不要重复复述用户问题，"
+                                "不要输出工具协议行，也不要调用任何 MCP、Skill、Shell 或文件工具。"
+                            ),
                         }]
                     reply = await chat_completion(
                         ctx.llm, request_messages,
@@ -1054,6 +1093,26 @@ class AgentRuntime:
                     )
                     final = clean_final_answer(reply or "")
                     if final.strip():
+                        if quality_enabled:
+                            quality_checked = True
+                            quality = assess_response_quality(
+                                effective, final, response_style=response_style,
+                            )
+                            quality_reasons = list(quality.get("reasons") or [])
+                            quality_status = str(quality.get("final_status") or "incomplete")
+                            if attempt == 0 and not quality.get("passed") and policy.chat_max_retries > 0:
+                                quality_retry_count = 1
+                                await hub.publish(key, {
+                                    "type": "step", "op": "append", "index": 0,
+                                    "step": {
+                                        "type": "quality_check", "action": "quality_check",
+                                        "title": "回复质量检查", "status": "done",
+                                        "content": "复杂回复未满足结构/覆盖门槛，准备一次有界补全。",
+                                        "quality_status": "incomplete",
+                                        "reasons": quality_reasons,
+                                    },
+                                })
+                                continue
                         break
                     last_error = RuntimeError("empty conversational reply")
                 except Exception as exc:
@@ -1074,9 +1133,25 @@ class AgentRuntime:
             ctx, route_mode="chat", llm_turn_count=attempts_used,
             retry_count=max(0, attempts_used - 1),
             stop_reason="fallback" if not final.strip() else "completed",
+            response_style=response_style,
+            quality_checked=quality_checked,
+            quality_retry_count=quality_retry_count,
+            quality_reasons=quality_reasons,
+            quality_status=quality_status if quality_checked else "not_checked",
         )
 
         try:
+            if quality_checked:
+                await hub.publish(key, {
+                    "type": "step", "op": "append", "index": 0,
+                    "step": {
+                        "type": "quality_check", "action": "quality_final",
+                        "title": "回复质量状态", "status": "done",
+                        "content": f"最终状态：{quality_status}；补全次数：{quality_retry_count}。",
+                        "quality_status": quality_status,
+                        "retry_count": quality_retry_count,
+                    },
+                })
             await hub.publish(key, {
                 "type": "step",
                 "op": "append",

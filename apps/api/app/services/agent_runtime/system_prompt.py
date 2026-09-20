@@ -96,11 +96,18 @@ class SystemPromptBuilder:
     # ---- Conversational (tool-free) path ----
 
     @staticmethod
-    def build_conversational_system(agent: Agent | None) -> str:
+    def build_conversational_system(agent: Agent | None, *, response_style: str = "adaptive") -> str:
         """System prompt for tool-free single-turn chat (no PLAN/MCP/FINAL protocol)."""
         label = SystemPromptBuilder.agent_identity_label(agent)
         desc = str(getattr(agent, "description", "") or "").strip()
         base = str(getattr(agent, "prompt", None) or "You are a helpful assistant.").strip()
+        style_hints = {
+            "adaptive": "复杂问题适度分段，简单问题保持简洁。",
+            "concise": "优先用最少必要文字回答；只有用户明确要求时才展开结构。",
+            "structured": "复杂问题必须给出结论/摘要、分组要点和必要说明；简单问候仍可简短。",
+            "analytical": "复杂问题先给结论，再给分析依据、关键要点和限制/说明。",
+        }
+        style_text = style_hints.get(str(response_style or "adaptive").lower(), style_hints["adaptive"])
         return "\n".join([
             base,
             "",
@@ -110,6 +117,7 @@ class SystemPromptBuilder:
             "- 禁止输出 PLAN: / MCP: / SHELL: / WRITE: / READ: / FINAL: 等工具协议行。",
             "- 不要提导出状态机、查询图、列计划或完成标准；用户未要求执行任务时不要调用或描述工具。",
             "- 不要编造已导出文件、查询结果或任务进度。",
+            f"- 回复风格：{style_text}",
         ])
 
     @staticmethod

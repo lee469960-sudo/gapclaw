@@ -343,6 +343,7 @@ class Agent(Base):
     history_length: Mapped[int] = mapped_column(Integer, default=30)
     summary_max_words: Mapped[int] = mapped_column(Integer, default=5000)
     proactivity: Mapped[int] = mapped_column(Integer, default=2)
+    response_style: Mapped[str] = mapped_column(String(16), default="adaptive")
     llm_timeout: Mapped[int] = mapped_column(Integer, default=1800)
     skill_timeout: Mapped[int] = mapped_column(Integer, default=1800)
     shell_timeout: Mapped[int] = mapped_column(Integer, default=1800)
@@ -376,6 +377,7 @@ class Agent(Base):
             "history_length": self.history_length,
             "summary_max_words": self.summary_max_words or 5000,
             "proactivity": self.proactivity,
+            "response_style": self.response_style or "adaptive",
             "llm_timeout": self.llm_timeout,
             "skill_timeout": self.skill_timeout,
             "shell_timeout": self.shell_timeout,

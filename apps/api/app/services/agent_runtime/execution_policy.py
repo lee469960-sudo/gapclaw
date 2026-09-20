@@ -20,6 +20,24 @@ class ExecutionMode(StrEnum):
     HUMAN_WAIT = "human_wait"
 
 
+class ResponseStyle(StrEnum):
+    """User-facing style for the tool-free conversational path."""
+
+    ADAPTIVE = "adaptive"
+    CONCISE = "concise"
+    STRUCTURED = "structured"
+    ANALYTICAL = "analytical"
+
+
+VALID_RESPONSE_STYLES = frozenset(item.value for item in ResponseStyle)
+
+
+def normalize_response_style(value: Any) -> str:
+    """Normalize a persisted/API style without ever blocking a conversation."""
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in VALID_RESPONSE_STYLES else ResponseStyle.ADAPTIVE.value
+
+
 @dataclass(frozen=True)
 class ExecutionPolicy:
     """Bounded budgets applied independently to each execution mode."""
@@ -74,6 +92,13 @@ _OPERATION_RE = re.compile(
 _MULTI_STEP_RE = re.compile(
     r"(?:\b(?:first|then|after that|step\s*\d+|implement|build|fix|create)\b"
     r"|首先|然后|接着|步骤|实现|构建|修复|创建|生成|制作|打包|产出|编写|完成任务|多步骤)",
+    re.IGNORECASE,
+)
+_COMPLEX_CHAT_RE = re.compile(
+    r"(?:总结|归纳|拆解|分析|梳理|对比|提取|整理|分组|概括|评估|复盘|规划|列出要点"
+    r"|summari[sz]e|break\s*down|analy[sz]e|compare|extract|organize|outline|evaluate)"
+    r"|(?:来源|日期|主题|笔记|多个|多项|分别|至少|条件如下|要求如下|并且|同时|以及)"
+    r"|(?:\n\s*\d+[.、)]|\b(?:and|with|including)\b)",
     re.IGNORECASE,
 )
 _HIGH_RISK_RE = re.compile(
@@ -242,6 +267,28 @@ def classify_request(
     if extract_named_resource_mentions(text) or _matches_bound_capability(text, capability_hints):
         return ExecutionMode.TASK
     return ExecutionMode.CHAT
+
+
+def is_complex_conversation(user_message: str, *, response_style: str = "adaptive") -> bool:
+    """Return whether a chat request deserves the bounded quality gate.
+
+    This is deliberately deterministic and does not inspect or connect tools.
+    Structured/analytical styles opt complex-looking requests into the gate,
+    while concise style never forces a long response for simple chat.
+    """
+    text = str(user_message or "").strip()
+    if not text:
+        return False
+    style = normalize_response_style(response_style)
+    if _COMPLEX_CHAT_RE.search(text):
+        return True
+    # Multiple independent clauses/requirements are complex even without a
+    # particular keyword; avoid treating short greetings as such.
+    clauses = len(re.findall(r"[，,；;。]|\band\b|\bwith\b", text, re.IGNORECASE))
+    return len(text) >= 120 or clauses >= 3 or style in {
+        ResponseStyle.STRUCTURED.value,
+        ResponseStyle.ANALYTICAL.value,
+    } and len(text) >= 40
 
 
 def requires_human_wait(user_message: str, metadata: dict[str, Any] | None = None) -> bool:
