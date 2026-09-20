@@ -179,6 +179,7 @@
               <div class="msg-meta">
                 <span>{{ item.m.created_at || '' }}</span>
                 <el-button link size="small" @click="copyText(item.m.role === 'assistant' ? assistantDisplayContent(item.m) : item.m.content)">复制</el-button>
+                <el-button v-if="item.m.role === 'assistant'" link size="small" @click="exportMessagePdf(item.m)">导出 PDF</el-button>
                 <el-button v-if="item.m.role === 'user' && item.m.id" link size="small" type="danger" @click="deleteMessage(item.m)">删除</el-button>
               </div>
             </div>
@@ -300,6 +301,8 @@ import {
 import { getCgi, postCgi, getCheckStatus } from '../api'
 import api from '../api'
 import { marked } from 'marked'
+import html2canvas from 'html2canvas'
+import { jsPDF } from 'jspdf'
 import {
   enhanceMarkdownHtml,
   extractFinalDisplayContent,
@@ -886,6 +889,43 @@ function renderMessage(m) {
     mdCache.delete(first)
   }
   return html
+}
+
+async function exportMessagePdf(message) {
+  const content = assistantDisplayContent(message)
+  if (!content.trim()) {
+    ElMessage.warning('当前回复没有可导出的内容')
+    return
+  }
+  const stage = document.createElement('article')
+  const title = `${sessionName.value || 'Agent 会话'} · 回复`
+  const timestamp = String(message?.created_at || '').trim()
+  const escapeHtml = (value) => String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;')
+  stage.style.cssText = 'position:fixed;left:-100000px;top:0;width:794px;padding:56px 60px;background:#fff;color:#1f2937;font:14px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;z-index:-1;'
+  stage.innerHTML = `<style>.pdf-content{overflow-wrap:anywhere}.pdf-content h1,.pdf-content h2,.pdf-content h3,.pdf-content h4{margin:1.1em 0 .45em;line-height:1.35}.pdf-content p{margin:.65em 0}.pdf-content ul,.pdf-content ol{padding-left:1.6em}.pdf-content blockquote{margin:.8em 0;padding:.2em 1em;border-left:3px solid #cbd5e1;color:#475569}.pdf-content pre{padding:10px 12px;overflow-wrap:anywhere;white-space:pre-wrap;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px}.pdf-content code{padding:1px 4px;background:#f3f4f6;border-radius:4px}.pdf-content pre code{padding:0;background:transparent}.pdf-content table{width:100%;border-collapse:collapse;margin:10px 0}.pdf-content th,.pdf-content td{padding:6px 8px;border:1px solid #d1d5db;text-align:left;vertical-align:top}.pdf-content th{background:#f3f4f6}.pdf-content a{color:#2563eb}</style><header style="margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #dcdfe6"><h1 style="margin:0 0 4px;font-size:20px;line-height:1.35">${escapeHtml(title)}</h1><div style="color:#6b7280;font-size:12px">${escapeHtml(timestamp || `导出时间：${new Date().toLocaleString()}`)}</div></header><main class="pdf-content">${renderMessage(message)}</main>`
+  document.body.appendChild(stage)
+  try {
+    await nextTick()
+    const canvas = await html2canvas(stage, { backgroundColor: '#fff', scale: 2, useCORS: true, logging: false })
+    const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
+    const margin = 10
+    const pageWidth = 210 - margin * 2
+    const pageHeight = 297 - margin * 2
+    const imageHeight = (canvas.height * pageWidth) / canvas.width
+    let offset = 0
+    while (offset < imageHeight) {
+      if (offset > 0) pdf.addPage()
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', margin, margin - offset, pageWidth, imageHeight)
+      offset += pageHeight
+    }
+    const safeName = title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'agent-reply'
+    pdf.save(`${safeName}.pdf`)
+    ElMessage.success('PDF 已下载')
+  } catch (error) {
+    ElMessage.error(error?.message || 'PDF 生成失败')
+  } finally {
+    stage.remove()
+  }
 }
 
 async function downloadWorkplaceFile(relPath) {
