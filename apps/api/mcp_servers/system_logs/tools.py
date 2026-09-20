@@ -40,11 +40,34 @@ _TS_RE = re.compile(
 def log_dir() -> Path:
     raw = (os.environ.get("LOG_DIR") or "").strip()
     if raw:
-        return Path(raw).expanduser().resolve()
-    # apps/api/mcp_servers/system_logs/tools.py → repo root
+        configured = Path(raw).expanduser().resolve()
+        # Older seeded MCP rows used /.local/logs after the API image was
+        # copied to /app. Treat that value as a stale placeholder and recover
+        # to the container data directory below.
+        if configured != Path("/.local/logs") or any((configured / name).is_file() for name in SOURCE_FILES.values()):
+            return configured
+
     here = Path(__file__).resolve()
-    repo = here.parents[4]  # system_logs→mcp_servers→api→apps→repo
-    return (repo / ".local" / "logs").resolve()
+    candidates = [
+        Path.cwd() / ".local" / "logs",
+        here.parents[4] / ".local" / "logs" if len(here.parents) > 4 else Path("/.local/logs"),
+        Path("/app/data/logs"),
+        Path("/workspace/.local/logs"),
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    # apps/api/mcp_servers/system_logs/tools.py → repo root in a source tree;
+    # /app/mcp_servers/... → /app in the production API image.
+    if len(here.parents) > 4 and (here.parents[4] / "apps").is_dir():
+        return (here.parents[4] / ".local" / "logs").resolve()
+    if len(here.parents) > 2 and here.parents[2].name == "app":
+        return (here.parents[2] / "data" / "logs").resolve()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    here = Path(__file__).resolve()
+    return (here.parent / ".local" / "logs").resolve()
 
 
 def _clip(text: str, limit: int | None = None) -> str:
@@ -135,7 +158,7 @@ def _im_events_source_meta() -> dict[str, Any]:
             "exists": False,
             "size_bytes": 0,
             "mtime": None,
-            "note": "DATABASE_URL 未配置",
+            "note": "DATABASE_URL 未配置（im_events 需要指向 GAP 数据库）",
         }
     try:
         from sqlalchemy import create_engine, text
@@ -371,7 +394,7 @@ def _sqlite_path() -> Path | None:
 def _im_events_tail(lines: int = DEFAULT_LINES, grep: str = "") -> str:
     path = _sqlite_path()
     if not path:
-        return "错误: im_events 需要可访问的 SQLITE DATABASE_URL（当前未配置或非 sqlite）"
+        return "错误: im_events 需要可访问的 DATABASE_URL（SQLite 或 PostgreSQL 均可）"
     n = max(1, min(int(lines or DEFAULT_LINES), MAX_LINES))
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -400,7 +423,7 @@ def _im_events_search(
 ) -> str:
     path = _sqlite_path()
     if not path:
-        return "错误: im_events 需要 SQLITE DATABASE_URL"
+        return "错误: im_events 需要可访问的 DATABASE_URL（SQLite 或 PostgreSQL 均可）"
     limit = max(1, min(int(limit or 100), MAX_LINES))
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -441,7 +464,7 @@ def _im_events_search(
 def _im_events_stats(minutes: int = 60) -> dict[str, Any]:
     path = _sqlite_path()
     if not path:
-        return {"error": "im_events 需要 SQLITE DATABASE_URL", "source": "im_events"}
+        return {"error": "im_events 需要可访问的 DATABASE_URL（SQLite 或 PostgreSQL 均可）", "source": "im_events"}
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         rows = conn.execute(

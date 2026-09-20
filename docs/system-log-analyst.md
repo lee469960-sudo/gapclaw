@@ -9,7 +9,7 @@
 | `api` | `.local/logs/api.log` |
 | `web` | `.local/logs/web.log` |
 | `cloudflared` | `.local/logs/cloudflared.log` |
-| `im_events` | DB `im_event_logs`（需 sqlite `DATABASE_URL`） |
+| `im_events` | DB `im_event_logs`（需可访问的 SQLite/PostgreSQL `DATABASE_URL`） |
 
 Agent **不能**直接读宿主机路径；必须通过 MCP 工具。
 
@@ -53,6 +53,6 @@ API 启动时若 `SEED_SYSTEM_LOGS=true`（默认），会注册：
 1. MCP 管理新增 stdio：
    - command：当前 API 的 Python 解释器
    - args：`["-m","mcp_servers.system_logs"]`
-   - env：`LOG_DIR=<repo>/.local/logs`，`PYTHONPATH=<repo>/apps/api`，`DATABASE_URL=<绝对 sqlite URL>`
+   - env：`LOG_DIR=<repo>/.local/logs`，`PYTHONPATH=<repo>/apps/api`，`DATABASE_URL=<GAP 数据库 URL>`
 2. Skills 上传 `seed_assets/system-log-analyst`
 3. Agent 绑定 MCP + Skill，开启 `mcp_tool_call` / `skill_read_md`

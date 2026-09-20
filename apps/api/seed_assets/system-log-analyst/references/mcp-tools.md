@@ -10,4 +10,4 @@
 环境变量：
 
 - `LOG_DIR`：日志目录（默认仓库 `.local/logs`）
-- `DATABASE_URL`：可选，sqlite 时支持 `im_events`
+- `DATABASE_URL`：可选，指向 GAP 数据库时支持 `im_events`（SQLite/PostgreSQL）

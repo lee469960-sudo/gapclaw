@@ -31,7 +31,13 @@ logger = logging.getLogger(__name__)
 
 SEED_DIR = Path(__file__).resolve().parent.parent / "seed_assets"
 API_DIR = Path(__file__).resolve().parent.parent
-REPO_ROOT = API_DIR.parent.parent
+# Source checkout: apps/api -> repository root. Production image: the API
+# directory is copied directly to /app, so /app is the runtime root.
+REPO_ROOT = (
+    API_DIR.parent.parent
+    if (API_DIR.parent.parent / "apps").is_dir()
+    else API_DIR.parent
+)
 
 DBA_PROMPT = """你是一名专业的数据库管理员（DBA）。收到用户问题后，认真思考，并通过工具组合解决/回答。
 过程产物写入 task/<毫秒时间戳>/；仅最终交付文件写入当前目录（工作区根，例如 WRITE: dba_daily_checklist.md）。
@@ -476,7 +482,11 @@ def _seed_system_logs(db: Session, creator: str, settings, llm=None, sandbox=Non
         "system_log_skill_id": None,
         "system_log_agent_id": None,
     }
-    log_dir = (REPO_ROOT / ".local" / "logs").resolve()
+    log_dir = (
+        (REPO_ROOT / ".local" / "logs")
+        if (REPO_ROOT / "apps").is_dir()
+        else (Path(settings.data_dir) / "logs")
+    ).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
     mcp = db.query(MCP).filter(MCP.name == "system-logs").first()
