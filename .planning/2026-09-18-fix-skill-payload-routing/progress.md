@@ -13,3 +13,4 @@
 - Task 3.3: 能力匹配不再要求 MCP 专属操作词；显式操作词命中一个能力词即可，未带操作词但命中至少两个名称/标签/描述词也进入 task；定义、解释、原理类知识问题继续 chat。验证“沪深300 最近涨停的股票”→`task`，“涨停是什么意思”→`chat`；focused suite 26 passed。
 - Task 3.4: 修复绑定 MCP 任务首轮无工具调用却输出 FINAL 的提前结束：仅当首轮已选中 MCP 且工具调用数为 0 时记录 `tool_required_retry`，注入必须调用工具的教练提示并只允许一次纠偏；后续补充路由和普通对话不受影响。新增真实 modular runtime 回归，验证首轮 `FINAL` 后继续执行 MCP 再完成。新增回归 1 passed；受影响回归 62 passed。
 - Task 3.5: 使用本地真实 Agent `tushare`（绑定 `tushareMcp`，标签为“金融/数据/A股/tushare/选股”）复现用户原始请求，确认原先因“选出标的 + 条件列表”未与短标签重叠而误入 chat；新增结构化外部任务判定，仍由 LLM 路由候选 MCP。真实元数据分类结果为 `task`，专项 execution_policy 14 passed。
+- Task 3.6: 从本地 `.local/logs/api.log` 确认 API 热重载在运行中断开 WebSocket、后端已 `running=false` 但前端未收到 `done`，导致页面永久转圈。AgentChat 状态轮询在 `prev=true -> next=false` 且仍 sending/streaming 时主动 `markRunFinished()` 并刷新历史，避免丢失终态事件后卡死。

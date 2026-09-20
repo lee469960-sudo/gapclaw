@@ -163,7 +163,10 @@
               </div>
               <div :class="['msg-bubble', item.m.role, item.m.role === 'assistant' ? 'md-body' : '']">
                 <div v-if="item.sourceLabel" class="src-tag">{{ item.sourceLabel }}</div>
-                <pre v-if="item.m.role === 'user'" class="content">{{ item.m.content }}</pre>
+                <CollapsibleUserContent
+                  v-if="item.m.role === 'user'"
+                  :content="item.m.content"
+                />
                 <div
                   v-else
                   class="content md-render"
@@ -310,6 +313,7 @@ import SessionNoteDialog from '../components/SessionNoteDialog.vue'
 import SessionTickDialog from '../components/SessionTickDialog.vue'
 import ThemeSwitch from '../components/ThemeSwitch.vue'
 import VoiceInputButton from '../components/VoiceInputButton.vue'
+import CollapsibleUserContent from '../components/CollapsibleUserContent.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -1343,6 +1347,14 @@ async function checkStatus({ forIdlePoll = false } = {}) {
   if (!next) userRequestedStop = false
   running.value = next
   if (prev && !next) {
+    // A dev-server/API reload or a dropped WebSocket can lose the terminal
+    // `done` event while the backend has already cleared its run registry.
+    // Do not leave the composer and execution card spinning forever; recover
+    // the persisted assistant message through the normal history endpoint.
+    if (sending.value || streaming.value) {
+      markRunFinished()
+      loadHistory().catch(() => {})
+    }
     reloadWorkspacePanels()
   }
   if (forIdlePoll) bumpStatusBackoff(next !== prev)
