@@ -199,6 +199,15 @@ class ChatBody(BaseModel):
     artifact_id: str | None = None
     code_run_id: str | None = None
     confirmed: bool | None = None
+    task_id: str | None = None
+    schedule_type: str | None = None
+    interval_seconds: int | None = None
+    run_at: str | None = None
+    timezone: str | None = None
+    snapshot_enabled: bool | None = None
+    notification_enabled: bool | None = None
+    notification_channel_id: str | None = None
+    notification_chat_id: str | None = None
 
 
 def _agent_session_ids(agent: Agent) -> set[str]:
@@ -772,7 +781,131 @@ async def chat_post(
             return fail(str(e) or "生成总结失败")
         return ok({"content": content}, "已生成总结")
 
+    if act in ("list_scheduled_tasks", "create_scheduled_task", "update_scheduled_task", "toggle_scheduled_task", "delete_scheduled_task", "run_scheduled_task_now", "stop_scheduled_task"):
+        from sqlalchemy import func
+        from app.models import ScheduledTask, ScheduledTaskRun
+        from app.services.scheduled_tasks.authorization import ScheduledTaskAuthorizationError, require_session_task_manager
+        from app.services.scheduled_tasks.tasks import ScheduledTaskValidationError, create_task, payload, request_stop_task, soft_delete_task, update_task
+        task = db.get(ScheduledTask, body.task_id) if body.task_id else None
+        try:
+            require_session_task_manager(db, user, body.agent_id or (task.agent_id if task else ""), body.session_id or (task.session_id if task else ""), task)
+            if act == "list_scheduled_tasks":
+                rows = db.query(ScheduledTask).filter_by(agent_id=body.agent_id, session_id=body.session_id).filter(ScheduledTask.deleted_at == None).all()
+                task_ids = [row.id for row in rows]
+                counts = {}
+                if task_ids:
+                    counts = dict(db.query(
+                        ScheduledTaskRun.task_id, func.count(ScheduledTaskRun.id),
+                    ).filter(
+                        ScheduledTaskRun.task_id.in_(task_ids),
+                        ScheduledTaskRun.state.in_(("running", "succeeded", "failed")),
+                    ).group_by(ScheduledTaskRun.task_id).all())
+                return ok([{
+                    **payload(row),
+                    # A run is counted once it has started; retry attempt is a
+                    # separate per-run failure counter and must not drive this UI.
+                    "execution_count": counts.get(row.id, 0),
+                } for row in rows])
+            if act == "run_scheduled_task_now":
+                if not task: return fail("scheduled_task_not_found")
+                from app.services.scheduled_tasks.scheduler import create_manual_run
+                run = create_manual_run(db, task)
+                return ok({"run_id": run.id, "state": run.state}, "已加入执行队列")
+            if act == "stop_scheduled_task":
+                if not task: return fail("scheduled_task_not_found")
+                run_ids = request_stop_task(db, task)
+                return ok({"run_ids": run_ids, "state": "cancelling"}, "已请求停止当前定时任务")
+            if act == "create_scheduled_task":
+                row = create_task(db, agent_id=body.agent_id or "", session_id=body.session_id or "", owner=user.username,
+                    message=body.message or "", schedule_type=body.schedule_type or "cron", cron=body.cron or "",
+                    interval_seconds=body.interval_seconds or 0, run_at=body.run_at or "", timezone=body.timezone or "Asia/Shanghai",
+                    enabled=True if body.enabled is None else body.enabled, snapshot_enabled=bool(body.snapshot_enabled),
+                    notification_enabled=bool(body.notification_enabled), notification_channel_id=body.notification_channel_id or "", notification_chat_id=body.notification_chat_id or "")
+                return ok(payload(row), "添加成功")
+            if act in ("update_scheduled_task", "toggle_scheduled_task"):
+                if not task: return fail("scheduled_task_not_found")
+                values = {"enabled": body.enabled} if act == "toggle_scheduled_task" else {
+                    "schedule_type": body.schedule_type or task.schedule_type, "cron": body.cron if body.cron is not None else task.cron,
+                    "interval_seconds": body.interval_seconds if body.interval_seconds is not None else task.interval_seconds,
+                    "run_at": body.run_at if body.run_at is not None else (task.run_at.isoformat() if task.run_at else ""),
+                    "timezone": body.timezone or task.timezone, "message": body.message if body.message is not None else task.message,
+                    "enabled": task.enabled if body.enabled is None else body.enabled,
+                    "snapshot_enabled": task.snapshot_enabled if body.snapshot_enabled is None else body.snapshot_enabled,
+                    "notification_enabled": task.notification_enabled if body.notification_enabled is None else body.notification_enabled,
+                    "notification_channel_id": body.notification_channel_id if body.notification_channel_id is not None else task.notification_channel_id,
+                    "notification_chat_id": body.notification_chat_id if body.notification_chat_id is not None else task.notification_chat_id,
+                }
+                return ok(payload(update_task(db, task, **values)), "更新成功")
+            if not task: return fail("scheduled_task_not_found")
+            soft_delete_task(db, task); return ok(None, "已删除")
+        except (ScheduledTaskAuthorizationError, ScheduledTaskValidationError) as exc:
+            return fail(str(exc))
+
+    if act == "scheduled_task_progress":
+        from app.models import ScheduledTask, ScheduledTaskRun, ScheduledTaskProgress
+        from app.services.scheduled_tasks.authorization import require_session_task_manager, ScheduledTaskAuthorizationError
+        try:
+            require_session_task_manager(db, user, body.agent_id or "", body.session_id or "")
+        except ScheduledTaskAuthorizationError as exc:
+            return fail(str(exc))
+        scoped = db.query(ScheduledTaskRun).join(ScheduledTask, ScheduledTask.id == ScheduledTaskRun.task_id).filter(
+            ScheduledTask.agent_id == body.agent_id, ScheduledTask.session_id == body.session_id,
+        )
+        run = scoped.filter(ScheduledTaskRun.state == "running").order_by(ScheduledTaskRun.started_at.desc()).first()
+        if run is None:
+            run = scoped.order_by(ScheduledTaskRun.queued_at.desc()).first()
+        if run is None:
+            return ok(None)
+        progress = db.get(ScheduledTaskProgress, run.id)
+        safe = _steps_tail_for_message(json.dumps({"steps": json.loads(progress.steps or "[]") if progress else []}), limit=200)
+        return ok({"id": run.id, "task_id": run.task_id, "state": run.state, "steps": safe["steps"],
+                   "cancel_requested": run.cancel_requested_at is not None,
+                   "error_summary": (run.error_summary or "")[:500], "chat_message_id": run.chat_message_id})
+
+    if act == "list_scheduled_task_runs":
+        from app.models import ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun
+        from app.services.scheduled_tasks.authorization import ScheduledTaskAuthorizationError, require_session_task_manager
+        task = db.get(ScheduledTask, body.task_id)
+        try:
+            require_session_task_manager(db, user, body.agent_id or (task.agent_id if task else ""), body.session_id or (task.session_id if task else ""), task)
+        except ScheduledTaskAuthorizationError as exc:
+            return fail(str(exc))
+        if not task: return fail("scheduled_task_not_found")
+        limit = min(max(int(body.limit or 20), 1), 100)
+        runs = db.query(ScheduledTaskRun).filter_by(task_id=task.id).order_by(ScheduledTaskRun.queued_at.desc()).limit(limit).all()
+        return ok([{
+            "id": run.id, "state": run.state, "source": run.source, "attempt": run.attempt,
+            "scheduled_for": run.scheduled_for.isoformat(), "started_at": run.started_at.isoformat() if run.started_at else "",
+            "finished_at": run.finished_at.isoformat() if run.finished_at else "", "error_summary": (run.error_summary or "")[:500],
+            "cancel_requested": run.cancel_requested_at is not None,
+            "chat_message_id": run.chat_message_id,
+            "notifications": [{"state": item.state, "attempts": item.attempts, "error_summary": (item.error_summary or "")[:500]}
+                              for item in db.query(ScheduledTaskNotificationDelivery).filter_by(run_id=run.id).all()],
+        } for run in runs])
+
+    if act == "retry_scheduled_task_run":
+        from app.models import ScheduledTask, ScheduledTaskRun
+        from app.services.scheduled_tasks.authorization import ScheduledTaskAuthorizationError, require_session_task_manager
+        from app.services.scheduled_tasks.scheduler import retry_failed_run
+        run = db.get(ScheduledTaskRun, body.task_id)
+        task = db.get(ScheduledTask, run.task_id) if run else None
+        try:
+            require_session_task_manager(db, user, task.agent_id if task else "", task.session_id if task else "", task)
+        except ScheduledTaskAuthorizationError as exc:
+            return fail(str(exc))
+        if not run: return fail("scheduled_task_run_not_found")
+        retry = retry_failed_run(db, run)
+        return ok({"run_id": retry.id, "state": retry.state})
+
     if act in ("list_ticks", "add_tick", "update_tick", "toggle_tick", "delete_tick", "ping"):
+        if act in ("add_tick", "update_tick", "toggle_tick", "delete_tick"):
+            return fail("legacy_tick_write_deprecated")
+        if act == "list_ticks":
+            from app.models import ScheduledTask
+            _agent, err = _validate_tick_scope(db, body.agent_id, body.session_id)
+            if err: return fail(err)
+            rows = db.query(ScheduledTask).filter_by(agent_id=body.agent_id, session_id=body.session_id).filter(ScheduledTask.deleted_at == None).all()
+            return ok([{"tick_id": r.id, "cron": r.cron, "message": r.message, "enabled": r.enabled, "next_run_time": r.next_run_at.isoformat() if r.next_run_at else ""} for r in rows])
         if act == "add_tick":
             _agent, err = _validate_tick_scope(db, body.agent_id, body.session_id)
             if err:

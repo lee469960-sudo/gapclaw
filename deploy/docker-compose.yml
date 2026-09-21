@@ -88,5 +88,33 @@ services:
       - api
     restart: unless-stopped
 
+  scheduled-task-worker:
+    image: ${GAP_IMAGE_API}
+    command: ["python", "-m", "app.workers.scheduled_tasks"]
+    profiles: ["scheduled-tasks"]
+    environment:
+      DATABASE_URL: postgresql://gap:gap@db:5432/gap
+      SCHEDULED_TASKS_WORKER_ENABLED: ${SCHEDULED_TASKS_WORKER_ENABLED:-false}
+      SCHEDULED_TASKS_SHADOW_MODE: ${SCHEDULED_TASKS_SHADOW_MODE:-false}
+      SCHEDULED_TASKS_SINGLE_EXECUTOR: "true"
+      SCHEDULED_TASKS_POLL_SECONDS: ${SCHEDULED_TASKS_POLL_SECONDS:-15}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  scheduled-task-notification-worker:
+    image: ${GAP_IMAGE_API}
+    command: ["python", "-m", "app.workers.scheduled_task_notifications"]
+    profiles: ["scheduled-tasks"]
+    environment:
+      DATABASE_URL: postgresql://gap:gap@db:5432/gap
+      SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED: ${SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED:-false}
+      SCHEDULED_TASKS_POLL_SECONDS: ${SCHEDULED_TASKS_POLL_SECONDS:-15}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pgdata:

@@ -472,38 +472,44 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
         for t in ticks:
             tick_scheduler.remove_tick_job(t.tick_id)
         db.query(AgentTick).filter(AgentTick.agent_id == a.id, AgentTick.session_id == sid).delete()
+        from app.models import ScheduledTask
+        for task in db.query(ScheduledTask).filter(
+            ScheduledTask.agent_id == a.id, ScheduledTask.session_id == sid,
+            ScheduledTask.deleted_at == None,
+        ).all():
+            task.enabled = False
+            from datetime import datetime, timezone
+            task.deleted_at = datetime.now(timezone.utc)
         sessions = [s for s in json.loads(a.session_list or "[]") if s["session_id"] != sid]
         a.session_list = json.dumps(sessions)
         db.commit()
         return ok(sessions, "删除成功")
 
     if action == "list_ticks":
-        ticks = db.query(AgentTick).filter(
-            AgentTick.agent_id == (body.agent_id or body.id),
-            AgentTick.session_id == body.session_id,
+        from app.models import ScheduledTask
+        ticks = db.query(ScheduledTask).filter(
+            ScheduledTask.agent_id == (body.agent_id or body.id),
+            ScheduledTask.session_id == body.session_id, ScheduledTask.deleted_at == None,
         ).all()
         return ok([{
-            "tick_id": t.tick_id, "cron": t.cron, "message": t.message,
-            "enabled": t.enabled, "creator": t.creator, "agent_id": t.agent_id,
+            "tick_id": t.id, "cron": t.cron, "message": t.message,
+            "enabled": t.enabled, "creator": t.owner_username, "agent_id": t.agent_id,
         } for t in ticks])
 
     if action == "list_all_ticks":
-        ticks = db.query(AgentTick).filter(AgentTick.creator == user.username).all()
+        from app.models import ScheduledTask
+        ticks = db.query(ScheduledTask).filter(
+            ScheduledTask.owner_username == user.username, ScheduledTask.deleted_at == None,
+        ).all()
         return ok([{
-            "tick_id": t.tick_id, "cron": t.cron, "message": t.message,
+            "tick_id": t.id, "cron": t.cron, "message": t.message,
             "enabled": t.enabled, "agent_id": t.agent_id, "session_id": t.session_id,
         } for t in ticks])
 
     if action == "toggle_tick":
-        t = db.query(AgentTick).filter(AgentTick.tick_id == body.tick_id).first()
-        if t:
-            t.enabled = body.enabled if body.enabled is not None else not t.enabled
-            db.commit()
-        return ok(None, "操作成功")
+        return fail("legacy_tick_write_deprecated")
 
     if action == "delete_tick":
-        db.query(AgentTick).filter(AgentTick.tick_id == body.tick_id).delete()
-        db.commit()
-        return ok(None, "删除成功")
+        return fail("legacy_tick_write_deprecated")
 
     return fail("未知操作")

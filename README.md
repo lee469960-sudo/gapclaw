@@ -17,7 +17,7 @@ chmod +x start.sh scripts/*.sh
 ./start.sh
 ```
 
-会自动：安装依赖、启动 API（:8000）+ Vite 前端（:5173）、打开登录页。
+会自动：安装依赖、启动 API（:8000）+ Vite 前端（:5173）+ 定时任务执行/通知 Worker、打开登录页。需要 API-only 启动时使用 `ENABLE_SCHEDULED_TASKS=0 ./start.sh`。
 
 - 地址：http://127.0.0.1:5173/login
 - 账号：`admin` / `admin123`

@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     # separate from registry credentials and never participates in public views.
     release_hook_secret: str = ""
     release_hook_max_age_seconds: int = 300
+    # Scheduled-task Workers are opt-in until runtime/writeback integration is enabled.
+    scheduled_tasks_worker_enabled: bool = False
+    scheduled_tasks_shadow_mode: bool = False
+    scheduled_tasks_single_executor: bool = True
+    scheduled_tasks_poll_seconds: int = 15
+    scheduled_task_notifications_worker_enabled: bool = False
 
     @property
     def cors_origin_list(self) -> list[str]:

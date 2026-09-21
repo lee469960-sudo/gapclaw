@@ -188,6 +188,45 @@
             </div>
           </div>
 
+          <div v-if="scheduledProgress?.state === 'running'" class="msg-row assistant-row">
+            <div class="agent-avatar"><span>∞</span></div>
+            <div class="msg-col">
+              <div class="exec-card">
+                <div class="exec-header" role="button" @click="toggleExec('scheduled')">
+                  <el-icon class="exec-arrow" :class="{ open: isExecOpen('scheduled') }"><ArrowRight /></el-icon>
+                  <span class="exec-title">定时任务执行中</span>
+                  <span class="exec-badge">{{ scheduledProgress.steps.length }} 个步骤</span>
+                  <el-button link type="danger" size="small" @click.stop="stopScheduledTask">停止任务</el-button>
+                </div>
+                <div v-if="isExecOpen('scheduled')" class="exec-steps">
+                  <div v-if="!scheduledProgress.steps.length" class="exec-step">
+                    <el-icon class="step-status running is-loading"><Loading /></el-icon>
+                    <div class="step-body"><div class="step-title"><span>正在启动 Agent…</span></div></div>
+                  </div>
+                  <div
+                    v-for="(step, index) in scheduledProgress.steps"
+                    :key="index"
+                    :class="['exec-step', { 'is-expandable': isStepDetailExpandable(step) }]"
+                    :role="isStepDetailExpandable(step) ? 'button' : undefined"
+                    :tabindex="isStepDetailExpandable(step) ? 0 : undefined"
+                    @click="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey('scheduled', index))"
+                    @keydown.enter.prevent="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey('scheduled', index))"
+                  >
+                    <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
+                    <div class="step-body">
+                      <div class="step-title"><span>{{ stepTitle(step) }}</span></div>
+                      <pre v-if="isStepDetailExpandable(step) && isToolDetailOpen(toolStepKey('scheduled', index))" class="step-snippet">{{ executionStepDetail(step) }}</pre>
+                      <div v-else-if="stepDetail(step)" class="step-content">{{ stepDetail(step) }}</div>
+                    </div>
+                    <el-icon v-if="isStepDetailExpandable(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey('scheduled', index)) }"><ArrowRight /></el-icon>
+                    <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
+                    <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
+                    <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
           <div v-if="streaming" class="msg-row assistant-row">
             <div class="agent-avatar"><span>∞</span></div>
             <div class="msg-col">
@@ -330,6 +369,31 @@ const input = ref('')
 const sending = ref(false)
 const streaming = ref(false)
 const liveSteps = ref([])
+const scheduledProgress = ref(null)
+let scheduledProgressTimer = null
+let scheduledProgressBusy = false
+
+async function pollScheduledProgress() {
+  if (scheduledProgressBusy || !sessionId.value || document.hidden) return
+  scheduledProgressBusy = true
+  const sid = sessionId.value
+  try {
+    const res = await postCgi('/pages/page_agent_chat.cgi?action=scheduled_task_progress', { agent_id: agentId, session_id: sid })
+    if (!pageAlive || sid !== sessionId.value) return
+    const previous = scheduledProgress.value
+    scheduledProgress.value = res.data || null
+    if (res.data?.state === 'running') {
+      execOpen.value = { ...execOpen.value, scheduled: true }
+    }
+    if (res.data && (previous?.id !== res.data.id || previous?.state !== res.data.state)) {
+      await loadHistory()
+    }
+  } catch {
+    // Keep the regular conversation available during transient polling errors.
+  } finally {
+    scheduledProgressBusy = false
+  }
+}
 const seenCodeEventKeys = new Set()
 const running = ref(false)
 const liveStatusText = ref('正在处理请求')
@@ -1847,6 +1911,17 @@ async function stop() {
   markRunFinished()
 }
 
+async function stopScheduledTask() {
+  const taskId = scheduledProgress.value?.task_id
+  if (!taskId) return
+  await ElMessageBox.confirm('将停止当前执行、取消排队实例，并停用后续触发。已发生的外部工具操作无法回滚。', '停止定时任务', { type: 'warning' })
+  await postCgi('/pages/page_agent_chat.cgi?action=stop_scheduled_task', {
+    task_id: taskId, agent_id: agentId, session_id: sessionId.value,
+  })
+  ElMessage.success('已请求停止，Worker 会在当前步骤结束后取消')
+  await pollScheduledProgress()
+}
+
 async function clearHistory() {
   await ElMessageBox.confirm('确定清空当前会话的所有对话？', '清空对话', { type: 'warning' })
   await postCgi('/pages/page_agent_chat.cgi?action=clear_history', {
@@ -1945,6 +2020,8 @@ function switchToInboundSession() {
 watch(() => route.query.session, async (sid) => {
   if (sid && sid !== sessionId.value) {
     sessionId.value = sid
+    scheduledProgress.value = null
+    pollScheduledProgress()
     activeCodeRunId.value = ''
     clearInboundNotice(sid)
     clearResumePoll()
@@ -1974,10 +2051,13 @@ onMounted(async () => {
   await resumeIfRunning()
   resetIdleStatusPoll()
   document.addEventListener('visibilitychange', onVisibilityChange)
+  pollScheduledProgress()
+  scheduledProgressTimer = setInterval(pollScheduledProgress, 1500)
 })
 
 onUnmounted(() => {
   pageAlive = false
+  clearInterval(scheduledProgressTimer)
   intentionalWsClose = true
   clearResumePoll()
   clearWsTimers()

@@ -10,6 +10,9 @@ PID_DIR="$ROOT/.local/pids"
 API_PORT="${API_PORT:-8000}"
 WEB_PORT="${WEB_PORT:-5173}"
 ENABLE_CLOUDFLARED="${ENABLE_CLOUDFLARED:-1}"
+# Local development should exercise the complete feature.  Deployments keep the
+# workers separately feature-gated in Compose; set this to 0 for API-only work.
+ENABLE_SCHEDULED_TASKS="${ENABLE_SCHEDULED_TASKS:-1}"
 
 mkdir -p "$LOG_DIR" "$PID_DIR" "$ROOT/.local"
 
@@ -48,6 +51,31 @@ start_api() {
   echo $! >"$PID_DIR/api.pid"
 }
 
+start_scheduled_task_workers() {
+  if [ "$ENABLE_SCHEDULED_TASKS" != "1" ]; then
+    log "已跳过定时任务 Workers（ENABLE_SCHEDULED_TASKS=0）"
+    return
+  fi
+  cd "$ROOT/apps/api"
+  log "启动定时任务执行与通知 Workers ..."
+  nohup env \
+    SCHEDULED_TASKS_WORKER_ENABLED=true \
+    SCHEDULED_TASKS_SHADOW_MODE=false \
+    SCHEDULED_TASKS_SINGLE_EXECUTOR=true \
+    SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED=true \
+    "$ROOT/apps/api/.venv/bin/python" -m app.workers.scheduled_tasks \
+    >"$LOG_DIR/scheduled-tasks.log" 2>&1 &
+  echo $! >"$PID_DIR/scheduled-tasks.pid"
+  nohup env \
+    SCHEDULED_TASKS_WORKER_ENABLED=true \
+    SCHEDULED_TASKS_SHADOW_MODE=false \
+    SCHEDULED_TASKS_SINGLE_EXECUTOR=true \
+    SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED=true \
+    "$ROOT/apps/api/.venv/bin/python" -m app.workers.scheduled_task_notifications \
+    >"$LOG_DIR/scheduled-task-notifications.log" 2>&1 &
+  echo $! >"$PID_DIR/scheduled-task-notifications.pid"
+}
+
 wait_api() {
   local ok=0
   for _ in $(seq 1 60); do
@@ -69,7 +97,7 @@ need_cmd npm
 need_cmd curl
 
 # 若已在运行，先停止（含 cloudflared）
-if [ -f "$PID_DIR/api.pid" ] || [ -f "$PID_DIR/web.pid" ] || [ -f "$PID_DIR/cloudflared.pid" ]; then
+if [ -f "$PID_DIR/api.pid" ] || [ -f "$PID_DIR/web.pid" ] || [ -f "$PID_DIR/cloudflared.pid" ] || [ -f "$PID_DIR/scheduled-tasks.pid" ] || [ -f "$PID_DIR/scheduled-task-notifications.pid" ]; then
   log "检测到旧进程，正在停止..."
   "$ROOT/scripts/stop-local.sh" || true
 fi
@@ -89,6 +117,7 @@ fi
 log "启动 API :$API_PORT ..."
 start_api
 wait_api
+start_scheduled_task_workers
 
 # --- cloudflared → PUBLIC_BASE_URL → 重启 API ---
 PUBLIC_URL=""

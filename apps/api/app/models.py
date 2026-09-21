@@ -747,6 +747,111 @@ class AgentTick(Base):
     creator: Mapped[str] = mapped_column(String(64), default="")
 
 
+class ScheduledTask(Base):
+    """Durable, session-scoped configuration for an automatic Agent task."""
+
+    __tablename__ = "scheduled_tasks"
+    __table_args__ = (
+        UniqueConstraint("legacy_agent_tick_id", name="uq_scheduled_task_legacy_tick"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(16), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    owner_username: Mapped[str] = mapped_column(String(64), index=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    schedule_type: Mapped[str] = mapped_column(String(16), default="cron")
+    cron: Mapped[str] = mapped_column(String(128), default="")
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    snapshot_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    config_snapshot: Mapped[str] = mapped_column(Text, default="{}")
+    notification_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    notification_channel_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    notification_chat_id: Mapped[str] = mapped_column(String(128), default="")
+    legacy_agent_tick_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    migration_reason: Mapped[str] = mapped_column(Text, default="")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow,
+    )
+
+
+class ScheduledTaskRun(Base):
+    """One idempotent scheduled or manual execution attempt for a task."""
+
+    __tablename__ = "scheduled_task_runs"
+    __table_args__ = (
+        UniqueConstraint("task_id", "occurrence_key", name="uq_scheduled_task_run_occurrence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(16), index=True)
+    occurrence_key: Mapped[str] = mapped_column(String(96))
+    source: Mapped[str] = mapped_column(String(16), default="scheduled")
+    state: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    lease_owner: Mapped[str] = mapped_column(String(64), default="")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    chat_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    config_snapshot: Mapped[str] = mapped_column(Text, default="{}")
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+
+
+class ScheduledTaskProgress(Base):
+    """Cross-process view of the steps produced by a scheduled Worker."""
+
+    __tablename__ = "scheduled_task_progress"
+    run_id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    steps: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class ScheduledTaskSessionSlot(Base):
+    """A lease that serializes automatic work for one Agent session."""
+
+    __tablename__ = "scheduled_task_session_slots"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    active_run_id: Mapped[str] = mapped_column(String(16), default="", index=True)
+    lease_owner: Mapped[str] = mapped_column(String(64), default="")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True,
+    )
+
+
+class ScheduledTaskNotificationDelivery(Base):
+    """Outbox record for a scheduled-task result notification."""
+
+    __tablename__ = "scheduled_task_notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("run_id", "channel_id", name="uq_scheduled_task_delivery_run_channel"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(16), index=True)
+    channel_id: Mapped[str] = mapped_column(String(16), index=True)
+    destination: Mapped[str] = mapped_column(String(128), default="")
+    state: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+    attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
 

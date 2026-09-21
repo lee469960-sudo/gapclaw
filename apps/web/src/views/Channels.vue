@@ -38,6 +38,7 @@
         </div>
         <div class="card-meta">
           <div><span class="label">类型</span> {{ providerLabel(row.provider) }}</div>
+          <div><span class="label">渠道 ID</span> <code>{{ row.id }}</code> <el-button link size="small" @click="copyChannelId(row.id)">复制</el-button></div>
           <div>
             <span class="label">权限</span>
             {{ row.visibility === 'public' ? '公共' : '私有' }}
@@ -441,6 +442,11 @@ async function toggleEnabled(row, v) {
   })
   row.enabled = v
   notifyTelegramSync(res.data?.telegram_sync)
+}
+
+async function copyChannelId(id) {
+  await navigator.clipboard.writeText(id)
+  ElMessage.success('渠道 ID 已复制')
 }
 
 async function syncTelegram(row) {

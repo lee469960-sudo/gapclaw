@@ -4,11 +4,88 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import User, RoleDefinition
-from app.security import hash_password, now_str
+from app.models import Agent, AgentTick, RoleDefinition, ScheduledTask, User
+from app.security import hash_password, new_id, now_str
 
 
 logger = logging.getLogger(__name__)
+
+
+def _legacy_agent_session_ids(agent: Agent) -> set[str]:
+    try:
+        sessions = json.loads(agent.session_list or "[]")
+    except (TypeError, json.JSONDecodeError):
+        sessions = []
+    return {
+        str(item.get("session_id") or "").strip()
+        for item in sessions
+        if isinstance(item, dict) and str(item.get("session_id") or "").strip()
+    } or {str(agent.id)}
+
+
+def _legacy_tick_migration_reason(tick: AgentTick, agent: Agent | None) -> str:
+    if not agent:
+        return "legacy_tick_agent_missing"
+    if not str(tick.creator or "").strip():
+        return "legacy_tick_owner_missing"
+    if str(tick.session_id or "").strip() not in _legacy_agent_session_ids(agent):
+        return "legacy_tick_session_not_owned"
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+
+        CronTrigger.from_crontab(str(tick.cron or "").strip())
+    except Exception:
+        return "legacy_tick_cron_invalid"
+    return ""
+
+
+def migrate_legacy_agent_ticks(db: Session) -> None:
+    """Create one auditable scheduled task for every unmigrated legacy Tick."""
+    for tick in db.query(AgentTick).all():
+        if db.query(ScheduledTask).filter(
+            ScheduledTask.legacy_agent_tick_id == tick.id
+        ).first():
+            continue
+        agent = db.query(Agent).filter(Agent.id == tick.agent_id).first()
+        reason = _legacy_tick_migration_reason(tick, agent)
+        db.add(ScheduledTask(
+            id=new_id(),
+            agent_id=tick.agent_id,
+            session_id=tick.session_id,
+            owner_username=tick.creator or "",
+            message=tick.message or "",
+            schedule_type="cron",
+            cron=tick.cron or "",
+            timezone="Asia/Shanghai",
+            enabled=bool(tick.enabled) and not reason,
+            legacy_agent_tick_id=tick.id,
+            migration_reason=reason or "migrated_from_agent_tick",
+        ))
+    db.commit()
+
+
+def normalize_scheduled_task_next_runs(db: Session, now=None) -> None:
+    """Recompute enabled task next-run timestamps using the current UTC contract."""
+    from app.services.scheduled_tasks.tasks import next_run_at
+
+    changed = False
+    for task in db.query(ScheduledTask).filter(
+        ScheduledTask.enabled == True,
+        ScheduledTask.deleted_at == None,
+    ).all():
+        normalized = next_run_at(
+            task.schedule_type,
+            task.cron,
+            task.interval_seconds,
+            task.run_at,
+            task.timezone,
+            now,
+        )
+        if task.next_run_at != normalized:
+            task.next_run_at = normalized
+            changed = True
+    if changed:
+        db.commit()
 
 
 def init_db(db: Session) -> None:
@@ -28,6 +105,25 @@ def init_db(db: Session) -> None:
     upgrade_secure_workspace_schema(engine)
 
     insp = inspect(engine)
+    if "scheduled_tasks" in insp.get_table_names():
+        task_columns = {column["name"] for column in insp.get_columns("scheduled_tasks")}
+        if "legacy_agent_tick_id" not in task_columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE scheduled_tasks ADD COLUMN legacy_agent_tick_id INTEGER"
+                ))
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_scheduled_task_legacy_tick "
+                    "ON scheduled_tasks (legacy_agent_tick_id)"
+                ))
+    if "scheduled_task_runs" in insp.get_table_names():
+        run_columns = {column["name"] for column in insp.get_columns("scheduled_task_runs")}
+        if "cancel_requested_at" not in run_columns:
+            column_type = "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME"
+            with engine.begin() as conn:
+                conn.execute(text(
+                    f"ALTER TABLE scheduled_task_runs ADD COLUMN cancel_requested_at {column_type}"
+                ))
     if "users" in insp.get_table_names():
         ucols = {c["name"] for c in insp.get_columns("users")}
         if "organization_id" not in ucols:
@@ -304,6 +400,9 @@ def init_db(db: Session) -> None:
                 conn.execute(text("ALTER TABLE mcps ADD COLUMN command_args TEXT DEFAULT '[]'"))
             if "command_env" not in mcols:
                 conn.execute(text("ALTER TABLE mcps ADD COLUMN command_env TEXT DEFAULT '{}'"))
+
+    migrate_legacy_agent_ticks(db)
+    normalize_scheduled_task_next_runs(db)
 
     # Optional pgvector for semantic search acceleration
     if engine.dialect.name == "postgresql":

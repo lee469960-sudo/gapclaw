@@ -1,0 +1,1 @@
+"""Standalone Worker entry points."""

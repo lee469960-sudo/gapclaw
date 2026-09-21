@@ -824,6 +824,8 @@ class AgentRuntime:
             "user_id",
             "sender_username",
             "sender_display_name",
+            "scheduled_task_run_id",
+            "scheduled_task_source",
         ):
             if user_meta.get(k):
                 meta[k] = user_meta[k]

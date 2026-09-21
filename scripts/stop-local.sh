@@ -25,6 +25,8 @@ stop_pid() {
 
 stop_pid api
 stop_pid web
+stop_pid scheduled-tasks
+stop_pid scheduled-task-notifications
 stop_pid cloudflared
 stop_pid cloudflared-watch
 
