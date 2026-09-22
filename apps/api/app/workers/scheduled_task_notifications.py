@@ -6,7 +6,8 @@ Keeping the process separately gated prevents it from becoming an Agent executor
 from __future__ import annotations
 
 import logging
-import time
+import signal
+import threading
 
 from app.config import get_settings
 from app.startup import init_db
@@ -14,6 +15,17 @@ from app.database import SessionLocal
 from app.services.scheduled_tasks.notifications import deliver_pending
 
 logger = logging.getLogger("app.workers.scheduled_task_notifications")
+_SHUTDOWN = threading.Event()
+
+
+def _request_shutdown(signum, _frame) -> None:
+    logger.info("scheduled_task_notification_worker_shutdown_requested signal=%s", signum)
+    _SHUTDOWN.set()
+
+
+def _install_signal_handlers() -> None:
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
 
 
 def run_once() -> int:
@@ -28,15 +40,16 @@ def run_once() -> int:
 
 
 def main() -> None:
+    _install_signal_handlers()
     db = SessionLocal()
     try:
         init_db(db)
     finally:
         db.close()
     settings = get_settings()
-    while True:
+    while not _SHUTDOWN.is_set():
         run_once()
-        time.sleep(max(1, settings.scheduled_tasks_poll_seconds))
+        _SHUTDOWN.wait(max(1, settings.scheduled_tasks_poll_seconds))
 
 
 if __name__ == "__main__":

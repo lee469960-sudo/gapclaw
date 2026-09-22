@@ -6,8 +6,9 @@ Worker can run in shadow mode to verify due-instance calculations safely.
 from __future__ import annotations
 
 import logging
+import signal
 import socket
-import time
+import threading
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -17,6 +18,17 @@ from app.services.scheduled_tasks.lifecycle import finish_run_failure
 from app.startup import init_db
 
 logger = logging.getLogger("app.workers.scheduled_tasks")
+_SHUTDOWN = threading.Event()
+
+
+def _request_shutdown(signum, _frame) -> None:
+    logger.info("scheduled_task_worker_shutdown_requested signal=%s", signum)
+    _SHUTDOWN.set()
+
+
+def _install_signal_handlers() -> None:
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
 
 
 def run_once() -> dict[str, int]:
@@ -44,6 +56,7 @@ def run_once() -> dict[str, int]:
 
 
 def main() -> None:
+    _install_signal_handlers()
     settings = get_settings()
     if not settings.scheduled_tasks_single_executor:
         raise RuntimeError("scheduled_task_single_executor_required")
@@ -52,9 +65,9 @@ def main() -> None:
         init_db(db)
     finally:
         db.close()
-    while True:
+    while not _SHUTDOWN.is_set():
         run_once()
-        time.sleep(max(1, settings.scheduled_tasks_poll_seconds))
+        _SHUTDOWN.wait(max(1, settings.scheduled_tasks_poll_seconds))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,14 @@ class _Db:
         pass
 
 
+class _StopEvent:
+    def is_set(self):
+        return False
+
+    def wait(self, _timeout):
+        raise RuntimeError("stop")
+
+
 def test_scheduled_task_workers_default_to_safe_disabled(monkeypatch):
     settings = Settings()
     assert settings.scheduled_tasks_worker_enabled is False
@@ -30,7 +38,8 @@ def test_worker_entrypoints_initialize_schema_with_a_database_session(monkeypatc
         monkeypatch.setattr(module, "SessionLocal", _Db)
         monkeypatch.setattr(module, "init_db", lambda db: initialized.append(db))
         monkeypatch.setattr(module, "run_once", lambda: None)
-        monkeypatch.setattr(module.time, "sleep", lambda _: (_ for _ in ()).throw(RuntimeError("stop")))
+        monkeypatch.setattr(module, "_install_signal_handlers", lambda: None)
+        monkeypatch.setattr(module, "_SHUTDOWN", _StopEvent())
         try:
             module.main()
         except RuntimeError as exc:
