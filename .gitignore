@@ -32,6 +32,8 @@ benchmark/datasets/workbuddy_official/manifest.json
 logs/
 .codex/
 .claude/settings.local.json
+.planning/
+AGENTS.md
 
 # Production secrets (server-local only)
 deploy/.env
