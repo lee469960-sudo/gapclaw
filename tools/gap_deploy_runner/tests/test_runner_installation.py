@@ -130,6 +130,19 @@ def test_production_initializer_installs_the_runtime_expected_compose_filename()
     assert 'gap-prod.compose.yml" "$runner_root/compose/gap-production.compose.yml"' in initializer
 
 
+def test_production_runner_compose_includes_scheduled_task_workers():
+    compose = (Path(__file__).parents[1] / "assets" / "gap-prod.compose.yml").read_text(encoding="utf-8")
+
+    assert "scheduled-task-worker:" in compose
+    assert "scheduled-task-notification-worker:" in compose
+    assert "app.workers.scheduled_tasks" in compose
+    assert "app.workers.scheduled_task_notifications" in compose
+    assert "image: ${GAP_RELEASE_API_IMAGE:?immutable API digest is required}" in compose
+    assert "SCHEDULED_TASKS_WORKER_ENABLED: ${SCHEDULED_TASKS_WORKER_ENABLED:-false}" in compose
+    assert "SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED: ${SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED:-false}" in compose
+    assert "SCHEDULED_TASKS_SINGLE_EXECUTOR: \"true\"" in compose
+
+
 def test_deployment_documentation_matches_private_runner_and_fixed_asset_paths():
     documentation = (Path(__file__).parents[3] / "docs" / "deployment.md").read_text(encoding="utf-8")
 
