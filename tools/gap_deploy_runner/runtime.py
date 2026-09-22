@@ -38,7 +38,8 @@ class DockerComposeHost(ComposeAdapter):
     def _command(self, *args: str) -> list[str]:
         return [
             "docker", "compose", "--project-name", f"gap-{self.config.target_id}",
-            "--env-file", str(self.config.env_file), "-f", str(self.installation.compose_file), *args,
+            "--env-file", str(self.config.env_file), "-f", str(self.installation.compose_file),
+            "--profile", "scheduled-tasks", *args,
         ]
 
     def apply(self, manifest: ReleaseManifest) -> None:
@@ -83,7 +84,17 @@ class DockerComposeHost(ComposeAdapter):
                 return False
         if not isinstance(services, list) or not services:
             return False
-        return all(isinstance(item, dict) and item.get("Health") == "healthy" for item in services)
+        for item in services:
+            if not isinstance(item, dict):
+                return False
+            health = str(item.get("Health") or "").strip()
+            if health:
+                if health != "healthy":
+                    return False
+                continue
+            if str(item.get("State") or "").strip() != "running":
+                return False
+        return True
 
 
 class LocalApiHealth(ApiHealthAdapter):

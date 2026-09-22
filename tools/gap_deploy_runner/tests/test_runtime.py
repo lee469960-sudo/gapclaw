@@ -123,8 +123,9 @@ def test_compose_apply_uses_managed_compose_directory(monkeypatch, tmp_path):
     captured = {}
 
     def run(*args, **kwargs):
-        operation = "up" if "up" in args[0] else "ps"
-        captured[operation] = kwargs
+        command = args[0]
+        operation = "up" if "up" in command else "ps"
+        captured[operation] = {"command": command, "kwargs": kwargs}
         return SimpleNamespace(returncode=0, stderr="", stdout="[]")
 
     monkeypatch.setattr("tools.gap_deploy_runner.runtime.subprocess.run", run)
@@ -132,9 +133,11 @@ def test_compose_apply_uses_managed_compose_directory(monkeypatch, tmp_path):
     host.apply(manifest)
     assert host.services_healthy() is False
 
-    assert captured["up"]["cwd"] == compose_file.parent
-    assert captured["ps"]["cwd"] == compose_file.parent
-    assert captured["ps"]["env"]["GAP_RELEASE_API_IMAGE"] == manifest.api_image
+    assert captured["up"]["kwargs"]["cwd"] == compose_file.parent
+    assert captured["ps"]["kwargs"]["cwd"] == compose_file.parent
+    assert captured["ps"]["kwargs"]["env"]["GAP_RELEASE_API_IMAGE"] == manifest.api_image
+    assert "--profile" in captured["up"]["command"]
+    assert "scheduled-tasks" in captured["up"]["command"]
 
 
 def test_compose_health_accepts_compose_line_delimited_json(monkeypatch, tmp_path):
@@ -152,3 +155,44 @@ def test_compose_health_accepts_compose_line_delimited_json(monkeypatch, tmp_pat
     )
 
     assert host.services_healthy() is True
+
+
+def test_compose_health_accepts_running_services_without_healthchecks(monkeypatch, tmp_path):
+    compose_file = tmp_path / "compose" / "gap-production.compose.yml"
+    compose_file.parent.mkdir()
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    config = SimpleNamespace(target_id="production", env_file=tmp_path / "gap.env")
+    host = DockerComposeHost(config, SimpleNamespace(compose_file=compose_file))
+    monkeypatch.setattr(
+        "tools.gap_deploy_runner.runtime.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"Service":"api","State":"running","Health":"healthy"}\n'
+                '{"Service":"scheduled-task-worker","State":"running","Health":""}\n'
+            ),
+        ),
+    )
+
+    assert host.services_healthy() is True
+
+
+def test_compose_health_rejects_unhealthy_or_stopped_services(monkeypatch, tmp_path):
+    compose_file = tmp_path / "compose" / "gap-production.compose.yml"
+    compose_file.parent.mkdir()
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    config = SimpleNamespace(target_id="production", env_file=tmp_path / "gap.env")
+    host = DockerComposeHost(config, SimpleNamespace(compose_file=compose_file))
+
+    outcomes = iter([
+        '{"Service":"api","State":"running","Health":"starting"}\n',
+        '{"Service":"scheduled-task-worker","State":"exited","Health":""}\n',
+    ])
+
+    monkeypatch.setattr(
+        "tools.gap_deploy_runner.runtime.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=next(outcomes)),
+    )
+
+    assert host.services_healthy() is False
+    assert host.services_healthy() is False
