@@ -3729,13 +3729,68 @@ def _context_chat_id(ctx) -> str:
 
 def _row_chat_id(row) -> str:
     """Extract the chat_id stored in a ChatMessage.meta JSON, default ''."""
+    meta = _row_meta(row)
+    return (meta.get("chat_id") or "").strip()
+
+
+def _row_meta(row) -> dict:
     try:
         meta = json.loads(row.meta or "{}")
     except Exception:
-        return ""
+        return {}
     if not isinstance(meta, dict):
+        return {}
+    return meta
+
+
+def _is_scheduled_task_context(ctx) -> bool:
+    meta = getattr(ctx, "message_meta", None)
+    return isinstance(meta, dict) and meta.get("source") == "scheduled_task"
+
+
+def _is_scheduled_history_row(row) -> bool:
+    meta = _row_meta(row)
+    source = str(meta.get("source") or "")
+    return (
+        source in {"scheduled_task", "scheduled_task_notification"}
+        or bool(meta.get("scheduled_task_run_id"))
+        or (row.role == "assistant" and (row.content or "").startswith("定时任务结果通知发送失败"))
+    )
+
+
+def _scheduled_history_summary(rows) -> str:
+    """Compact prior scheduled outcomes without inlining full repeated transcripts."""
+    try:
+        from app.services.code_agent.output_security import redact_code_output
+    except Exception:
+        redact_code_output = None
+    summaries: list[str] = []
+    for row in rows:
+        if row.role != "assistant":
+            continue
+        meta = _row_meta(row)
+        if str(meta.get("source") or "") == "scheduled_task_notification":
+            continue
+        if not _is_scheduled_history_row(row):
+            continue
+        text = (row.content or "").strip()
+        if not text:
+            continue
+        safe = redact_code_output(text).text if redact_code_output else text
+        safe = safe.replace("\n", " ").strip()
+        if len(safe) > 180:
+            safe = safe[:180] + "…"
+        run_id = str(meta.get("scheduled_task_run_id") or "").strip()
+        prefix = f"run {run_id}: " if run_id else ""
+        summaries.append(f"- {prefix}{safe}")
+    if not summaries:
         return ""
-    return (meta.get("chat_id") or "").strip()
+    tail = summaries[-3:]
+    omitted = len(summaries) - len(tail)
+    head = "【最近定时任务结果摘要】以下是同一会话中过往定时任务的压缩引用，完整结果不要重复展开："
+    if omitted > 0:
+        head += f"\n- 另有 {omitted} 条更早定时任务结果已省略。"
+    return "\n".join([head, *tail])
 
 
 def _load_recent_history(ctx) -> list[tuple[str, str]]:
@@ -3749,6 +3804,7 @@ def _load_recent_history(ctx) -> list[tuple[str, str]]:
     n_rounds = max(1, int(getattr(ctx.agent, "history_length", None) or 10))
     max_msgs = n_rounds * 2
     chat_id = _context_chat_id(ctx)
+    scheduled_context = _is_scheduled_task_context(ctx)
     try:
         rows = (
             ctx.db.query(ChatMessage)
@@ -3758,7 +3814,7 @@ def _load_recent_history(ctx) -> list[tuple[str, str]]:
                 ChatMessage.role.in_(["user", "assistant"]),
             )
             .order_by(ChatMessage.id.desc())
-            .limit(max_msgs * 4 + 1)   # wider window so filtering other chats doesn't starve history
+            .limit((max_msgs * 10 + 20) if scheduled_context else (max_msgs * 4 + 1))
             .all()
         )
     except Exception:
@@ -3768,6 +3824,9 @@ def _load_recent_history(ctx) -> list[tuple[str, str]]:
         rows = rows[:-1]
     if chat_id:
         rows = [r for r in rows if _row_chat_id(r) == chat_id]
+    scheduled_summary = _scheduled_history_summary(rows) if scheduled_context else ""
+    if scheduled_context:
+        rows = [r for r in rows if not _is_scheduled_history_row(r)]
     rows = rows[-max_msgs:]
     out: list[tuple[str, str]] = []
     for r in rows:
@@ -3777,6 +3836,8 @@ def _load_recent_history(ctx) -> list[tuple[str, str]]:
         if r.role == "assistant" and len(content) > 1200:  # 上下文卫生，非门禁
             content = content[:1200] + "\n…(已截断)"
         out.append((r.role, content))
+    if scheduled_summary:
+        out.append(("assistant", scheduled_summary))
     return out
 
 

@@ -72,6 +72,7 @@
           <div
             v-for="item in displayMessages"
             :key="item.key"
+            :data-message-id="item.m.id || ''"
             v-memo="[item.key, item.m.content, item.stepCount, isExecOpen(item.execKey), item.stepsLoading, item.steps.length, item.steps[0]?.title, item.steps[item.steps.length - 1]?.title, item.steps[item.steps.length - 1]?.batch?.children?.length, toolDetailRevision]"
             :class="['msg-row', item.m.role === 'user' ? 'user-row' : 'assistant-row']"
           >
@@ -188,23 +189,28 @@
             </div>
           </div>
 
-          <div v-if="scheduledProgress?.state === 'running'" class="msg-row assistant-row">
+          <div v-if="scheduledProgress && isScheduledProgressVisible(scheduledProgress)" class="msg-row assistant-row">
             <div class="agent-avatar"><span>∞</span></div>
             <div class="msg-col">
-              <div class="exec-card">
+              <div :class="['exec-card', 'scheduled-terminal-card', `scheduled-${scheduledProgress.state || 'unknown'}`]">
                 <div class="exec-header" role="button" @click="toggleExec('scheduled')">
                   <el-icon class="exec-arrow" :class="{ open: isExecOpen('scheduled') }"><ArrowRight /></el-icon>
-                  <span class="exec-title">定时任务执行中</span>
-                  <span class="exec-badge">{{ scheduledProgress.steps.length }} 个步骤</span>
-                  <el-button link type="danger" size="small" @click.stop="stopScheduledTask">停止任务</el-button>
+                  <span class="exec-title">{{ scheduledProgressTitle(scheduledProgress) }}</span>
+                  <span v-if="scheduledNotificationLabel(scheduledProgress)" class="exec-badge scheduled-warning">{{ scheduledNotificationLabel(scheduledProgress) }}</span>
+                  <span class="exec-badge">{{ scheduledProgressBadge(scheduledProgress) }}</span>
+                  <el-button v-if="scheduledProgress.state === 'running'" link type="danger" size="small" @click.stop="stopScheduledTask">停止任务</el-button>
+                  <el-button v-if="scheduledProgress.chat_message_id" link type="primary" size="small" @click.stop="locateMessage(scheduledProgress.chat_message_id)">定位结果</el-button>
+                </div>
+                <div v-if="scheduledResultPreview(scheduledProgress)" class="scheduled-result-preview">
+                  {{ scheduledResultPreview(scheduledProgress) }}
                 </div>
                 <div v-if="isExecOpen('scheduled')" class="exec-steps">
-                  <div v-if="!scheduledProgress.steps.length" class="exec-step">
+                  <div v-if="!scheduledSteps(scheduledProgress).length" class="exec-step">
                     <el-icon class="step-status running is-loading"><Loading /></el-icon>
                     <div class="step-body"><div class="step-title"><span>正在启动 Agent…</span></div></div>
                   </div>
                   <div
-                    v-for="(step, index) in scheduledProgress.steps"
+                    v-for="(step, index) in scheduledSteps(scheduledProgress)"
                     :key="index"
                     :class="['exec-step', { 'is-expandable': isStepDetailExpandable(step) }]"
                     :role="isStepDetailExpandable(step) ? 'button' : undefined"
@@ -325,6 +331,7 @@
       v-model="tickVisible"
       :agent-id="agentId"
       :session-id="sessionId"
+      @locate-message="locateMessage"
     />
   </div>
 </template>
@@ -382,7 +389,7 @@ async function pollScheduledProgress() {
     if (!pageAlive || sid !== sessionId.value) return
     const previous = scheduledProgress.value
     scheduledProgress.value = res.data || null
-    if (res.data?.state === 'running') {
+    if (res.data && isScheduledProgressVisible(res.data)) {
       execOpen.value = { ...execOpen.value, scheduled: true }
     }
     if (res.data && (previous?.id !== res.data.id || previous?.state !== res.data.state)) {
@@ -393,6 +400,52 @@ async function pollScheduledProgress() {
   } finally {
     scheduledProgressBusy = false
   }
+}
+
+function isScheduledProgressVisible(progress) {
+  return progress?.state === 'running'
+}
+
+function scheduledProgressTitle(progress) {
+  const labels = {
+    running: '定时任务执行中',
+    succeeded: '定时任务已完成',
+    failed: progress?.terminal_result?.outcome === 'no_progress' ? '定时任务未完成' : '定时任务失败',
+    cancelled: '定时任务已取消',
+    skipped: '定时任务已跳过',
+  }
+  return labels[progress?.state] || '定时任务'
+}
+
+function scheduledProgressBadge(progress) {
+  const count = Number(scheduledSteps(progress).length || 0)
+  const state = ({ running: '执行中', succeeded: '成功', failed: '失败', cancelled: '已取消', skipped: '已跳过' })[progress?.state] || progress?.state || '未知'
+  return `${state} · ${count} 个步骤`
+}
+
+function scheduledSteps(progress) {
+  return Array.isArray(progress?.steps) ? progress.steps : []
+}
+
+function scheduledNotificationLabel(progress) {
+  const state = progress?.notification_state || progress?.terminal_result?.notification_state || ''
+  if (state === 'failed') return '通知失败'
+  if (state === 'pending') return '通知待发送'
+  if (state === 'delivered') return '通知已送达'
+  return ''
+}
+
+function scheduledResultPreview(progress) {
+  if (progress?.terminal_result?.outcome === 'no_progress') {
+    return 'Agent 未产生有效最终回复，已按失败结束；可展开查看执行过程。'
+  }
+  return (
+    progress?.content_preview
+    || progress?.terminal_result?.content_preview
+    || progress?.terminal_result?.error_summary
+    || progress?.error_summary
+    || ''
+  )
 }
 const seenCodeEventKeys = new Set()
 const running = ref(false)
@@ -1922,6 +1975,20 @@ async function stopScheduledTask() {
   await pollScheduledProgress()
 }
 
+async function locateMessage(messageId) {
+  if (!messageId) return
+  await loadHistory()
+  await nextTick()
+  const node = scrollRef.value?.querySelector?.(`[data-message-id="${messageId}"]`)
+  if (node) {
+    node.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    node.classList.add('message-locate-flash')
+    setTimeout(() => node.classList.remove('message-locate-flash'), 1600)
+  } else {
+    ElMessage.warning('结果消息不在当前会话列表中，请刷新后重试')
+  }
+}
+
 async function clearHistory() {
   await ElMessageBox.confirm('确定清空当前会话的所有对话？', '清空对话', { type: 'warning' })
   await postCgi('/pages/page_agent_chat.cgi?action=clear_history', {
@@ -1930,6 +1997,8 @@ async function clearHistory() {
   })
   messages.value = []
   hydratedSteps.value = {}
+  scheduledProgress.value = null
+  execOpen.value = { ...execOpen.value, scheduled: false }
   mdCache.clear()
 }
 
@@ -2038,6 +2107,7 @@ async function onVisibilityChange() {
     return
   }
   resetIdleStatusPoll()
+  await pollScheduledProgress()
   connectWs()
   await resumeIfRunning()
 }
@@ -2179,6 +2249,36 @@ onUnmounted(() => {
   border-radius: 10px;
   overflow: hidden;
   width: 100%;
+}
+.scheduled-terminal-card.scheduled-succeeded {
+  border-color: rgba(103, 194, 58, 0.35);
+}
+.scheduled-terminal-card.scheduled-failed {
+  border-color: rgba(245, 108, 108, 0.45);
+}
+.scheduled-terminal-card.scheduled-cancelled,
+.scheduled-terminal-card.scheduled-skipped {
+  border-color: rgba(144, 147, 153, 0.45);
+}
+.scheduled-warning {
+  background: rgba(230, 162, 60, 0.16);
+  color: #b88230;
+}
+.scheduled-result-preview {
+  padding: 10px 14px;
+  color: var(--gap-text);
+  font-size: 13px;
+  line-height: 1.6;
+  border-top: 1px solid var(--gap-card-border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.message-locate-flash {
+  animation: messageLocateFlash 1.6s ease;
+}
+@keyframes messageLocateFlash {
+  0%, 100% { filter: none; }
+  30% { filter: drop-shadow(0 0 12px rgba(64, 158, 255, 0.55)); }
 }
 .exec-header {
   display: flex;

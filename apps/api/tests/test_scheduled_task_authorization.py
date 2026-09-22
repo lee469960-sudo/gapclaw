@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Agent, ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun
+from app.models import Agent, ChatMessage, ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskProgress, ScheduledTaskRun
 from app.routers.agent_chat import ChatBody, chat_post
 from app.services.scheduled_tasks.authorization import (
     ScheduledTaskAuthorizationError,
@@ -63,10 +63,28 @@ def test_session_task_manager_hides_cross_session_and_cross_task_details():
 def test_run_history_requires_in_scope_task_manager():
     db = _db()
     try:
+        now = datetime.now(timezone.utc)
         db.add_all([
             Agent(id="agent1", name="Agent", creator="owner", session_list='[{"session_id":"session1"}]'),
             ScheduledTask(id="task1", agent_id="agent1", session_id="session1", owner_username="owner"),
-            ScheduledTaskRun(id="run1", task_id="task1", occurrence_key="manual:1", scheduled_for=datetime.now(timezone.utc), available_at=datetime.now(timezone.utc)),
+            ChatMessage(
+                id=1,
+                agent_id="agent1",
+                session_id="session1",
+                role="assistant",
+                content="当前持仓 BTC 1",
+                meta='{"source":"scheduled_task","scheduled_task_run_id":"run1","scheduled_task_source":"manual","step_count":1}',
+            ),
+            ScheduledTaskRun(
+                id="run1",
+                task_id="task1",
+                occurrence_key="manual:1",
+                state="succeeded",
+                scheduled_for=now,
+                available_at=now,
+                chat_message_id=1,
+            ),
+            ScheduledTaskProgress(run_id="run1", steps='[{"type":"tool","title":"Get positions","status":"done","content":"ok"}]'),
             ScheduledTaskNotificationDelivery(id="delivery1", run_id="run1", channel_id="channel1", state="failed", error_summary="safe error"),
         ])
         db.commit()
@@ -74,6 +92,53 @@ def test_run_history_requires_in_scope_task_manager():
         allowed = asyncio.run(chat_post(body, BackgroundTasks(), action=None, user=_user("owner"), db=db))
         denied = asyncio.run(chat_post(body, BackgroundTasks(), action=None, user=_user("intruder"), db=db))
         assert allowed["data"][0]["notifications"][0]["state"] == "failed"
+        assert allowed["data"][0]["content_preview"] == "当前持仓 BTC 1"
+        assert allowed["data"][0]["notification_state"] == "failed"
+        assert allowed["data"][0]["terminal_result"]["message"]["meta"]["scheduled_task_run_id"] == "run1"
+        assert allowed["data"][0]["terminal_result"]["steps"][0]["title"] == "Get positions"
+        assert denied["msg"] == "scheduled_task_unauthorized"
+    finally:
+        db.close()
+
+
+def test_progress_endpoint_returns_terminal_result_only_to_session_manager():
+    db = _db()
+    try:
+        now = datetime.now(timezone.utc)
+        db.add_all([
+            Agent(id="agent1", name="Agent", creator="owner", session_list='[{"session_id":"session1"}]'),
+            ScheduledTask(id="task1", agent_id="agent1", session_id="session1", owner_username="owner"),
+            ChatMessage(
+                id=1,
+                agent_id="agent1",
+                session_id="session1",
+                role="assistant",
+                content="最终会话结果",
+                meta='{"source":"scheduled_task","scheduled_task_run_id":"run1","scheduled_task_source":"scheduled"}',
+            ),
+            ScheduledTaskRun(
+                id="run1",
+                task_id="task1",
+                occurrence_key="one",
+                state="succeeded",
+                scheduled_for=now,
+                available_at=now,
+                chat_message_id=1,
+            ),
+            ScheduledTaskProgress(run_id="run1", steps='[{"type":"answer","status":"done","content":"最终会话结果"}]'),
+            ScheduledTaskNotificationDelivery(id="delivery1", run_id="run1", channel_id="channel1", state="failed", error_summary="push failed"),
+        ])
+        db.commit()
+
+        body = ChatBody(action="scheduled_task_progress", agent_id="agent1", session_id="session1")
+        allowed = asyncio.run(chat_post(body, BackgroundTasks(), action=None, user=_user("owner"), db=db))
+        denied = asyncio.run(chat_post(body, BackgroundTasks(), action=None, user=_user("intruder"), db=db))
+
+        assert allowed["data"]["state"] == "succeeded"
+        assert allowed["data"]["content_preview"] == "最终会话结果"
+        assert allowed["data"]["notification_state"] == "failed"
+        assert allowed["data"]["terminal_result"]["message"]["content"] == "最终会话结果"
+        assert allowed["data"]["terminal_result"]["notifications"][0]["error_summary"] == "push failed"
         assert denied["msg"] == "scheduled_task_unauthorized"
     finally:
         db.close()

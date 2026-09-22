@@ -844,6 +844,7 @@ async def chat_post(
     if act == "scheduled_task_progress":
         from app.models import ScheduledTask, ScheduledTaskRun, ScheduledTaskProgress
         from app.services.scheduled_tasks.authorization import require_session_task_manager, ScheduledTaskAuthorizationError
+        from app.services.scheduled_tasks.results import serialize_scheduled_run_result
         try:
             require_session_task_manager(db, user, body.agent_id or "", body.session_id or "")
         except ScheduledTaskAuthorizationError as exc:
@@ -858,13 +859,18 @@ async def chat_post(
             return ok(None)
         progress = db.get(ScheduledTaskProgress, run.id)
         safe = _steps_tail_for_message(json.dumps({"steps": json.loads(progress.steps or "[]") if progress else []}), limit=200)
+        terminal_result = serialize_scheduled_run_result(db, run)
         return ok({"id": run.id, "task_id": run.task_id, "state": run.state, "steps": safe["steps"],
                    "cancel_requested": run.cancel_requested_at is not None,
-                   "error_summary": (run.error_summary or "")[:500], "chat_message_id": run.chat_message_id})
+                   "error_summary": (run.error_summary or "")[:500], "chat_message_id": run.chat_message_id,
+                   "content_preview": terminal_result["content_preview"],
+                   "notification_state": terminal_result["notification_state"],
+                   "terminal_result": terminal_result})
 
     if act == "list_scheduled_task_runs":
         from app.models import ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun
         from app.services.scheduled_tasks.authorization import ScheduledTaskAuthorizationError, require_session_task_manager
+        from app.services.scheduled_tasks.results import serialize_scheduled_run_result
         task = db.get(ScheduledTask, body.task_id)
         try:
             require_session_task_manager(db, user, body.agent_id or (task.agent_id if task else ""), body.session_id or (task.session_id if task else ""), task)
@@ -873,15 +879,22 @@ async def chat_post(
         if not task: return fail("scheduled_task_not_found")
         limit = min(max(int(body.limit or 20), 1), 100)
         runs = db.query(ScheduledTaskRun).filter_by(task_id=task.id).order_by(ScheduledTaskRun.queued_at.desc()).limit(limit).all()
-        return ok([{
-            "id": run.id, "state": run.state, "source": run.source, "attempt": run.attempt,
-            "scheduled_for": run.scheduled_for.isoformat(), "started_at": run.started_at.isoformat() if run.started_at else "",
-            "finished_at": run.finished_at.isoformat() if run.finished_at else "", "error_summary": (run.error_summary or "")[:500],
-            "cancel_requested": run.cancel_requested_at is not None,
-            "chat_message_id": run.chat_message_id,
-            "notifications": [{"state": item.state, "attempts": item.attempts, "error_summary": (item.error_summary or "")[:500]}
-                              for item in db.query(ScheduledTaskNotificationDelivery).filter_by(run_id=run.id).all()],
-        } for run in runs])
+        rows = []
+        for run in runs:
+            terminal_result = serialize_scheduled_run_result(db, run)
+            rows.append({
+                "id": run.id, "state": run.state, "source": run.source, "attempt": run.attempt,
+                "scheduled_for": run.scheduled_for.isoformat(), "started_at": run.started_at.isoformat() if run.started_at else "",
+                "finished_at": run.finished_at.isoformat() if run.finished_at else "", "error_summary": (run.error_summary or "")[:500],
+                "cancel_requested": run.cancel_requested_at is not None,
+                "chat_message_id": run.chat_message_id,
+                "content_preview": terminal_result["content_preview"],
+                "notification_state": terminal_result["notification_state"],
+                "notifications": [{"state": item.state, "attempts": item.attempts, "error_summary": (item.error_summary or "")[:500]}
+                                  for item in db.query(ScheduledTaskNotificationDelivery).filter_by(run_id=run.id).all()],
+                "terminal_result": terminal_result,
+            })
+        return ok(rows)
 
     if act == "retry_scheduled_task_run":
         from app.models import ScheduledTask, ScheduledTaskRun

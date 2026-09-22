@@ -17,7 +17,12 @@
           <div class="tick-msg">{{ t.message || '(无消息)' }}</div>
           <div v-if="t.next_run_time" class="tick-next">下次触发：{{ t.next_run_time }}</div>
           <div v-if="t.latestRun" class="tick-next">已执行 {{ t.execution_count || 0 }} 次 · 最近执行：{{ runStateLabel(t.latestRun.state) }}<template v-if="t.latestRun.attempt > 0">（重试 {{ t.latestRun.attempt }}/3）</template>{{ t.latestRun.error_summary || '' }}</div>
-          <div v-if="t.latestRun?.chat_message_id" class="tick-next">结果消息：#{{ t.latestRun.chat_message_id }}（已写入本会话）</div>
+          <div v-if="runPreview(t.latestRun)" class="tick-result-preview">结果预览：{{ runPreview(t.latestRun) }}</div>
+          <div v-if="runNotificationLabel(t.latestRun)" class="tick-next">通知状态：{{ runNotificationLabel(t.latestRun) }}</div>
+          <div v-if="t.latestRun?.chat_message_id" class="tick-next">
+            结果消息：#{{ t.latestRun.chat_message_id }}（已写入本会话）
+            <el-button link type="primary" size="small" @click="locateRun(t.latestRun)">定位</el-button>
+          </div>
         </div>
         <div class="tick-actions">
           <el-switch v-model="t.enabled" @change="toggleTick(t)" />
@@ -75,7 +80,7 @@ const props = defineProps({
   sessionId: String,
 })
 
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'locate-message'])
 
 const visible = computed({
   get: () => props.modelValue,
@@ -217,6 +222,19 @@ function runStateLabel(state) {
   return ({ pending: '排队中', running: '执行中', succeeded: '成功', failed: '失败', cancelled: '已取消', skipped: '已跳过' })[state] || state
 }
 
+function runPreview(run) {
+  return run?.content_preview || run?.terminal_result?.content_preview || run?.terminal_result?.error_summary || run?.error_summary || ''
+}
+
+function runNotificationLabel(run) {
+  const state = run?.notification_state || run?.terminal_result?.notification_state || ''
+  return ({ none: '', pending: '待发送', delivered: '已送达', failed: '发送失败', mixed: '部分异常' })[state] || state
+}
+
+function locateRun(run) {
+  if (run?.chat_message_id) emit('locate-message', run.chat_message_id)
+}
+
 async function removeTick(t) {
   await ElMessageBox.confirm('确定删除该定时器？', '删除', { type: 'warning' })
   await postCgi('/pages/page_agent_chat.cgi?action=delete_scheduled_task', { task_id: t.tick_id })
@@ -238,6 +256,15 @@ async function removeTick(t) {
 .tick-cron { font-weight: 600; font-family: monospace; }
 .tick-msg { font-size: 13px; color: #606266; margin-top: 4px; }
 .tick-next { font-size: 12px; color: #909399; margin-top: 4px; }
+.tick-result-preview {
+  font-size: 12px;
+  color: #606266;
+  margin-top: 6px;
+  max-width: 460px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tick-actions { display: flex; align-items: center; gap: 8px; }
 .empty { text-align: center; color: #c0c4cc; padding: 48px 16px; }
 .form-tip { font-size: 12px; color: #909399; margin-top: 4px; }

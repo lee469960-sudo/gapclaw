@@ -156,6 +156,10 @@ def test_transient_failures_back_off_three_times_and_delete_cancels_only_pending
         db.add(business); db.commit()
         finish_run_failure(db, business, ValueError("invalid request"), now)
         assert business.state == "failed" and business.attempt == 1
+        no_progress = ScheduledTaskRun(id="noprog", task_id="task", occurrence_key="noprog", state="running", scheduled_for=now, available_at=now)
+        db.add(no_progress); db.commit()
+        finish_run_failure(db, no_progress, "scheduled_task_no_progress", now)
+        assert no_progress.state == "failed" and no_progress.attempt == 1
         soft_delete_task(db, task)
         assert db.get(ScheduledTaskRun, "pending").state == "cancelled"
         assert db.get(ScheduledTaskRun, "running").state == "running"

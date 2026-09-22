@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models import Agent, ChatMessage, ScheduledTask, ScheduledTaskRun, ScheduledTaskProgress
 from app.services.agent_runtime import run_agent
 from app.services.agent_runtime.hub import hub, stop_chat
+from app.services.scheduled_tasks.results import is_forced_stop_result
 
 
 class ScheduledTaskRuntimeError(ValueError):
@@ -18,6 +19,13 @@ class ScheduledTaskRuntimeError(ValueError):
 
 class ScheduledTaskCancelled(Exception):
     pass
+
+
+SCHEDULED_NO_PROGRESS_REPLY = (
+    "本次定时任务没有产生可用的最终回复。\n\n"
+    "系统已将本次执行按失败处理，避免把重复输出或低质量中间过程当作结果。"
+    "请在执行过程里检查最后完成的步骤，并根据需要调整任务提示词或手动重试。"
+)
 
 
 def _cancel_requested(db: Session, run: ScheduledTaskRun) -> bool:
@@ -127,7 +135,15 @@ def execute_and_finalize_claimed_run(db: Session, run: ScheduledTaskRun) -> str:
         return ""
     if not (result or "").strip():
         raise ScheduledTaskRuntimeError("scheduled_task_output_empty")
-    bind_run_message(db, run)
+    message = bind_run_message(db, run)
+    if is_forced_stop_result(result):
+        from app.services.scheduled_tasks.lifecycle import finish_run_failure
+
+        message.content = SCHEDULED_NO_PROGRESS_REPLY
+        db.add(message)
+        db.commit()
+        finish_run_failure(db, run, "scheduled_task_no_progress")
+        return SCHEDULED_NO_PROGRESS_REPLY
     from app.services.scheduled_tasks.lifecycle import finish_run_success
 
     finish_run_success(db, run)

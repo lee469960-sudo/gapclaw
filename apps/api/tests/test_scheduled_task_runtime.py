@@ -1,11 +1,18 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import Agent, ChatMessage, ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun
-from app.services.scheduled_tasks.runtime import ScheduledTaskRuntimeError, bind_run_message, execute_and_finalize_claimed_run, execute_claimed_run
+from app.services.scheduled_tasks.runtime import (
+    SCHEDULED_NO_PROGRESS_REPLY,
+    ScheduledTaskRuntimeError,
+    bind_run_message,
+    execute_and_finalize_claimed_run,
+    execute_claimed_run,
+)
 from app.services.scheduled_tasks.lifecycle import finish_run_success
 
 
@@ -94,6 +101,35 @@ def test_persisted_cancel_request_ends_run_without_success_or_notification(monke
         db.close()
 
 
+def test_output_without_durable_scheduled_message_is_not_successful(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        now = datetime.now(timezone.utc)
+        db.add_all((
+            Agent(id="agent", name="Agent"),
+            ScheduledTask(id="task", agent_id="agent", session_id="session", owner_username="owner", message="scheduled message"),
+            ScheduledTaskRun(id="run", task_id="task", occurrence_key="one", state="running", scheduled_for=now, available_at=now),
+        ))
+        db.commit()
+
+        async def fake_run_agent(*_args, **_kwargs):
+            return "text without session writeback"
+
+        monkeypatch.setattr("app.services.scheduled_tasks.runtime.run_agent", fake_run_agent)
+
+        with __import__("pytest").raises(ScheduledTaskRuntimeError, match="message_write_missing"):
+            execute_and_finalize_claimed_run(db, db.get(ScheduledTaskRun, "run"))
+
+        stored = db.get(ScheduledTaskRun, "run")
+        assert stored.state != "succeeded"
+        assert stored.chat_message_id is None
+        assert db.query(ScheduledTaskNotificationDelivery).count() == 0
+    finally:
+        db.close()
+
+
 def test_success_transition_checks_a_late_persisted_cancel_request():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -113,5 +149,104 @@ def test_success_transition_checks_a_late_persisted_cancel_request():
         finish_run_success(db, run)
         assert db.get(ScheduledTaskRun, "run").state == "cancelled"
         assert db.query(ScheduledTaskNotificationDelivery).count() == 0
+    finally:
+        db.close()
+
+
+def test_forced_stop_reply_is_bound_but_not_marked_successful_or_notified(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        now = datetime.now(timezone.utc)
+        agent = Agent(id="agent", name="Agent")
+        task = ScheduledTask(
+            id="task",
+            agent_id="agent",
+            session_id="session",
+            owner_username="owner",
+            message="scheduled message",
+            notification_enabled=True,
+            notification_channel_id="channel",
+        )
+        run = ScheduledTaskRun(id="run", task_id="task", occurrence_key="one", state="running", scheduled_for=now, available_at=now)
+        db.add_all((agent, task, run))
+        db.commit()
+
+        forced = "任务未完成，已自动结束（连续输出重复且没有新的工具、文件或计划进展，已停止自动推理）"
+
+        async def fake_run_agent(_db, _agent, session_id, _message, **kwargs):
+            db.add(ChatMessage(
+                agent_id=_agent.id,
+                session_id=session_id,
+                role="assistant",
+                content=forced,
+                meta=json.dumps(kwargs["message_meta"], ensure_ascii=False),
+            ))
+            db.commit()
+            return forced
+
+        monkeypatch.setattr("app.services.scheduled_tasks.runtime.run_agent", fake_run_agent)
+
+        assert execute_and_finalize_claimed_run(db, run) == SCHEDULED_NO_PROGRESS_REPLY
+
+        stored = db.get(ScheduledTaskRun, "run")
+        assert stored.state == "failed"
+        assert stored.error_summary == "scheduled_task_no_progress"
+        assert stored.chat_message_id is not None
+        assert db.get(ChatMessage, stored.chat_message_id).content == SCHEDULED_NO_PROGRESS_REPLY
+        assert "任务未完成，已自动结束" not in db.get(ChatMessage, stored.chat_message_id).content
+        assert stored.attempt == 1
+        assert db.query(ScheduledTaskNotificationDelivery).count() == 0
+    finally:
+        db.close()
+
+
+def test_repeated_interval_runs_in_same_session_call_agent_and_bind_each_result(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        now = datetime.now(timezone.utc)
+        db.add_all((
+            Agent(id="agent", name="Agent"),
+            ScheduledTask(
+                id="task",
+                agent_id="agent",
+                session_id="session",
+                owner_username="owner",
+                message="获取当前持仓",
+                schedule_type="interval",
+                interval_seconds=600,
+            ),
+            ScheduledTaskRun(id="run1", task_id="task", occurrence_key="scheduled:one", state="running", scheduled_for=now, available_at=now),
+            ScheduledTaskRun(id="run2", task_id="task", occurrence_key="scheduled:two", state="running", scheduled_for=now + timedelta(minutes=10), available_at=now),
+        ))
+        db.commit()
+        calls = []
+
+        async def fake_run_agent(_db, _agent, session_id, message, **kwargs):
+            run_id = kwargs["message_meta"]["scheduled_task_run_id"]
+            calls.append((run_id, session_id, message))
+            content = f"持仓结果 {run_id}"
+            db.add(ChatMessage(
+                agent_id=_agent.id,
+                session_id=session_id,
+                role="assistant",
+                content=content,
+                meta=json.dumps(kwargs["message_meta"], ensure_ascii=False),
+            ))
+            db.commit()
+            return content
+
+        monkeypatch.setattr("app.services.scheduled_tasks.runtime.run_agent", fake_run_agent)
+
+        assert execute_and_finalize_claimed_run(db, db.get(ScheduledTaskRun, "run1")) == "持仓结果 run1"
+        assert execute_and_finalize_claimed_run(db, db.get(ScheduledTaskRun, "run2")) == "持仓结果 run2"
+
+        assert calls == [("run1", "session", "获取当前持仓"), ("run2", "session", "获取当前持仓")]
+        assert db.get(ScheduledTaskRun, "run1").state == "succeeded"
+        assert db.get(ScheduledTaskRun, "run2").state == "succeeded"
+        assert db.get(ScheduledTaskRun, "run1").chat_message_id != db.get(ScheduledTaskRun, "run2").chat_message_id
     finally:
         db.close()
