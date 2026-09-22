@@ -22,7 +22,7 @@
     <el-card class="card" shadow="never"><template #header>发布历史</template>
       <el-table :data="history" empty-text="暂无已存档发布记录"><el-table-column prop="occurred_at" label="时间" width="170"/><el-table-column prop="release_id" label="发布" min-width="150"/><el-table-column prop="status" label="状态" width="160"><template #default="{row}"><el-tag :type="statusType(row.status)">{{ row.status }}</el-tag></template></el-table-column><el-table-column prop="health_result" label="健康" width="110"/><el-table-column prop="rollback_result" label="回滚" width="110"/><el-table-column prop="failure_summary" label="说明" min-width="180" show-overflow-tooltip/></el-table>
     </el-card>
-    <el-card v-if="isAdmin" class="card" shadow="never">
+    <el-card v-if="isAdmin" class="card" shadow="never" v-loading="rollbackLoading">
       <template #header>受确认回滚</template>
       <template v-if="rollbackTarget">
         <el-descriptions :column="2" border>
@@ -68,6 +68,7 @@ const isAdmin = computed(() => {
 })
 const rollbackTarget = ref(null)
 const rollbackUnavailableReason = ref('')
+const rollbackLoading = ref(false)
 const rollbackDialog = ref(false)
 const rollbackConfirmation = ref('')
 const rollbackSubmitting = ref(false)
@@ -78,11 +79,25 @@ function rollbackUnavailableMessage (detail) {
 }
 async function loadRollbackTarget () {
   if (!isAdmin.value) return
-  const result = await getCgi('/api/release-management/rollback-target', {}, { validateStatus: (code) => code === 200 || code === 409 || code === 503 })
-  rollbackTarget.value = result.data || null
-  rollbackUnavailableReason.value = rollbackTarget.value ? '' : rollbackUnavailableMessage(result.detail)
+  rollbackLoading.value = true
+  try {
+    const result = await getCgi('/api/release-management/rollback-target', {}, { validateStatus: (code) => code === 200 || code === 409 || code === 503 })
+    rollbackTarget.value = result.data || null
+    rollbackUnavailableReason.value = rollbackTarget.value ? '' : rollbackUnavailableMessage(result.detail)
+  } catch (err) {
+    rollbackTarget.value = null
+    rollbackUnavailableReason.value = rollbackUnavailableMessage(err?.response?.data?.detail)
+  } finally { rollbackLoading.value = false }
 }
-async function load () { loading.value = true; try { const [s, h] = await Promise.all([getCgi('/api/release-management/status'), getCgi('/api/release-management/history')]); status.value = s.data || {}; history.value = h.data?.items || []; await loadRollbackTarget() } finally { loading.value = false } }
+async function load () {
+  loading.value = true
+  try {
+    const [s, h] = await Promise.all([getCgi('/api/release-management/status'), getCgi('/api/release-management/history')])
+    status.value = s.data || {}
+    history.value = h.data?.items || []
+  } finally { loading.value = false }
+  loadRollbackTarget()
+}
 async function submitRollback () {
   if (!rollbackTarget.value || rollbackConfirmation.value !== 'ROLLBACK') return
   rollbackSubmitting.value = true

@@ -133,7 +133,10 @@ class ReleaseLedger:
         self.db.commit()
         return request
 
-    def history(self, *, target_id: str) -> list[ReleaseLifecycleAudit]:
-        return self.db.query(ReleaseLifecycleAudit).filter_by(target_id=target_id).order_by(
+    def history(self, *, target_id: str, limit: int | None = None) -> list[ReleaseLifecycleAudit]:
+        query = self.db.query(ReleaseLifecycleAudit).filter_by(target_id=target_id).order_by(
             ReleaseLifecycleAudit.occurred_at.desc(), ReleaseLifecycleAudit.id.desc()
-        ).all()
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()

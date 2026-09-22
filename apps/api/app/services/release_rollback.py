@@ -30,8 +30,12 @@ class ReleaseRollbackService:
     def __init__(self, ledger: ReleaseLedger, runner: ReleaseRunnerClient, *, target_id: str):
         self.ledger, self.runner, self.target_id = ledger, runner, target_id
 
-    def displayed_target(self) -> dict[str, str]:
-        return known_healthy_target(self.runner.status(), target_id=self.target_id)
+    def displayed_target(self, *, status_timeout_seconds: float | None = None) -> dict[str, str]:
+        if status_timeout_seconds is None:
+            status = self.runner.status()
+        else:
+            status = self.runner.status(timeout_seconds=status_timeout_seconds)
+        return known_healthy_target(status, target_id=self.target_id)
 
     def submit(self, *, displayed_release_id: str, displayed_target_id: str, confirmation: str, requested_by: str) -> dict[str, object]:
         baseline = self.displayed_target()

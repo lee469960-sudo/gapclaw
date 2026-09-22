@@ -21,6 +21,7 @@ from app.services.release_runner import ReleaseRunnerClient, ReleaseRunnerError
 
 
 router = APIRouter(prefix="/api/release-management", tags=["release-management"])
+ROLLBACK_TARGET_STATUS_TIMEOUT_SECONDS = 3.0
 
 
 def _agent(db: Session) -> ReleaseAgent:
@@ -82,7 +83,9 @@ def release_history(
 def rollback_target(user: User = Depends(get_session_user), db: Session = Depends(get_db)):
     _require_release_admin(user)
     try:
-        return ok(_rollback_service(db).displayed_target())
+        return ok(_rollback_service(db).displayed_target(
+            status_timeout_seconds=ROLLBACK_TARGET_STATUS_TIMEOUT_SECONDS,
+        ))
     except ReleaseConfigError as exc:
         raise HTTPException(status_code=503, detail=exc.args[0]) from exc
     except (ReleaseRollbackError, ReleaseRunnerError) as exc:

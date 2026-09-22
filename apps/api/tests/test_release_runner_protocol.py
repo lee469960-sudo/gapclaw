@@ -92,6 +92,36 @@ def test_runner_client_uses_fixed_mtls_files_and_fixed_operation_path(monkeypatc
     assert captured["request"] == ("GET", "https://gap-runner.internal:9443/v1/health")
 
 
+def test_runner_client_status_can_use_operation_specific_timeout(monkeypatch):
+    captured = {}
+
+    class SslContext:
+        def load_cert_chain(self, **_kwargs): pass
+
+    monkeypatch.setattr("app.services.release_runner.ssl.create_default_context", lambda **_kwargs: SslContext())
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"status": "ok"}
+
+    class Client:
+        def __init__(self, **kwargs): captured.update(kwargs)
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def request(self, method, url):
+            captured["request"] = (method, url)
+            return Response()
+
+    client = ReleaseRunnerClient(
+        ReleaseRunnerTls("https://gap-runner.internal:9443", Path("ca"), Path("cert"), Path("key"), 60.0),
+        client_factory=Client,
+    )
+
+    assert client.status(timeout_seconds=2.5) == {"status": "ok"}
+    assert captured["timeout"] == 2.5
+    assert captured["request"] == ("GET", "https://gap-runner.internal:9443/v1/status")
+
+
 def test_runner_client_sends_only_the_verified_manifest_to_fixed_deploy_path(monkeypatch):
     captured = {}
 

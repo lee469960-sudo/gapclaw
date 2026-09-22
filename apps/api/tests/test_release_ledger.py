@@ -52,4 +52,5 @@ def test_release_history_is_newest_first_and_rollback_request_is_auditable():
     ledger.record_terminal_callback({"release_id": "new", "target_id": "production", "status": "rolled_back", "occurred_at": "2026-09-11 11:00:00"})
     request = ledger.request_rollback(release_id="old", target_id="production", requested_by="admin")
     assert [row.release_id for row in ledger.history(target_id="production")] == ["new", "old"]
+    assert [row.release_id for row in ledger.history(target_id="production", limit=1)] == ["new"]
     assert db.get(ReleaseRollbackRequest, request.id).requested_by == "admin"

@@ -16,9 +16,10 @@ from app.services.release_rollback import ROLLBACK_CONFIRMATION, ReleaseRollback
 
 class Runner:
     def __init__(self, baseline=True):
-        self.baseline, self.calls = baseline, []
+        self.baseline, self.calls, self.status_timeouts = baseline, [], []
 
-    def status(self):
+    def status(self, *, timeout_seconds=None):
+        self.status_timeouts.append(timeout_seconds)
         return {"last_known_healthy": {"release_id": "healthy-1", "target_id": "production"}} if self.baseline else {"release": {"phase": "idle"}}
 
     def rollback(self):
@@ -44,6 +45,7 @@ def test_confirmed_rollback_uses_only_runner_known_healthy_target_and_records_op
 
     assert result["status"] == "submitted"
     assert runner.calls == ["rollback"]
+    assert runner.status_timeouts == [None]
     request = db.get(ReleaseRollbackRequest, result["request_id"])
     assert request.requested_by == "admin"
 
@@ -99,3 +101,4 @@ def test_rollback_target_is_admin_only_and_comes_from_runner(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["data"] == {"release_id": "healthy-1", "target_id": "production"}
+    assert runner.status_timeouts == [release_management.ROLLBACK_TARGET_STATUS_TIMEOUT_SECONDS]

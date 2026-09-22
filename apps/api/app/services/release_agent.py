@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 from app.models import ReleaseLifecycleAudit, ReleaseManifestRecord
 from app.services.release_ledger import ReleaseLedger
@@ -44,20 +45,30 @@ class ReleaseAgent:
         self.ledger = ledger
 
     def status(self, *, target_id: str) -> dict[str, object]:
-        history = self.ledger.history(target_id=target_id)
-        current = self._audit_dict(history[0]) if history else None
+        history = self.ledger.history(target_id=target_id, limit=1)
+        current = self._audit_dicts(history)[0] if history else None
         state = "reconciliation_required" if current and current["status"] == "reconciliation_required" else "available"
         return {"agent": self.definition(), "target_id": target_id, "state": state, "current": current}
 
     def history(self, *, target_id: str, limit: int = 50) -> list[dict[str, str]]:
-        return [self._audit_dict(item) for item in self.ledger.history(target_id=target_id)[:limit]]
+        return self._audit_dicts(self.ledger.history(target_id=target_id, limit=limit))
 
-    def _audit_dict(self, audit: ReleaseLifecycleAudit) -> dict[str, str]:
-        result = release_audit_dict(audit)
-        manifest = self.ledger.db.get(ReleaseManifestRecord, audit.release_id)
-        result["api_image"] = manifest.api_image if manifest else ""
-        result["web_image"] = manifest.web_image if manifest else ""
-        return result
+    def _audit_dicts(self, audits: Sequence[ReleaseLifecycleAudit]) -> list[dict[str, str]]:
+        release_ids = [audit.release_id for audit in audits]
+        manifests = {}
+        if release_ids:
+            rows = self.ledger.db.query(ReleaseManifestRecord).filter(
+                ReleaseManifestRecord.release_id.in_(release_ids)
+            ).all()
+            manifests = {row.release_id: row for row in rows}
+        results = []
+        for audit in audits:
+            result = release_audit_dict(audit)
+            manifest = manifests.get(audit.release_id)
+            result["api_image"] = manifest.api_image if manifest else ""
+            result["web_image"] = manifest.web_image if manifest else ""
+            results.append(result)
+        return results
 
     def explain(self, *, target_id: str) -> str:
         current = self.status(target_id=target_id)["current"]

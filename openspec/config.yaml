@@ -5,6 +5,9 @@ context: |
   运行时改动优先保证兼容性、幂等性和可回滚性。
   archived/superseded change 仅作为历史参考，不应直接恢复执行。
   新 change 开始前必须检查相关历史变更，避免重复实现或冲突设计。
+  执行 opsx:verify 时必须覆盖实现、回归测试、兼容性和回滚风险；
+  涉及 Agent、MCP、渠道或普通对话行为时，必须说明未绑定 Skill、未配置渠道等场景的降级行为，
+  并给出灰度、幂等和回滚检查结果。
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
@@ -21,11 +24,6 @@ operations:
     guidance:
       - 先检查 archived/superseded changes，识别重复或冲突设计。
       - 对 MCP、缓存、断点恢复和路由改动明确记录兼容性风险。
-  verify:
-    guidance:
-      - 验证现有 Agent、MCP、渠道和普通对话行为没有回归。
-      - 说明未绑定 Skill 或未配置渠道时的降级行为。
-      - 给出灰度、幂等和回滚检查结果。
   archive:
     guidance:
       - 归档前确认 tasks.md 全部完成。

@@ -40,8 +40,8 @@ class ReleaseRunnerClient:
     def __init__(self, tls: ReleaseRunnerTls, *, client_factory=httpx.Client):
         self.tls, self.client_factory = tls, client_factory
 
-    def status(self) -> dict[str, Any]:
-        return self._request("GET", "/v1/status")
+    def status(self, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+        return self._request("GET", "/v1/status", timeout_seconds=timeout_seconds)
 
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/v1/health")
@@ -52,12 +52,19 @@ class ReleaseRunnerClient:
     def deploy(self, manifest: Mapping[str, object]) -> dict[str, Any]:
         return self._request("POST", "/v1/deploy", json_payload=dict(manifest))
 
-    def _request(self, method: str, path: str, *, json_payload: dict[str, object] | None = None) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_payload: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         try:
             ssl_context = ssl.create_default_context(cafile=str(self.tls.ca_file))
             ssl_context.load_cert_chain(certfile=str(self.tls.cert_file), keyfile=str(self.tls.key_file))
             with self.client_factory(
-                verify=ssl_context, timeout=self.tls.timeout_seconds,
+                verify=ssl_context, timeout=timeout_seconds or self.tls.timeout_seconds,
             ) as client:
                 request_kwargs = {"json": json_payload} if json_payload is not None else {}
                 response = client.request(method, f"{self.tls.base_url.rstrip('/')}{path}", **request_kwargs)

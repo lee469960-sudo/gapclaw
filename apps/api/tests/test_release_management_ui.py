@@ -20,6 +20,9 @@ def test_release_management_rollback_control_is_admin_only_and_requires_exact_co
     assert 'v-if="isAdmin"' in source
     assert "/api/release-management/rollback-target" in source
     assert "/api/release-management/rollback" in source
+    assert 'v-loading="rollbackLoading"' in source
+    assert "loadRollbackTarget()" in source
+    assert "await loadRollbackTarget()" not in source
     assert "rollbackConfirmation !== 'ROLLBACK'" in source
     assert "displayed_release_id: rollbackTarget.value.release_id" in source
     assert "displayed_target_id: rollbackTarget.value.target_id" in source
