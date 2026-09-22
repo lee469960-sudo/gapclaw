@@ -17,7 +17,7 @@
 - **AND** 不触发生产主机部署
 
 ### Requirement: 生产 Hook 触发与标签内容隔离
-系统 SHALL 使用 GitHub-hosted CI 在构建成功后向固定 `POST /internal/release-hook` 投递已验证发布清单。CI MUST 以 GitHub secret 的 HMAC-SHA256 签名覆盖规范 manifest、delivery id 与时间戳，且不得把 ACR 凭据传递给 Hook。GAP MUST 在验签、时间窗口、delivery id 去重、target、tag/version 与 digest 校验全部通过后，才通过私网 mTLS 调用固定 Deploy Runner。生产服务器 MUST NOT 依赖 GitHub self-hosted runner、GitHub runner token 或 GitHub 出网。
+系统 SHALL 使用 GitHub-hosted CI 在构建成功后向固定 `POST /internal/release-hook` 投递已验证发布清单。CI MUST 以 GitHub secret 的 HMAC-SHA256 签名覆盖规范 manifest、delivery id 与时间戳，且不得把 ACR 凭据传递给 Hook。GAP MUST 在验签、时间窗口、delivery id 去重、target、tag/version 与 digest 校验全部通过后，才通过私网 mTLS 调用固定 Deploy Runner。生产服务器 MUST NOT 依赖 GitHub self-hosted runner、GitHub runner token 或 GitHub 出网。CI MAY retry delivery of the same signed Hook envelope for bounded transient HTTP or network failures, but MUST NOT regenerate the signed payload, signature, delivery id, or manifest between retry attempts.
 
 #### Scenario: 构建成功后进入固定 Hook 链路
 - **WHEN** 某个可部署发布清单已由构建链路产生
@@ -33,6 +33,12 @@
 - **WHEN** 调用方请求 Deploy Runner 部署不在可部署发布清单中的镜像引用或 digest
 - **THEN** Runner 拒绝该请求
 - **AND** 当前运行中的 GAP 版本保持不变
+
+#### Scenario: Hook delivery transiently fails before acceptance
+- **WHEN** CI delivers a valid signed release Hook envelope and receives a transient delivery failure such as network timeout, HTTP 403, 408, 409, 425, 429, or 5xx before a successful response
+- **THEN** CI retries the same Hook URL with the exact same canonical body, signature, delivery id, and manifest for a bounded number of attempts within the Hook timestamp window
+- **AND** a later 2xx response completes the workflow without requiring an operator rerun
+- **AND** a final non-2xx response fails the workflow with the Hook response available for diagnosis
 
 ### Requirement: Deploy Runner 以最小且固定的主机权限运行
 Deploy Runner SHALL 作为主机受管服务提供受限的 `deploy`、`status`、`health` 与 `rollback` 操作。`deploy` MUST 仅接受来自 GAP 固定 mTLS 身份的完整已验证 manifest；它不得接受 URL、命令、tag、任意 image 或调用者目标。只有 Runner 可以执行 GAP 生产 Compose 操作；Release Agent、普通 Agent 运行时和 GitHub CI MUST NOT 获得任意 Docker、主机 shell 或 SSH 部署执行能力。Runner MUST 从主机本地受限配置读取 ACR pull-only 凭据；GitHub CI 不得接收、记录或传递该凭据。

@@ -202,18 +202,69 @@ jobs:
           with open(".release/release-hook.signature", "w", encoding="utf-8") as output:
               output.write(f"sha256={signature}")
           PY
-          http_code="$(
-            curl --silent --show-error --max-time 90 --retry 2 --retry-all-errors \
-              --output .release/release-hook.response \
-              --write-out "%{http_code}" \
-              --request POST "https://gapclaw.online/internal/release-hook" \
-              --header "Content-Type: application/json" \
-              --header "X-GAP-Release-Signature: $(<.release/release-hook.signature)" \
-              --data-binary @.release/release-hook.json
-          )"
-          cat .release/release-hook.response
+          hook_url="https://gapclaw.online/internal/release-hook"
+          hook_signature="$(<.release/release-hook.signature)"
+          retry_delays=(0 5 10 20 40)
+          retryable_http_codes=("403" "408" "409" "425" "429")
+          max_attempts="${#retry_delays[@]}"
+          attempt=0
+          delivered=false
+          http_code="000"
+          curl_exit=0
+
+          for delay_seconds in "${retry_delays[@]}"; do
+            attempt=$((attempt + 1))
+            if [[ "${delay_seconds}" != "0" ]]; then
+              echo "release hook retry attempt ${attempt}/${max_attempts} after ${delay_seconds}s"
+              sleep "${delay_seconds}"
+            else
+              echo "release hook delivery attempt ${attempt}/${max_attempts}"
+            fi
+
+            curl_exit=0
+            : > .release/release-hook.response
+            http_code="$(
+              curl --silent --show-error --max-time 30 \
+                --output .release/release-hook.response \
+                --write-out "%{http_code}" \
+                --request POST "${hook_url}" \
+                --header "Content-Type: application/json" \
+                --header "X-GAP-Release-Signature: ${hook_signature}" \
+                --data-binary @.release/release-hook.json
+            )" || curl_exit=$?
+
+            if [[ "${curl_exit}" -eq 0 && "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
+              delivered=true
+              break
+            fi
+
+            retryable=false
+            if [[ "${curl_exit}" -ne 0 ]]; then
+              retryable=true
+            elif [[ "${http_code}" =~ ^5[0-9][0-9]$ ]]; then
+              retryable=true
+            else
+              for retryable_code in "${retryable_http_codes[@]}"; do
+                if [[ "${http_code}" == "${retryable_code}" ]]; then
+                  retryable=true
+                  break
+                fi
+              done
+            fi
+
+            if [[ "${retryable}" != "true" || "${attempt}" -ge "${max_attempts}" ]]; then
+              break
+            fi
+            echo "release hook transient failure curl_exit=${curl_exit} http_code=${http_code}; retrying same signed delivery_id=${DELIVERY_ID}"
+          done
+
+          cat .release/release-hook.response || true
           echo
-          if [[ ! "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
-            echo "release hook returned HTTP ${http_code}" >&2
+          if [[ "${delivered}" != "true" ]]; then
+            if [[ "${curl_exit}" -ne 0 ]]; then
+              echo "release hook curl failed with exit ${curl_exit} and HTTP ${http_code}" >&2
+            else
+              echo "release hook returned HTTP ${http_code}" >&2
+            fi
             exit 1
           fi

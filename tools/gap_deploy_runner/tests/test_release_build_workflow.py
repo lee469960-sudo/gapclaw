@@ -44,6 +44,28 @@ def test_tag_build_delivers_only_a_canonical_signed_manifest_to_the_fixed_hook()
     assert "--data-binary @.release/release-hook.json" in workflow
 
 
+def test_hook_delivery_retries_transient_failures_with_the_same_signed_envelope():
+    workflow = _workflow()
+    delivery = workflow.split("      - name: Deliver signed manifest to GAP Hook", 1)[1]
+    retry_loop = delivery.split('for delay_seconds in "${retry_delays[@]}"; do', 1)[1]
+
+    assert 'retry_delays=(0 5 10 20 40)' in delivery
+    assert 'retryable_http_codes=("403" "408" "409" "425" "429")' in delivery
+    assert '"${http_code}" =~ ^5[0-9][0-9]$' in delivery
+    assert "curl_exit=0" in delivery
+    assert "--max-time 30" in delivery
+    assert "--retry" not in delivery
+    assert 'hook_signature="$(<.release/release-hook.signature)"' in delivery
+    assert '--header "X-GAP-Release-Signature: ${hook_signature}"' in retry_loop
+    assert "--data-binary @.release/release-hook.json" in retry_loop
+    assert 'echo "release hook transient failure curl_exit=${curl_exit} http_code=${http_code}; retrying same signed delivery_id=${DELIVERY_ID}"' in delivery
+    assert delivery.count('"delivery_id": os.environ["DELIVERY_ID"]') == 1
+    assert delivery.count('with open(".release/release-hook.json", "wb")') == 1
+    assert delivery.count('with open(".release/release-hook.signature", "w", encoding="utf-8")') == 1
+    assert "datetime.now" not in retry_loop
+    assert "hmac.new(" not in retry_loop
+
+
 def test_hook_delivery_has_no_registry_credentials_or_tag_controlled_host_execution():
     workflow = _workflow()
 
