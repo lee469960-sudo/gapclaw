@@ -1,5 +1,12 @@
 <template>
-  <el-dialog v-model="visible" width="640px" @open="loadTicks">
+  <el-dialog
+    v-model="visible"
+    class="session-tick-dialog"
+    width="720px"
+    append-to-body
+    align-center
+    @open="loadTicks"
+  >
     <template #header>
       <span class="dlg-title"><el-icon><Clock /></el-icon> 本会话定时器</span>
     </template>
@@ -13,7 +20,10 @@
     <div v-loading="loading" class="tick-list">
       <div v-for="t in ticks" :key="t.tick_id" class="tick-item">
         <div class="tick-main">
-          <div class="tick-cron">{{ t.cron }}</div>
+          <div class="tick-head">
+            <div class="tick-cron">{{ t.cron }}</div>
+            <el-switch v-model="t.enabled" @change="toggleTick(t)" />
+          </div>
           <div class="tick-msg">{{ t.message || '(无消息)' }}</div>
           <div v-if="t.next_run_time" class="tick-next">下次触发：{{ t.next_run_time }}</div>
           <div v-if="t.latestRun" class="tick-next">已执行 {{ t.execution_count || 0 }} 次 · 最近执行：{{ runStateLabel(t.latestRun.state) }}<template v-if="t.latestRun.attempt > 0">（重试 {{ t.latestRun.attempt }}/3）</template>{{ t.latestRun.error_summary || '' }}</div>
@@ -25,12 +35,11 @@
           </div>
         </div>
         <div class="tick-actions">
-          <el-switch v-model="t.enabled" @change="toggleTick(t)" />
-          <el-button link type="primary" @click="runNow(t)">立即执行</el-button>
-          <el-button v-if="t.latestRun?.state === 'running'" link type="danger" @click="stopTask(t)">停止</el-button>
-          <el-button v-if="t.latestRun?.state === 'failed'" link type="warning" @click="retryRun(t)">重试失败</el-button>
-          <el-button link @click="openForm(t)">编辑</el-button>
-          <el-button link type="danger" @click="removeTick(t)">删除</el-button>
+          <el-button size="small" type="primary" plain @click="runNow(t)">立即执行</el-button>
+          <el-button v-if="t.latestRun?.state === 'running'" size="small" type="danger" plain @click="stopTask(t)">停止</el-button>
+          <el-button v-if="t.latestRun?.state === 'failed'" size="small" type="warning" plain @click="retryRun(t)">重试失败</el-button>
+          <el-button size="small" @click="openForm(t)">编辑</el-button>
+          <el-button size="small" type="danger" plain @click="removeTick(t)">删除</el-button>
         </div>
       </div>
       <div v-if="!loading && !ticks.length" class="empty">
@@ -39,7 +48,14 @@
     </div>
   </el-dialog>
 
-  <el-dialog v-model="formVisible" :title="form.tick_id ? '编辑定时器' : '新增定时器'" width="480px">
+  <el-dialog
+    v-model="formVisible"
+    class="session-tick-form-dialog"
+    :title="form.tick_id ? '编辑定时器' : '新增定时器'"
+    width="480px"
+    append-to-body
+    align-center
+  >
     <el-form label-width="100px">
       <el-form-item label="计划类型">
         <el-select v-model="form.schedule_type"><el-option label="Cron" value="cron" /><el-option label="间隔" value="interval" /><el-option label="一次" value="once" /></el-select>
@@ -247,25 +263,68 @@ async function removeTick(t) {
 .dlg-title { display: flex; align-items: center; gap: 6px; font-weight: 600; }
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .count { margin-left: auto; color: #909399; font-size: 13px; }
-.tick-list { min-height: 160px; border: 1px solid #ebeef5; border-radius: 8px; padding: 8px; }
+.tick-list { min-height: 160px; }
 .tick-item {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 12px; border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fff;
 }
-.tick-item:last-child { border-bottom: none; }
-.tick-cron { font-weight: 600; font-family: monospace; }
-.tick-msg { font-size: 13px; color: #606266; margin-top: 4px; }
-.tick-next { font-size: 12px; color: #909399; margin-top: 4px; }
-.tick-result-preview {
-  font-size: 12px;
+.tick-item:last-child { margin-bottom: 0; }
+.tick-main { min-width: 0; }
+.tick-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tick-cron { font-weight: 600; font-family: monospace; min-width: 0; word-break: break-all; }
+.tick-msg {
+  font-size: 13px;
   color: #606266;
   margin-top: 6px;
-  max-width: 460px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tick-actions { display: flex; align-items: center; gap: 8px; }
+.tick-next { font-size: 12px; color: #909399; margin-top: 4px; word-break: break-word; }
+.tick-result-preview {
+  font-size: 12px;
+  color: #606266;
+  margin-top: 6px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #ebeef5;
+}
 .empty { text-align: center; color: #c0c4cc; padding: 48px 16px; }
 .form-tip { font-size: 12px; color: #909399; margin-top: 4px; }
+</style>
+
+<style>
+.session-tick-dialog,
+.session-tick-form-dialog {
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  max-height: min(86vh, 820px);
+}
+.session-tick-dialog .el-dialog__body,
+.session-tick-form-dialog .el-dialog__body {
+  overflow: auto;
+  min-height: 0;
+}
 </style>
