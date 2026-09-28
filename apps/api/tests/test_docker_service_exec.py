@@ -70,6 +70,53 @@ def _use_container(monkeypatch, container):
     monkeypatch.setattr(docker_service, "get_docker_client", lambda: _Client(container))
 
 
+class _MissingImage:
+    @property
+    def tags(self):
+        from docker.errors import ImageNotFound
+        raise ImageNotFound("No such image")
+
+
+class _ListedContainer:
+    def __init__(self, *, name, image):
+        self.short_id = "sha256:abc123def456"
+        self.id = "abc123def456"
+        self.name = name
+        self.status = "exited"
+        self.image = image
+        self.attrs = {"Config": {"Image": "gone:latest"}, "Image": "sha256:084821dfb692"}
+
+
+class _ListClient:
+    def __init__(self, containers):
+        self.containers = containers
+
+
+class _ContainerList:
+    def __init__(self, items):
+        self.items = items
+
+    def list(self, all=True):
+        assert all is True
+        return self.items
+
+
+def test_list_containers_keeps_rows_when_image_is_missing(monkeypatch):
+    missing = _ListedContainer(name="orphan", image=_MissingImage())
+    monkeypatch.setattr(
+        docker_service,
+        "get_docker_client",
+        lambda: _ListClient(_ContainerList([missing])),
+    )
+    rows = docker_service.list_containers()
+    assert rows == [{
+        "id": "abc123def456",
+        "name": "orphan",
+        "status": "exited",
+        "image": "gone:latest（镜像已删除）",
+    }]
+
+
 def test_exec_in_sandbox_serializes_calls_for_the_same_container(monkeypatch):
     container = _Container(delay=0.03)
     _use_container(monkeypatch, container)

@@ -690,18 +690,37 @@ def get_container_logs(container_id: str, tail: int = 100) -> str:
         return str(e)
 
 
+def _container_image_name(container) -> str:
+    """Label a container even when its image has been deleted."""
+    attrs = getattr(container, "attrs", None) or {}
+    configured = str((attrs.get("Config") or {}).get("Image") or "").strip()
+    try:
+        tags = container.image.tags or []
+    except Exception:
+        if configured:
+            return f"{configured}（镜像已删除）"
+        image_id = str(attrs.get("Image") or "").replace("sha256:", "")[:12]
+        return f"{image_id}（镜像已删除）" if image_id else "<none>"
+    if tags:
+        return tags[0]
+    return configured or "<none>"
+
+
 def list_containers() -> list[dict]:
     client = get_docker_client()
     if not client:
         return []
     result = []
     for c in client.containers.list(all=True):
-        result.append({
-            "id": c.short_id.replace("sha256:", "")[:12],
-            "name": c.name,
-            "status": c.status,
-            "image": (c.image.tags or ["<none>"])[0],
-        })
+        try:
+            result.append({
+                "id": c.short_id.replace("sha256:", "")[:12],
+                "name": c.name,
+                "status": c.status,
+                "image": _container_image_name(c),
+            })
+        except Exception as e:
+            logger.warning("skip container %s: %s", getattr(c, "id", ""), e)
     return result
 
 
