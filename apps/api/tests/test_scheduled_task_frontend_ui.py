@@ -9,7 +9,12 @@ def test_agent_chat_renders_scheduled_terminal_result_cards_and_missed_poll_reco
 
     assert "isScheduledProgressVisible(scheduledProgress)" in source
     assert "scheduledProgressTitle(scheduledProgress)" in source
-    assert "scheduledResultPreview(scheduledProgress)" in source
+    assert "shouldAutoOpenScheduledProgress(previous, res.data)" in source
+    assert "function shouldAutoOpenScheduledProgress(previous, next)" in source
+    steps_open = source.index("v-if=\"isExecOpen('scheduled')\" class=\"exec-steps\"")
+    preview = source.index("scheduledResultPreview(scheduledProgress)", steps_open)
+    assert preview > steps_open
+    assert "scheduledStepDetail(step) && isToolDetailOpen(toolStepKey('scheduled', index))" in source
     assert "scheduledNotificationLabel(scheduledProgress)" in source
     assert "locateMessage(scheduledProgress.chat_message_id)" in source
     assert "return progress?.state === 'running'" in source

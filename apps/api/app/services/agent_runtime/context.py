@@ -68,6 +68,8 @@ class AgentContext:
     skill_mds: list[tuple[str, str]] = field(default_factory=list)
     skill_names: list[str] = field(default_factory=list)
     mcp_names: list[str] = field(default_factory=list)
+    capability_route: dict[str, Any] | None = None
+    capability_context: str = ""
 
     # Workplace / files
     save_dir: str = ""
@@ -109,6 +111,8 @@ class AgentContext:
         skill_mds: list[tuple[str, str]] | None = None,
         skill_names: list[str] | None = None,
         mcp_names: list[str] | None = None,
+        capability_route: dict[str, Any] | None = None,
+        capability_context: str = "",
         save_dir: str = "",
         note_content: str = "",
         im_source: str = "",
@@ -137,6 +141,8 @@ class AgentContext:
             skill_mds=list(skill_mds or []),
             skill_names=list(skill_names or []),
             mcp_names=list(mcp_names or []),
+            capability_route=dict(capability_route or {}),
+            capability_context=str(capability_context or ""),
             save_dir=save_dir,
             note_content=note_content,
             message_meta=message_meta,

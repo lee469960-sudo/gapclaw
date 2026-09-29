@@ -82,20 +82,19 @@ def _bound_mcp_capability_hints(ctx) -> list[dict[str, str]]:
     if not getattr(ctx, "mcp_ids", None) or not hasattr(getattr(ctx, "db", None), "query"):
         return []
     try:
-        from app.models import MCP
+        from app.services.agent_runtime.capability_router import (
+            build_bound_capability_profiles,
+            capability_profiles_to_classifier_hints,
+        )
 
-        hints: list[dict[str, str]] = []
-        for mcp_id in ctx.mcp_ids:
-            mcp = ctx.db.query(MCP).filter(MCP.id == str(mcp_id)).first()
-            if mcp is None:
-                continue
-            hints.append({
-                "id": str(mcp.id or mcp_id),
-                "name": str(mcp.name or mcp.id or mcp_id),
-                "tags": str(mcp.tags or ""),
-                "description": str(mcp.description or ""),
-            })
-        return hints
+        profiles = build_bound_capability_profiles(
+            ctx.db,
+            getattr(ctx, "agent", None),
+            mcp_ids=getattr(ctx, "mcp_ids", None),
+            skill_ids=[],
+            allowed_actions=getattr(ctx, "allowed_actions", None),
+        )
+        return capability_profiles_to_classifier_hints(profiles)
     except Exception:
         logger.debug("bound MCP capability hints unavailable", exc_info=True)
         return []
@@ -143,6 +142,82 @@ def _looks_like_completion_declaration(text: str) -> bool:
     matches plus a dedicated LLM confirmation, and the Verifier stays in the loop.
     """
     return bool(_COMPLETION_DECL_RE.search(text)) and not bool(_COMPLETION_NEG_RE.search(text))
+
+
+_TEXT_ONLY_HARD_STOP_AT = 3
+_TEXT_ONLY_ACCEPT_CHARS = 40
+_USER_DELIVERABLE_SUFFIXES = (".xlsx", ".xls", ".csv", ".pdf", ".png", ".md", ".docx")
+_INTERNAL_DUMP_RE = re.compile(r"mcp_result_\d+\.json|shell_result_\d+\.|read_result_\d+\.", re.I)
+
+
+def user_deliverable_paths(paths) -> list[str]:
+    """Keep user-facing files. Drop MCP/tool dump paths."""
+    kept: list[str] = []
+    for path in paths or []:
+        text = str(path or "").strip()
+        if not text or _INTERNAL_DUMP_RE.search(text):
+            continue
+        if text.lower().endswith(_USER_DELIVERABLE_SUFFIXES):
+            kept.append(text)
+    return kept
+
+
+def text_only_stop_decision(
+    streak: int,
+    reply: str,
+    previous: str,
+    deliverable_paths,
+    tools_already_ran: bool = False,
+) -> tuple[str, str] | None:
+    """Stop a run that keeps talking after the delivery is already in hand.
+
+    Returns ``(message, output_reason)`` or ``None`` to keep looping.
+    A report written after tools have already run stops on that round. A short
+    reply with no file still waits until the text-only streak is exhausted.
+    """
+    current = (reply or "").strip()
+    prior = (previous or "").strip()
+    best = current if len(current) >= len(prior) else prior
+    paths = user_deliverable_paths(deliverable_paths)
+    report_ready = _is_user_facing_report(current) and (tools_already_ran or bool(paths))
+    if not report_ready and streak < _TEXT_ONLY_HARD_STOP_AT:
+        return None
+    if report_ready or paths or len(best) >= _TEXT_ONLY_ACCEPT_CHARS:
+        if paths:
+            listed = "\n".join(f"- {path}" for path in paths[:8])
+            if len(best) >= _TEXT_ONLY_ACCEPT_CHARS and not best.startswith("任务未完成"):
+                best = f"{best}\n\n交付文件：\n{listed}"
+            else:
+                best = f"任务已完成，交付文件：\n{listed}"
+        return best, "complete"
+    return "", "incomplete"
+
+
+def _is_user_facing_report(text: str) -> bool:
+    """A reply the user can read as the result, not a stall or tool stub."""
+    body = (text or "").strip()
+    if len(body) < 80:
+        return False
+    if body.startswith(("任务未完成", "工具调用", "定时任务已完成", "本次定时任务没有产生")):
+        return False
+    return True
+
+
+def duplicate_stop_decision(reply: str, deliverable_paths) -> tuple[str, str]:
+    """Keep a repeated delivery. A short repeated stub stays incomplete.
+
+    Returns ``(message, output_reason)``. An empty message means the caller
+    should use the forced-stop fallback.
+    """
+    text = (reply or "").strip()
+    if not _is_user_facing_report(text):
+        return "", "incomplete"
+    paths = user_deliverable_paths(deliverable_paths)
+    missing = [path for path in paths if path not in text]
+    if missing:
+        listed = "\n".join(f"- {path}" for path in missing[:8])
+        text = f"{text}\n\n交付文件：\n{listed}"
+    return text, "complete"
 
 
 def _canonical_reply_fingerprint(text: str) -> str:
@@ -421,6 +496,17 @@ class AgentRuntime:
             extract_named_resource_mentions,
             requires_human_wait,
         )
+        from app.services.agent_runtime.capability_router import (
+            ROUTE_BLOCKED_CAPABILITY,
+            ROUTE_CAPABILITY_CANDIDATE,
+            ROUTE_EXPLICIT_CAPABILITY_REQUEST,
+            ROUTE_MISSING_CAPABILITY,
+            build_bound_capability_profiles,
+            build_candidate_capabilities_context,
+            capability_profiles_to_classifier_hints,
+            redacted_route_step,
+            route_capabilities,
+        )
 
         key = ctx.chat_key
         if _running.get(key):
@@ -437,45 +523,76 @@ class AgentRuntime:
             explicit_mode = ""
             if isinstance(getattr(ctx, "message_meta", None), dict):
                 explicit_mode = str(ctx.message_meta.get("execution_mode") or "")
-            capability_hints = _bound_mcp_capability_hints(ctx)
             named_resources = extract_named_resource_mentions(ctx.user_message)
-            bound_names = {
-                re.sub(r"[^a-z0-9]", "", str(hint.get("name") or "").lower())
-                for hint in capability_hints
-            }
-            bound_names.update(
-                re.sub(r"[^a-z0-9]", "", str(name).lower())
-                for name in (getattr(ctx, "skill_names", None) or [])
+            capability_profiles = build_bound_capability_profiles(
+                ctx.db,
+                getattr(ctx, "agent", None),
+                mcp_ids=getattr(ctx, "mcp_ids", None),
+                skill_ids=getattr(ctx, "skill_ids", None),
+                allowed_actions=getattr(ctx, "allowed_actions", None),
             )
-            unbound_resources = [
-                name for name in named_resources
-                if re.sub(r"[^a-z0-9]", "", name.lower()) not in bound_names
-            ]
-            if unbound_resources:
+            capability_hints = capability_profiles_to_classifier_hints(capability_profiles)
+            capability_route = route_capabilities(
+                ctx.user_message,
+                capability_profiles,
+                named_resources=named_resources,
+            )
+            capability_context = build_candidate_capabilities_context(capability_route)
+            route_trace = capability_route.to_trace_dict()
+            if isinstance(getattr(ctx, "message_meta", None), dict):
+                ctx.message_meta["capability_route"] = route_trace
+                if capability_context:
+                    ctx.message_meta["capability_context"] = capability_context
+
+            if capability_route.mode == ROUTE_MISSING_CAPABILITY:
+                missing = capability_route.missing or named_resources
                 result = (
-                    "当前 Agent 未绑定请求中的 MCP/工具："
-                    + ", ".join(unbound_resources[:4])
+                    "当前 Agent 未绑定请求中的 MCP/Skill/工具："
+                    + ", ".join(missing[:4])
                     + "。请先绑定后再执行查询。"
                 )
                 metrics = _set_runtime_metrics(
                     ctx, route_mode=ExecutionMode.TASK.value, llm_turn_count=0,
                     retry_count=0, stop_reason="mcp_not_bound",
                 )
-                self._save_assistant_message(ctx, result, steps=[{
+                stored = self._save_assistant_message(ctx, result, steps=[
+                    redacted_route_step(route_trace),
+                    {
                     "type": "error",
                     "action": "mcp_not_bound",
-                    "title": "MCP 未绑定",
+                    "title": "能力未绑定",
                     "status": "error",
                     "content": result,
-                }])
-                await self._publish_modular_done(ctx, result, files_written=0, saved_paths=[], metrics=metrics)
-                return result
+                    },
+                ], output_reason="error")
+                await self._publish_modular_done(ctx, stored, files_written=0, saved_paths=[], metrics=metrics)
+                return stored
+            if capability_route.mode == ROUTE_BLOCKED_CAPABILITY:
+                result = "请求命中了当前 Agent 已绑定但未启用或未授权的能力。请检查 Agent 能力启用状态和权限配置。"
+                metrics = _set_runtime_metrics(
+                    ctx, route_mode=ExecutionMode.TASK.value, llm_turn_count=0,
+                    retry_count=0, stop_reason="capability_blocked",
+                )
+                stored = self._save_assistant_message(ctx, result, steps=[
+                    redacted_route_step(route_trace),
+                    {
+                        "type": "error",
+                        "action": "capability_blocked",
+                        "title": "能力不可用",
+                        "status": "error",
+                        "content": result,
+                    },
+                ], output_reason="error")
+                await self._publish_modular_done(ctx, stored, files_written=0, saved_paths=[], metrics=metrics)
+                return stored
             execution_mode = classify_request(
                 ctx.user_message,
                 explicit_mode=explicit_mode,
                 capability_hints=capability_hints,
                 skill_names=getattr(ctx, "skill_names", None),
             )
+            if capability_route.mode in {ROUTE_CAPABILITY_CANDIDATE, ROUTE_EXPLICIT_CAPABILITY_REQUEST}:
+                execution_mode = ExecutionMode.TASK
             if requires_human_wait(ctx.user_message, getattr(ctx, "message_meta", None)):
                 execution_mode = ExecutionMode.HUMAN_WAIT
             if execution_mode is ExecutionMode.HUMAN_WAIT:
@@ -485,15 +602,15 @@ class AgentRuntime:
                     retry_count=0, stop_reason="human_wait",
                     human_loop_reason="需要人工确认",
                 )
-                self._save_assistant_message(ctx, result, steps=[{
+                stored = self._save_assistant_message(ctx, result, steps=[{
                     "type": "info",
                     "action": "human_wait",
                     "title": "等待人工确认",
                     "status": "done",
                     "content": "自动 LLM 循环已暂停",
-                }])
-                await self._publish_modular_done(ctx, result, files_written=0, saved_paths=[], metrics=metrics)
-                return result
+                }], output_reason="need_input")
+                await self._publish_modular_done(ctx, stored, files_written=0, saved_paths=[], metrics=metrics)
+                return stored
             if self._is_conversational(ctx, capability_hints=capability_hints):
                 logger.info(
                     "agent_run conversational agent=%s session=%s msg_len=%d",
@@ -518,8 +635,8 @@ class AgentRuntime:
                             f"补全次数：{int(chat_metrics.get('quality_retry_count') or 0)}。"
                         ),
                     })
-                self._save_assistant_message(ctx, result, steps=chat_steps)
-                return result
+                stored = self._save_assistant_message(ctx, result, steps=chat_steps, output_reason="complete")
+                return stored
 
             logger.info(
                 "agent_run modular agent=%s session=%s msg_len=%d mcp=%d skills=%d",
@@ -527,15 +644,15 @@ class AgentRuntime:
                 len(ctx.mcp_ids), len(ctx.skill_ids),
             )
             result, steps, saved_paths, files_written, context_pct = await self._run_modular(ctx)
-            self._save_assistant_message(
+            stored = self._save_assistant_message(
                 ctx, result, steps=steps, saved_paths=saved_paths,
                 context_available_percent=context_pct,
             )
             await self._publish_modular_done(
-                ctx, result, files_written=files_written, saved_paths=saved_paths,
+                ctx, stored, files_written=files_written, saved_paths=saved_paths,
                 metrics=(getattr(ctx, "message_meta", None) or {}).get("runtime_metrics"),
             )
-            return result
+            return stored
         except Exception:
             terminal_status = "failed"
             raise
@@ -788,11 +905,13 @@ class AgentRuntime:
         steps: list[dict] | None = None,
         saved_paths: list[str] | None = None,
         context_available_percent: int | None = None,
-    ) -> None:
-        """Persist the assistant reply + execution steps to ChatMessage."""
+        output_reason: str = "",
+    ) -> str:
+        """Persist the assistant Markdown and the unified output envelope."""
         import json as _json
         from app.models import ChatMessage
         from app.security import now_str
+        from app.services.agent_runtime.unified_output import build_unified_output
 
         content = (reply or "").strip()
         if not content:
@@ -802,6 +921,16 @@ class AgentRuntime:
                 if n_steps
                 else "（本轮未产生文字回复；详见执行过程）"
             )
+        user_meta = dict(ctx.message_meta or {}) if isinstance(getattr(ctx, "message_meta", None), dict) else {}
+        reason = output_reason or str(user_meta.pop("unified_output_reason", "") or "") or "complete"
+        structured = user_meta.pop("unified_output_structured", None)
+        user_meta.pop("unified_output_reason", None)
+        if saved_paths and isinstance(structured, dict) and not structured.get("saved_paths"):
+            structured = {**structured, "saved_paths": list(saved_paths)[:20]}
+        elif saved_paths and not isinstance(structured, dict):
+            structured = {"saved_paths": list(saved_paths)[:20]}
+        envelope = build_unified_output(reason, content, structured if isinstance(structured, dict) else None)
+        content = envelope["message"]
         visible = AgentRuntime._ensure_visible_run_steps(
             AgentRuntime._slim_steps_for_meta(steps),
         )
@@ -809,13 +938,13 @@ class AgentRuntime:
             "steps": visible,
             "step_count": max(len(visible), 1),
             "saved_paths": list(saved_paths or [])[:20],
+            "output": envelope,
         }
-        runtime_metrics = (ctx.message_meta or {}).get("runtime_metrics") if isinstance(ctx.message_meta, dict) else None
+        runtime_metrics = user_meta.get("runtime_metrics") if isinstance(user_meta.get("runtime_metrics"), dict) else None
         if isinstance(runtime_metrics, dict):
             meta["runtime_metrics"] = dict(runtime_metrics)
         if context_available_percent is not None:
             meta["context_available_percent"] = context_available_percent
-        user_meta = dict(ctx.message_meta or {})
         for k in (
             "source",
             "channel_id",
@@ -842,6 +971,7 @@ class AgentRuntime:
             ctx.db.commit()
         except Exception:
             pass
+        return content
 
     # Non-resource tool actions that force the modular loop even without any
     # bound resource (shell-only agents, file tools, etc.). Resource-bound actions
@@ -1381,7 +1511,7 @@ class AgentRuntime:
         state.run_ts = run_ts
         pre_existing_deliverables: set[str] = set()
 
-        def _ret(final: str) -> tuple[str, list[dict], list[str], int, int]:
+        def _ret(final: str, *, output_reason: str = "complete") -> tuple[str, list[dict], list[str], int, int]:
             _capture_deliverable_paths(ctx, state, pre_existing_deliverables)
             _set_runtime_metrics(
                 ctx,
@@ -1391,6 +1521,27 @@ class AgentRuntime:
                 stop_reason=state.terminal_reason or ("completed" if state.final else "stopped"),
                 human_loop_reason=state.human_loop_reason,
             )
+            if isinstance(getattr(ctx, "message_meta", None), dict):
+                pending = [
+                    str(item.get("text") or "").strip()
+                    for item in (state.subtasks or [])
+                    if isinstance(item, dict)
+                    and (item.get("status") or "pending") != "done"
+                    and str(item.get("text") or "").strip()
+                ]
+                facts: dict = {}
+                paths = [path for path in state.saved_paths if isinstance(path, str) and path.strip()][:20]
+                if paths:
+                    facts["saved_paths"] = paths
+                if state.files_written:
+                    facts["files_written"] = int(state.files_written)
+                if pending:
+                    facts["pending"] = pending[:12]
+                progress = [line for line in state.progress_lines if str(line).strip()][-12:]
+                if progress:
+                    facts["progress"] = progress
+                ctx.message_meta["unified_output_reason"] = output_reason
+                ctx.message_meta["unified_output_structured"] = facts
             return final, list(state.run_steps), list(state.saved_paths), state.files_written, _context_available_percent(ctx, cm)
 
         def _apply_no_progress_hint(made_progress: bool, round_no: int) -> None:
@@ -1478,6 +1629,12 @@ class AgentRuntime:
         skill_snap = sp_builder.build_skill_snapshot(ctx.skill_mds) if ctx.skill_mds else None
         if skill_snap:
             system_prompt += f"\n\n{skill_snap}"
+        capability_context = ""
+        if isinstance(getattr(ctx, "message_meta", None), dict):
+            capability_context = str(ctx.message_meta.get("capability_context") or "")
+        capability_context = capability_context or str(getattr(ctx, "capability_context", "") or "")
+        if capability_context.strip():
+            system_prompt += f"\n\n{capability_context.strip()}"
         cm.set_base(system_prompt=system_prompt)
         candidates = build_mcp_route_candidates(
             ctx.db, ctx.mcp_ids, ctx.allowed_actions
@@ -1491,6 +1648,15 @@ class AgentRuntime:
         )
         route_decision = apply_empty_route_fallback(route_decision, candidates)
         state.selected_mcp_ids = route_decision.selected_mcp_ids
+        if isinstance(getattr(ctx, "message_meta", None), dict):
+            route_trace = ctx.message_meta.get("capability_route")
+            if isinstance(route_trace, dict):
+                route_trace["mcp_route"] = {
+                    "candidate_mcp_ids": [candidate.id for candidate in candidates[:20]],
+                    "selected_mcp_ids": list(route_decision.selected_mcp_ids or []),
+                    "needs_more_capability": bool(route_decision.needs_more_capability),
+                    "failure": str(route_decision.failure or "")[:80],
+                }
         view_catalog = build_ads_view_catalog(state.selected_mcp_ids)
         if state.resumed:
             # Resumed run: inject the rendered subtask list + raw plan (carries view_map)
@@ -1607,6 +1773,12 @@ class AgentRuntime:
         if not skill_names and ctx.skill_mds:
             skill_names = [n for n, _md in ctx.skill_mds if n]
         mcp_names = list(ctx.mcp_names or [])
+        if isinstance(getattr(ctx, "message_meta", None), dict):
+            route_trace = ctx.message_meta.get("capability_route")
+            if isinstance(route_trace, dict):
+                from app.services.agent_runtime.capability_router import redacted_route_step
+
+                await self._append_step(ctx, state, redacted_route_step(route_trace))
         if skill_names:
             await self._append_step(ctx, state, {
                 "type": "info",
@@ -1686,10 +1858,25 @@ class AgentRuntime:
                 if not _running.get(ctx.chat_key, False):
                     logger.info("modular_loop cancelled agent=%s iter=%d", ctx.agent.id, iteration)
                     _clear_run_state(ctx)
-                    return _ret(state.final or "任务已取消")
+                    return _ret(state.final or "任务已取消", output_reason="cancel")
 
                 round_no = iteration + 1
                 state.llm_turn_count = round_no
+                ready_paths = user_deliverable_paths(state.saved_paths)
+                if ready_paths and tool_call_count > 0 and _is_user_facing_report(state.last_reply):
+                    message, output_reason = duplicate_stop_decision(state.last_reply, state.saved_paths)
+                    state.final = message
+                    state.terminal_reason = "deliverable_ready"
+                    await self._append_step(ctx, state, {
+                        "type": "info",
+                        "action": "deliverable_ready",
+                        "iteration": round_no,
+                        "title": "已有交付结果，停止后续推理",
+                        "status": "done",
+                        "content": "交付文件已生成，不再继续调用模型",
+                    })
+                    _clear_run_state(ctx)
+                    return _ret(state.final, output_reason=output_reason)
                 tool_executor = getattr(ctx, "tool_executor", None)
                 if tool_executor is not None and hasattr(tool_executor, "record_iteration"):
                     tool_executor.record_iteration(round_no)
@@ -1724,7 +1911,7 @@ class AgentRuntime:
                     if isinstance(exc, ChatStopped) or not _running.get(ctx.chat_key, False):
                         await self._patch_last_step(ctx, state, status="error", content="已停止")
                         _clear_run_state(ctx)
-                        return _ret(state.final or "[已停止]")
+                        return _ret(state.final or "[已停止]", output_reason="cancel")
                     fallback_eligible = (
                         not route_fallback_used
                         and iteration == 0
@@ -1824,7 +2011,8 @@ class AgentRuntime:
                                 "LLM 服务连续调用失败，任务已暂停；本轮执行记录已保留，请稍后继续。"
                                 if persisted
                                 else "LLM 服务连续调用失败，任务已暂停，请稍后继续。"
-                            )
+                            ),
+                            output_reason="error",
                         )
                     continue
 
@@ -1882,10 +2070,14 @@ class AgentRuntime:
                 duplicate_stop_at = max(1, no_progress_limit - 1)
                 if duplicate_no_progress_streak >= duplicate_stop_at:
                     state.terminal_reason = "duplicate_output_stop"
-                    state.final = _forced_stop_reply(
-                        state,
-                        "连续输出重复且没有新的工具、文件或计划进展，已停止自动推理",
-                    )
+                    message, output_reason = duplicate_stop_decision(reply, state.saved_paths)
+                    if output_reason == "complete":
+                        state.final = message
+                    else:
+                        state.final = _forced_stop_reply(
+                            state,
+                            "连续输出重复且没有新的工具、文件或计划进展，已停止自动推理",
+                        )
                     await self._append_step(ctx, state, {
                         "type": "info",
                         "action": "duplicate_output_stop",
@@ -1898,7 +2090,7 @@ class AgentRuntime:
                         _save_run_state(ctx, state)
                     else:
                         _clear_run_state(ctx)
-                    return _ret(state.final)
+                    return _ret(state.final, output_reason=output_reason)
 
                 # v17 R3: length truncation after bounded continuations — never accept
                 # FINAL / completion-signal from a mid-sentence reply.
@@ -2043,6 +2235,7 @@ class AgentRuntime:
                         # Prose/legacy FAILs and already-covered gaps are non-blocking.
                         state.fix_only_until_final = False
                         exhausted = _exhausted_gap_cards(state, cards)
+                        high_risk = False
                         if exhausted:
                             high_risk = any(_is_high_risk_gap_action(str(gap.get("action") or "")) for gap in exhausted)
                             state.terminal_reason = "high_risk_gap_exhausted" if high_risk else "low_risk_gap_exhausted"
@@ -2059,7 +2252,10 @@ class AgentRuntime:
                             "modular_loop finish agent=%s iter=%d/%d tools=%d vague_fail_as_pass=1",
                             ctx.agent.id, iteration, max_iters, tool_call_count,
                         )
-                        return _ret(state.final)
+                        return _ret(
+                            state.final,
+                            output_reason="need_input" if high_risk else "complete",
+                        )
                     effective = [gap["action"] for gap in gaps]
                     for gap in gaps:
                         existing = state.verifier_gaps.setdefault(gap["gap_id"], {"card": gap, "signatures": [], "evidence": []})
@@ -2159,6 +2355,29 @@ class AgentRuntime:
                                 "请立即二选一：调用工具（无依赖可同轮多个）推进任务，或输出一行 `FINAL: <当前进度/结果>` 结束本轮。\n"
                                 "本轮已完成：\n" + prog
                             )
+                        decision = text_only_stop_decision(
+                            text_only_streak, cur, _last_text_only_reply, state.saved_paths,
+                            tools_already_ran=tool_call_count > 0,
+                        )
+                        if decision is not None:
+                            message, output_reason = decision
+                            if output_reason == "complete":
+                                state.final = message
+                            else:
+                                state.final = _forced_stop_reply(
+                                    state,
+                                    f"连续 {text_only_streak} 轮只输出文字，没有调用工具也没有 FINAL",
+                                )
+                            await self._append_step(ctx, state, {
+                                "type": "info",
+                                "action": "text_only_stop",
+                                "iteration": round_no,
+                                "title": "连续文字轮次已停止",
+                                "status": "done",
+                                "content": "已有交付内容，不再继续空转" if output_reason == "complete" else "没有新的工具或 FINAL",
+                            })
+                            _clear_run_state(ctx)
+                            return _ret(state.final, output_reason=output_reason)
                         _last_text_only_reply = cur
                         _apply_no_progress_hint(made_progress, round_no)
                         continue
@@ -2172,7 +2391,7 @@ class AgentRuntime:
                     if not _running.get(ctx.chat_key, False):
                         logger.info("tool execution cancelled agent=%s iter=%d", ctx.agent.id, iteration)
                         _clear_run_state(ctx)
-                        return _ret(state.final or "[已停止]")
+                        return _ret(state.final or "[已停止]", output_reason="cancel")
                     action = step.action
                     normalized = step.reply
                     if not action or not normalized:
@@ -3129,7 +3348,7 @@ class AgentRuntime:
                                     "modular_loop cached_reference_converged agent=%s iter=%d/%d streak=%d",
                                     ctx.agent.id, iteration, max_iters, cached_reference_streak,
                                 )
-                                return _ret(state.final)
+                                return _ret(state.final, output_reason="incomplete")
                         elif not cache_hit:
                             cached_reference_streak = 0
                         if not cache_hit:
@@ -3198,6 +3417,7 @@ class AgentRuntime:
 
                 # react-engine-v15 R1′: end-of-round no-progress breakthrough hint.
                 _apply_no_progress_hint(made_progress, round_no)
+                _capture_deliverable_paths(ctx, state, pre_existing_deliverables)
 
         # Budget exhausted
         logger.warning(
@@ -3217,7 +3437,7 @@ class AgentRuntime:
             # Persist the latest state (not just the last PLAN snapshot) so the next
             # message resumes with all materialized results / dedup / progress intact.
             _save_run_state(ctx, state)
-        return _ret(final)
+        return _ret(final, output_reason="budget")
 
 
 def _capture_deliverable_paths(ctx, state, pre_existing: set[str] | None = None) -> None:
@@ -5422,10 +5642,11 @@ async def _run_code_runtime(
             done_content,
             format_patch_verification_output(serialize_code_result(run, artifact)),
         )).strip()
-        runtime._save_assistant_message(
+        done_content = runtime._save_assistant_message(
             ctx,
             done_content,
             steps=_code_profile_steps_for_message(run),
+            output_reason="complete",
         )
         try:
             await hub.publish(ctx.chat_key, {

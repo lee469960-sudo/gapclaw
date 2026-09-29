@@ -9,9 +9,36 @@ from app.deps import get_session_user
 from app.models import User, AgentGroup, GroupChatMessage
 from app.schemas import ok, fail
 from app.security import now_str
+from app.services.agent_runtime.unified_output import group_assistant_record
 from app.services.workflow_runner import run_workflow, stop_workflow
 
 router = APIRouter(prefix="/pages/page_group_chat.cgi", tags=["group-chat"])
+
+
+def _public_group_message(message: GroupChatMessage) -> dict:
+    item = {
+        "role": message.role,
+        "content": message.content,
+        "agent_id": message.agent_id,
+        "created_at": message.created_at,
+    }
+    try:
+        meta = json.loads(message.meta or "{}")
+    except json.JSONDecodeError:
+        meta = {}
+    output = meta.get("output") if isinstance(meta, dict) else None
+    if isinstance(output, dict) and isinstance(output.get("message"), str):
+        item["meta"] = {
+            "output": {
+                "version": output.get("version"),
+                "status": output.get("status"),
+                "type": output.get("type"),
+                "message": output.get("message"),
+                "data": output.get("data") if isinstance(output.get("data"), dict) else {},
+                "actions": [],
+            }
+        }
+    return item
 
 
 class GroupChatBody(BaseModel):
@@ -46,7 +73,7 @@ async def group_chat_get(
             msgs = q.order_by(GroupChatMessage.id.desc()).limit(limit).all()[::-1]
         return ok({
             "group": g.to_dict(),
-            "messages": [{"role": m.role, "content": m.content, "agent_id": m.agent_id, "created_at": m.created_at} for m in msgs],
+            "messages": [_public_group_message(m) for m in msgs],
             "session_id": session_id,
         })
     return ok({"group": g.to_dict(), "messages": [], "session_id": session_id})
@@ -81,12 +108,14 @@ async def group_chat_post(body: GroupChatBody, user: User = Depends(get_session_
         result = await run_workflow(db, g, body.session_id or "", body.message or "", user.username)
         for r in result.get("results", []):
             if "reply" in r:
+                content, meta = group_assistant_record(r.get("reply") or "", r.get("output"))
                 db.add(GroupChatMessage(
                     group_id=body.group_id,
                     session_id=body.session_id or "",
                     role="assistant",
-                    content=r["reply"],
+                    content=content,
                     agent_id=r.get("agent_id", ""),
+                    meta=json.dumps(meta, ensure_ascii=False),
                     created_at=now_str(),
                 ))
         db.commit()

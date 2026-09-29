@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -126,6 +127,62 @@ def _is_forced_stop_text(text: str | None) -> bool:
 def is_forced_stop_result(text: str | None) -> bool:
     """Return true for the runtime's no-progress/budget forced-stop fallback."""
     return _is_forced_stop_text(text)
+
+
+_DELIVERABLE_SUFFIXES = (".xlsx", ".xls", ".csv", ".pdf", ".png", ".md", ".docx")
+_INTERNAL_DUMP_RE = re.compile(r"mcp_result_\d+\.json|shell_result_\d+\.|read_result_\d+\.", re.I)
+
+
+def _user_facing_report(text: str) -> str:
+    body = (text or "").strip()
+    if len(body) < 80:
+        return ""
+    if body.startswith(("任务未完成", "工具调用", "定时任务已完成", "本次定时任务没有产生")):
+        return ""
+    return body
+
+
+def scheduled_delivery_text(content: str, steps, paths: list[str]) -> str:
+    """Prefer the report already written in the run over a filename stub."""
+    report = _user_facing_report(content)
+    if not report:
+        best = ""
+        for step in steps or []:
+            if not isinstance(step, dict) or step.get("type") != "llm":
+                continue
+            candidate = _user_facing_report(str(step.get("content") or ""))
+            if len(candidate) > len(best):
+                best = candidate
+        report = best
+    kept = [path for path in paths if path][:8]
+    listed = "\n".join(f"- {path}" for path in kept)
+    if report:
+        missing = [path for path in kept if path not in report]
+        if missing:
+            extra = "\n".join(f"- {path}" for path in missing)
+            return f"{report}\n\n交付文件：\n{extra}"
+        return report
+    if listed:
+        return f"定时任务已完成。\n\n交付文件：\n{listed}"
+    return ""
+
+
+def deliverable_paths_in_message(message) -> list[str]:
+    """User-facing files recorded on an assistant message."""
+    try:
+        meta = json.loads(getattr(message, "meta", None) or "{}")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(meta, dict):
+        return []
+    paths = []
+    for path in meta.get("saved_paths") or []:
+        text = str(path or "").strip()
+        if not text or _INTERNAL_DUMP_RE.search(text):
+            continue
+        if text.lower().endswith(_DELIVERABLE_SUFFIXES):
+            paths.append(text)
+    return paths
 
 
 def serialize_scheduled_run_result(db: Session, run: ScheduledTaskRun) -> dict[str, Any]:

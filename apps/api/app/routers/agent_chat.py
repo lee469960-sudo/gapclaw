@@ -48,6 +48,52 @@ _HISTORY_STEPS_LIMIT = 0  # 0 = return all steps (no display cap)
 _EXECUTION_DETAIL_LIMIT = 12_000
 
 
+def _slim_capability_route_detail(detail) -> dict:
+    if not isinstance(detail, dict):
+        return {}
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    candidates = detail.get("candidate_ids") if isinstance(detail.get("candidate_ids"), list) else []
+    blocked = detail.get("blocked") if isinstance(detail.get("blocked"), list) else []
+    missing = detail.get("missing") if isinstance(detail.get("missing"), list) else []
+    mcp_route = detail.get("mcp_route") if isinstance(detail.get("mcp_route"), dict) else {}
+    return {
+        "route_mode": str(detail.get("route_mode") or "")[:64],
+        "candidate_count": max(0, _safe_int(detail.get("candidate_count"))),
+        "candidate_ids": [
+            {
+                "type": str(item.get("type") or "")[:24],
+                "id": str(item.get("id") or "")[:128],
+                "score": max(0, _safe_int(item.get("score"))),
+            }
+            for item in candidates[:10]
+            if isinstance(item, dict)
+        ],
+        "matched_terms": [str(v)[:64] for v in (detail.get("matched_terms") or [])[:20]],
+        "blocked": [
+            {
+                "type": str(item.get("type") or "")[:24],
+                "id": str(item.get("id") or "")[:128],
+                "reason": str(item.get("reason") or "")[:80],
+            }
+            for item in blocked[:10]
+            if isinstance(item, dict)
+        ],
+        "missing": [str(v)[:128] for v in missing[:10]],
+        "error": str(detail.get("error") or "")[:80],
+        "mcp_route": {
+            "candidate_mcp_ids": [str(v)[:128] for v in (mcp_route.get("candidate_mcp_ids") or [])[:20]],
+            "selected_mcp_ids": [str(v)[:128] for v in (mcp_route.get("selected_mcp_ids") or [])[:20]],
+            "needs_more_capability": bool(mcp_route.get("needs_more_capability")),
+            "failure": str(mcp_route.get("failure") or "")[:80],
+        } if mcp_route else {},
+    }
+
+
 def _slim_meta_for_history(raw: str | None) -> dict:
     """Drop heavy steps/mcp_tables from list payload; keep counts for UI badge."""
     try:
@@ -93,6 +139,18 @@ def _slim_meta_for_history(raw: str | None) -> dict:
     ):
         if meta.get(k):
             out[k] = meta[k]
+    if isinstance(meta.get("capability_route"), dict):
+        out["capability_route"] = _slim_capability_route_detail(meta.get("capability_route"))
+    output = meta.get("output")
+    if isinstance(output, dict) and isinstance(output.get("message"), str):
+        out["output"] = {
+            "version": output.get("version"),
+            "status": output.get("status"),
+            "type": output.get("type"),
+            "message": output.get("message"),
+            "data": output.get("data") if isinstance(output.get("data"), dict) else {},
+            "actions": [],
+        }
     return out
 
 
@@ -149,6 +207,9 @@ def _steps_tail_for_message(raw: str | None, limit: int | None = None) -> dict:
                 "failure": str(detail.get("failure") or "")[:80],
                 "duration_ms": max(0, int(detail.get("duration_ms") or 0)),
             }
+        if s.get("type") == "capability_route" and isinstance(s.get("detail"), dict):
+            item["collapsed"] = bool(s.get("collapsed", True))
+            item["detail"] = _slim_capability_route_detail(s.get("detail"))
         if isinstance(s.get("batch"), dict):
             try:
                 from app.services.agent_runtime.runtime import AgentRuntime

@@ -82,6 +82,21 @@ def test_bound_mcp_capability_promotes_implicit_query_to_task():
     assert classify_request("解释一下什么是持仓", capability_hints=hints) is ExecutionMode.CHAT
 
 
+def test_bound_capability_keywords_and_aliases_are_route_metadata():
+    hints = [{
+        "id": "m1",
+        "name": "clickhouse-query",
+        "type": "mcp",
+        "aliases": "ck",
+        "keywords": "慢查询, SQL",
+        "tags": "database",
+        "description": "ClickHouse 查询性能分析",
+    }]
+
+    assert classify_request("帮我看看这个 CK SQL 为什么这么慢", capability_hints=hints) is ExecutionMode.TASK
+    assert classify_request("解释一下数据库是什么", capability_hints=hints) is ExecutionMode.CHAT
+
+
 def test_stock_selection_intent_promotes_bound_market_capability_to_task():
     hints = [{
         "name": "tushare",
@@ -108,6 +123,11 @@ def test_structured_selection_request_routes_with_sparse_market_metadata():
 def test_explicit_resource_name_is_operational_without_hardcoded_mcp_name():
     assert extract_named_resource_mentions("使用 okx-trader 查询当前持仓") == ["okx-trader"]
     assert classify_request("okx-trader 当前持仓") is ExecutionMode.TASK
+
+
+def test_function_like_identifier_is_not_treated_as_unbound_resource_name():
+    assert extract_named_resource_mentions("请调用 r_info 生成 Skill 示例") == []
+    assert extract_named_resource_mentions("调用 ads-sync-hub 同步数据") == ["ads-sync-hub"]
 
 
 def test_skill_protocol_markers_are_not_treated_as_unbound_mcp_names():

@@ -22,6 +22,7 @@ class SkillBody(BaseModel):
     name: str | None = None
     tags: str = ""
     description: str = ""
+    routing: dict | None = None
     visibility: str = "private"
     allowed_users: list[str] | None = None
     scope: str | None = None
@@ -118,6 +119,13 @@ async def skills_post(
             s.name = form.get("name") or s.name or "未命名"
             s.tags = form.get("tags") or ""
             s.description = form.get("description") or ""
+            try:
+                routing = json.loads(form.get("routing") or "{}")
+            except Exception:
+                routing = {}
+            from app.services.agent_runtime.capability_router import sanitize_routing_hints
+
+            s.routing = json.dumps(sanitize_routing_hints(routing), ensure_ascii=False)
             s.visibility = form.get("visibility") or "private"
             try:
                 au = json.loads(form.get("allowed_users") or "[]")
@@ -158,6 +166,10 @@ async def skills_post(
             s.tags = body.tags
         if body.description is not None:
             s.description = body.description
+        if body.routing is not None:
+            from app.services.agent_runtime.capability_router import sanitize_routing_hints
+
+            s.routing = json.dumps(sanitize_routing_hints(body.routing), ensure_ascii=False)
         if body.visibility is not None:
             s.visibility = body.visibility
         if body.allowed_users is not None:

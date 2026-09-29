@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from app.models import Agent, ChatMessage, ScheduledTask, ScheduledTaskRun, ScheduledTaskProgress
 from app.services.agent_runtime import run_agent
 from app.services.agent_runtime.hub import hub, stop_chat
-from app.services.scheduled_tasks.results import is_forced_stop_result
+from app.services.scheduled_tasks.results import (
+    deliverable_paths_in_message,
+    is_forced_stop_result,
+    scheduled_delivery_text,
+)
 
 
 class ScheduledTaskRuntimeError(ValueError):
@@ -137,9 +141,43 @@ def execute_and_finalize_claimed_run(db: Session, run: ScheduledTaskRun) -> str:
         raise ScheduledTaskRuntimeError("scheduled_task_output_empty")
     message = bind_run_message(db, run)
     if is_forced_stop_result(result):
+        paths = deliverable_paths_in_message(message)
+        if paths:
+            from app.services.scheduled_tasks.lifecycle import finish_run_success
+
+            try:
+                meta = json.loads(message.meta or "{}")
+            except json.JSONDecodeError:
+                meta = {}
+            steps = meta.get("steps") if isinstance(meta, dict) else []
+            message.content = scheduled_delivery_text(message.content or "", steps, paths)
+            if isinstance(meta, dict):
+                output = meta.get("output")
+                if isinstance(output, dict):
+                    output["status"] = "ok"
+                    output["type"] = "data"
+                    output["message"] = message.content
+                    output["data"] = {"saved_paths": paths[:8]}
+                    output["actions"] = []
+                    meta["output"] = output
+                message.meta = json.dumps(meta, ensure_ascii=False)
+            db.add(message)
+            db.commit()
+            finish_run_success(db, run)
+            return message.content
         from app.services.scheduled_tasks.lifecycle import finish_run_failure
 
         message.content = SCHEDULED_NO_PROGRESS_REPLY
+        try:
+            meta = json.loads(message.meta or "{}")
+        except json.JSONDecodeError:
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        from app.services.agent_runtime.unified_output import build_unified_output
+        envelope = build_unified_output("error", message.content)
+        meta["output"] = envelope
+        message.meta = json.dumps(meta, ensure_ascii=False)
         db.add(message)
         db.commit()
         finish_run_failure(db, run, "scheduled_task_no_progress")

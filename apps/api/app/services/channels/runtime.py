@@ -21,6 +21,7 @@ from app.services.channels.reply import (
     strip_attach_markers,
 )
 from app.services.agent_runtime import is_auto_start_blocked, run_agent
+from app.services.agent_runtime.unified_output import visible_reply
 from app.services.workplace import download_path
 
 logger = logging.getLogger(__name__)
@@ -376,7 +377,7 @@ async def process_inbound(channel_id: str, inbound: InboundMessage) -> None:
             except Exception as ack_err:
                 logger.warning("IM ack failed channel=%s: %s", channel_id, ack_err)
 
-            reply = await run_agent(
+            reply = visible_reply(await run_agent(
                 db,
                 agent,
                 im_sess.agent_session_id,
@@ -390,7 +391,7 @@ async def process_inbound(channel_id: str, inbound: InboundMessage) -> None:
                     "sender_username": inbound.sender_username,
                     "sender_display_name": inbound.sender_display_name,
                 },
-            )
+            ))
 
             saved = _last_assistant_saved_paths(db, agent.id, im_sess.agent_session_id)
             # R4: explicit `attach=` / `ATTACH:` paths take priority; otherwise fall

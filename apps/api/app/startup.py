@@ -157,6 +157,9 @@ def init_db(db: Session) -> None:
         if "httpmcps" not in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agents ADD COLUMN httpmcps TEXT DEFAULT '[]'"))
+        if "capability_routing" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE agents ADD COLUMN capability_routing TEXT DEFAULT '{}'"))
         if "engine" in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agents DROP COLUMN engine"))
@@ -170,6 +173,11 @@ def init_db(db: Session) -> None:
         if "history_length" not in gcols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE agent_groups ADD COLUMN history_length INTEGER DEFAULT 10"))
+    if "group_chat_messages" in insp.get_table_names():
+        gmcols = {c["name"] for c in insp.get_columns("group_chat_messages")}
+        if "meta" not in gmcols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE group_chat_messages ADD COLUMN meta TEXT DEFAULT '{}'"))
     if "code_projects" in insp.get_table_names():
         cpcols = {c["name"] for c in insp.get_columns("code_projects")}
         with engine.begin() as conn:
@@ -400,6 +408,14 @@ def init_db(db: Session) -> None:
                 conn.execute(text("ALTER TABLE mcps ADD COLUMN command_args TEXT DEFAULT '[]'"))
             if "command_env" not in mcols:
                 conn.execute(text("ALTER TABLE mcps ADD COLUMN command_env TEXT DEFAULT '{}'"))
+            if "routing" not in mcols:
+                conn.execute(text("ALTER TABLE mcps ADD COLUMN routing TEXT DEFAULT '{}'"))
+
+    if "skills" in insp.get_table_names():
+        scols = {c["name"] for c in insp.get_columns("skills")}
+        if "routing" not in scols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE skills ADD COLUMN routing TEXT DEFAULT '{}'"))
 
     migrate_legacy_agent_ticks(db)
     normalize_scheduled_task_next_runs(db)

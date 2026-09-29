@@ -192,6 +192,7 @@ class Skill(Base):
     name: Mapped[str] = mapped_column(String(255))
     tags: Mapped[str] = mapped_column(String(255), default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    routing: Mapped[str] = mapped_column(Text, default="{}")
     zip_path: Mapped[str] = mapped_column(String(512), default="")
     zip_name: Mapped[str] = mapped_column(String(255), default="")
     visibility: Mapped[str] = mapped_column(String(16), default="private")
@@ -205,6 +206,7 @@ class Skill(Base):
             "name": self.name,
             "tags": self.tags,
             "description": self.description,
+            "routing": _json_dict(self.routing),
             "has_zip": bool(self.zip_path),
             "zip_name": self.zip_name,
             "visibility": self.visibility,
@@ -227,6 +229,7 @@ class MCP(Base):
     command_args: Mapped[str] = mapped_column(Text, default="[]")
     command_env: Mapped[str] = mapped_column(Text, default="{}")
     description: Mapped[str] = mapped_column(Text, default="")
+    routing: Mapped[str] = mapped_column(Text, default="{}")
     visibility: Mapped[str] = mapped_column(String(16), default="private")
     allowed_users: Mapped[str] = mapped_column(Text, default="[]")
     creator: Mapped[str] = mapped_column(String(64), default="")
@@ -252,6 +255,7 @@ class MCP(Base):
             "command_args": _json_list(self.command_args),
             "command_env": env,
             "description": self.description,
+            "routing": _json_dict(self.routing),
             "visibility": self.visibility,
             "allowed_users": _json_list(self.allowed_users),
             "creator": self.creator,
@@ -339,6 +343,7 @@ class Agent(Base):
     mcps: Mapped[str] = mapped_column(Text, default="[]")
     rags: Mapped[str] = mapped_column(Text, default="[]")
     httpmcps: Mapped[str] = mapped_column(Text, default="[]")
+    capability_routing: Mapped[str] = mapped_column(Text, default="{}")
     max_iterations: Mapped[int] = mapped_column(Integer, default=150)
     history_length: Mapped[int] = mapped_column(Integer, default=30)
     summary_max_words: Mapped[int] = mapped_column(Integer, default=5000)
@@ -373,6 +378,7 @@ class Agent(Base):
             "mcps": _json_list(self.mcps),
             "rags": _json_list(self.rags),
             "httpmcps": _json_list(self.httpmcps),
+            "capability_routing": _json_dict(self.capability_routing),
             "max_iterations": self.max_iterations,
             "history_length": self.history_length,
             "summary_max_words": self.summary_max_words or 5000,
@@ -1185,6 +1191,7 @@ class GroupChatMessage(Base):
     role: Mapped[str] = mapped_column(String(32))
     content: Mapped[str] = mapped_column(Text, default="")
     agent_id: Mapped[str] = mapped_column(String(16), default="")
+    meta: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[str] = mapped_column(String(32), default="")
 
 

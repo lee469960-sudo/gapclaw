@@ -43,6 +43,7 @@ class AgentBody(BaseModel):
     mcps: list[str] | None = None
     rags: list[str] | None = None
     httpmcps: list[str] | None = None
+    capability_routing: dict | None = None
     max_iterations: int = 150
     history_length: int = 30
     summary_max_words: int = 5000
@@ -365,6 +366,13 @@ async def agent_post(body: AgentBody, user: User = Depends(get_session_user), db
             a.mcps = json.dumps(body.mcps)
         if body.httpmcps is not None:
             a.httpmcps = json.dumps(body.httpmcps)
+        if body.capability_routing is not None:
+            from app.services.agent_runtime.capability_router import sanitize_capability_routing_overrides
+
+            a.capability_routing = json.dumps(
+                sanitize_capability_routing_overrides(body.capability_routing),
+                ensure_ascii=False,
+            )
         if body.allowed_actions is not None:
             a.allowed_actions = json.dumps(_normalize_allowed_actions(body.allowed_actions))
         elif action == "create":

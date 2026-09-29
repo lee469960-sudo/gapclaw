@@ -399,3 +399,27 @@ def test_verifier_gap_state_round_trips_and_legacy_checkpoint_defaults():
     assert legacy is not None
     assert legacy.verifier_gaps == {}
     assert legacy.terminal_reason == ""
+
+
+def test_timestamped_snapshot_stops_before_the_iteration_budget():
+    """A delivered holdings snapshot that only changes its clock must not burn max_iters."""
+    db = _make_db()
+    ctx = _fake_ctx(db, max_iterations=8, allowed_actions=())
+    calls = {"n": 0}
+
+    async def _chat(_llm, _messages, **_kw):
+        calls["n"] += 1
+        minute = calls["n"]
+        return ChatResult(text=(
+            "## 当前持仓快照\n"
+            f"- 快照时间：**2026-09-28 17:{minute:02d}:00**\n"
+            "- 账户总权益 totalEq：**10,730.824**\n"
+            "> 当前账户无任何持仓。\n"
+        ))
+
+    distill = AsyncMock(return_value="BUDGET_EXHAUSTED")
+    result = _run(ctx, _chat, distill=distill)
+    assert "10,730.824" in result
+    assert "BUDGET_EXHAUSTED" not in result
+    distill.assert_not_awaited()
+    assert calls["n"] == 3

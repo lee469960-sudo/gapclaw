@@ -76,7 +76,7 @@
               </div>
               <div class="msg-meta">
                 <span>{{ m.created_at || '' }}</span>
-                <el-button link size="small" @click="copyText(m.role === 'assistant' ? extractFinalDisplayContent(m.content) : m.content)">复制</el-button>
+                <el-button link size="small" @click="copyText(m.role === 'assistant' ? extractFinalDisplayContent(assistantVisibleText(m)) : m.content)">复制</el-button>
               </div>
             </div>
             <div v-if="m.role === 'user'" class="user-avatar">
@@ -177,6 +177,7 @@ import {
   toggleCodeSnippet,
   prepareMarkdownForPreview,
 } from '../utils/markdownPreview'
+import { assistantVisibleText } from '../utils/assistantDisplay'
 import { getCgi, postCgi } from '../api'
 import api from '../api'
 import WorkplacePanel from '../components/WorkplacePanel.vue'
@@ -244,7 +245,7 @@ function statusType(s) {
 }
 
 function renderMessage(m) {
-  const prepared = prepareMarkdownForPreview(extractFinalDisplayContent(m.content || ''))
+  const prepared = prepareMarkdownForPreview(extractFinalDisplayContent(assistantVisibleText(m)))
   return enhanceMarkdownHtml(marked.parse(prepared))
 }
 

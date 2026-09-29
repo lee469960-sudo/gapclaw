@@ -3,7 +3,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.models import Agent, AgentGroup, GroupWorkflow
+from app.models import Agent, AgentGroup, ChatMessage, GroupWorkflow
 from app.security import now_str
 from app.services.agent_runtime import run_agent, stop_chat
 from app.services.group_message import parse_group_targets
@@ -55,10 +55,12 @@ async def run_workflow(
             subtask = m.get("_task") or task
             msg = subtask if subtask.startswith("[群任务]") else f"[群任务] {subtask}"
             reply = await run_agent(db, agent, sid, msg)
+            output = _latest_assistant_output(db, agent.id, sid)
             results.append({
                 "agent_id": agent.id,
                 "name": m.get("name") or agent.name,
                 "reply": reply,
+                "output": output,
                 "task": subtask,
             })
         wf.status = "done"
@@ -70,6 +72,22 @@ async def run_workflow(
         _running[key] = False
     db.commit()
     return {"status": wf.status, "mode": mode, "results": results}
+
+
+def _latest_assistant_output(db: Session, agent_id: str, session_id: str) -> dict | None:
+    row = db.query(ChatMessage).filter(
+        ChatMessage.agent_id == agent_id,
+        ChatMessage.session_id == session_id,
+        ChatMessage.role == "assistant",
+    ).order_by(ChatMessage.id.desc()).first()
+    if row is None:
+        return None
+    try:
+        meta = json.loads(row.meta or "{}")
+    except json.JSONDecodeError:
+        return None
+    output = meta.get("output") if isinstance(meta, dict) else None
+    return output if isinstance(output, dict) else None
 
 
 def stop_workflow(group_id: str, session_id: str, db: Session):

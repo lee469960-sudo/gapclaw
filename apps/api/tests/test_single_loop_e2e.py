@@ -843,4 +843,12 @@ def test_cancellation_between_native_tool_calls_blocks_the_next_action():
         assert exec_mock.await_count == 1
         return result
 
-    assert asyncio.run(_run()) == "[已停止]"
+    result = asyncio.run(_run())
+    assert "停止" in result
+    assert "[已停止]" not in result
+    assert not result.strip().startswith("{")
+    assistant_messages = [row for row in ctx.db.added if getattr(row, "role", "") == "assistant"]
+    envelope = json.loads(assistant_messages[-1].meta)["output"]
+    assert envelope["status"] == "partial"
+    assert envelope["type"] == "answer"
+    assert envelope["message"] == result

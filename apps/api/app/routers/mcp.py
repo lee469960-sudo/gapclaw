@@ -29,6 +29,7 @@ class MCPBody(BaseModel):
     command_args: list | None = None
     command_env: dict | None = None
     description: str = ""
+    routing: dict | None = None
     visibility: str = "private"
     allowed_users: list[str] | None = None
     tool: str | None = None
@@ -99,6 +100,10 @@ async def mcp_post(body: MCPBody, user: User = Depends(get_session_user), db: Se
         if body.command_env is not None:
             m.command_env = json.dumps(body.command_env, ensure_ascii=False)
         m.description = body.description
+        if body.routing is not None:
+            from app.services.agent_runtime.capability_router import sanitize_routing_hints
+
+            m.routing = json.dumps(sanitize_routing_hints(body.routing), ensure_ascii=False)
         m.visibility = body.visibility
         m.allowed_users = json.dumps(body.allowed_users or [])
         m.modified_at = now_str()

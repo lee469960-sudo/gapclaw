@@ -39,6 +39,21 @@ REPO_ROOT = (
     else API_DIR.parent
 )
 
+
+def _routing_hints(**hints) -> str:
+    """Hand-authored seed routing hints; never generated from user capability data."""
+    from app.services.agent_runtime.capability_router import sanitize_routing_hints
+
+    return json.dumps(sanitize_routing_hints(hints), ensure_ascii=False)
+
+
+def _has_routing_hints(value: str | None) -> bool:
+    try:
+        parsed = json.loads(value or "{}")
+        return isinstance(parsed, dict) and bool(parsed)
+    except Exception:
+        return False
+
 DBA_PROMPT = """你是一名专业的数据库管理员（DBA）。收到用户问题后，认真思考，并通过工具组合解决/回答。
 过程产物写入 task/<毫秒时间戳>/；仅最终交付文件写入当前目录（工作区根，例如 WRITE: dba_daily_checklist.md）。
 路径已相对工作区根，禁止再创建或写入 workplace/ 子目录。
@@ -511,6 +526,11 @@ def _seed_system_logs(db: Session, creator: str, settings, llm=None, sandbox=Non
             command_args=json.dumps(args),
             command_env=json.dumps(env),
             description="只读读取 GAP 本地运行日志（.local/logs）与可选 ImEventLog，供日志分析 Agent 使用。",
+            routing=_routing_hints(
+                keywords=["日志", "报错", "错误", "异常", "traceback", "error", "failed"],
+                aliases=["system logs", "系统日志", "运行日志"],
+                tags=["ops", "logs", "diagnostics"],
+            ),
             visibility="public",
             allowed_users="[]",
             creator=creator,
@@ -525,6 +545,12 @@ def _seed_system_logs(db: Session, creator: str, settings, llm=None, sandbox=Non
         mcp.command = python
         mcp.command_args = json.dumps(args)
         mcp.command_env = json.dumps(env)
+        if not _has_routing_hints(getattr(mcp, "routing", "")):
+            mcp.routing = _routing_hints(
+                keywords=["日志", "报错", "错误", "异常", "traceback", "error", "failed"],
+                aliases=["system logs", "系统日志", "运行日志"],
+                tags=["ops", "logs", "diagnostics"],
+            )
         mcp.modified_at = now_str()
         db.commit()
     out["system_logs_mcp_id"] = mcp.id
@@ -538,6 +564,13 @@ def _seed_system_logs(db: Session, creator: str, settings, llm=None, sandbox=Non
         description="分析 GAP 本地运行日志并给出优化建议；配合 system-logs MCP。",
     )
     if skill:
+        if not _has_routing_hints(getattr(skill, "routing", "")):
+            skill.routing = _routing_hints(
+                keywords=["日志", "报错", "错误", "异常", "traceback", "error", "failed", "诊断"],
+                aliases=["log analyst", "日志分析"],
+                tags=["ops", "logs", "analysis"],
+            )
+            db.commit()
         out["system_log_skill_id"] = skill.id
 
     if not llm:
@@ -624,6 +657,11 @@ def _seed_tushare(db: Session, creator: str, settings, llm=None, sandbox=None) -
             headers="{}",
             protocol="sse",
             description="Tushare 官方 MCP Server，提供 A 股、基金、指数、财务、宏观等 220+ 金融数据接口。",
+            routing=_routing_hints(
+                keywords=["A股", "选股", "行情", "财报", "指数", "资金流", "沪深300", "涨停", "Tushare"],
+                aliases=["tushare", "股票 MCP", "金融数据"],
+                tags=["market", "stock", "finance", "query"],
+            ),
             visibility="public",
             allowed_users="[]",
             creator=creator,
@@ -632,6 +670,14 @@ def _seed_tushare(db: Session, creator: str, settings, llm=None, sandbox=None) -
         db.add(mcp)
         db.commit()
         logger.info("seeded MCP tushareMcp id=%s", mcp.id)
+    elif not _has_routing_hints(getattr(mcp, "routing", "")):
+        mcp.routing = _routing_hints(
+            keywords=["A股", "选股", "行情", "财报", "指数", "资金流", "沪深300", "涨停", "Tushare"],
+            aliases=["tushare", "股票 MCP", "金融数据"],
+            tags=["market", "stock", "finance", "query"],
+        )
+        mcp.modified_at = now_str()
+        db.commit()
     out["tushare_mcp_id"] = mcp.id
 
     skill = db.query(Skill).filter(Skill.name == "tushare-data").first()
@@ -654,6 +700,11 @@ def _seed_tushare(db: Session, creator: str, settings, llm=None, sandbox=None) -
                 name="tushare-data",
                 tags="金融,数据,A股,Tushare",
                 description="Tushare 金融数据研究 Skill，支持自然语言转数据查询、对比、导出流程。建议配合 tushareMcp 使用。",
+                routing=_routing_hints(
+                    keywords=["A股", "选股", "行情", "财报", "资金流", "沪深300", "涨停", "Tushare"],
+                    aliases=["tushare data", "股票数据"],
+                    tags=["market", "stock", "finance"],
+                ),
                 zip_path=str(zip_path),
                 zip_name="tushare-data.zip",
                 visibility="public",
@@ -665,6 +716,13 @@ def _seed_tushare(db: Session, creator: str, settings, llm=None, sandbox=None) -
             db.commit()
             logger.info("seeded Skill tushare-data id=%s", skill.id)
     if skill:
+        if not _has_routing_hints(getattr(skill, "routing", "")):
+            skill.routing = _routing_hints(
+                keywords=["A股", "选股", "行情", "财报", "资金流", "沪深300", "涨停", "Tushare"],
+                aliases=["tushare data", "股票数据"],
+                tags=["market", "stock", "finance"],
+            )
+            db.commit()
         out["tushare_skill_id"] = skill.id
 
     if not llm:

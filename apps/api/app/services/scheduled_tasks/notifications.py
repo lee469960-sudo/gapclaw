@@ -1,11 +1,13 @@
 """Independent retrying delivery for scheduled-task notification outbox."""
 from __future__ import annotations
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.models import ChatMessage, ImChannel, ImSession, ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun
 from app.security import now_str
+from app.services.agent_runtime.unified_output import build_unified_output, visible_saved_text
 from app.services.channels.base import create_adapter
 
 MAX_DELIVERY_ATTEMPTS = 3
@@ -13,7 +15,7 @@ MAX_DELIVERY_ATTEMPTS = 3
 
 def _result_text(db: Session, run: ScheduledTaskRun) -> str:
     message = db.get(ChatMessage, run.chat_message_id) if run.chat_message_id else None
-    text = (message.content if message else "").strip()
+    text = visible_saved_text(message.content if message else "", message.meta if message else None).strip()
     if not text:
         raise RuntimeError("scheduled_task_notification_result_missing")
     return text
@@ -88,10 +90,16 @@ def deliver_pending(db: Session, now: datetime | None = None) -> int:
                 run = db.get(ScheduledTaskRun, row.run_id)
                 task = db.get(ScheduledTask, run.task_id) if run else None
                 if task:
+                    notice = _failure_notice(row.error_summary)
+                    envelope = build_unified_output("error", notice)
                     db.add(ChatMessage(
                         agent_id=task.agent_id, session_id=task.session_id, role="assistant",
-                        content=_failure_notice(row.error_summary),
-                        meta='{"source":"scheduled_task_notification"}', created_at=now_str(),
+                        content=envelope["message"],
+                        meta=json.dumps({
+                            "source": "scheduled_task_notification",
+                            "output": envelope,
+                        }, ensure_ascii=False),
+                        created_at=now_str(),
                     ))
             else:
                 row.next_attempt_at = now + timedelta(minutes=2 ** (row.attempts - 1))

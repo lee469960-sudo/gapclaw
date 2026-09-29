@@ -18,6 +18,8 @@ from app.services.agent_runtime.runtime import (
     _rescue_leaked_code,
     _tool_fail_hint,
     _tool_result_failed,
+    duplicate_stop_decision,
+    text_only_stop_decision,
 )
 
 
@@ -174,3 +176,60 @@ def test_rescue_leaked_code_ignores_pandas_fragment():
 
 def test_rescue_leaked_code_still_rescues_shell():
     assert _rescue_leaked_code("ls -la") is not None
+
+
+def test_text_only_stop_accepts_a_substantive_reply_before_the_budget():
+    assert text_only_stop_decision(2, "持仓共 3 条，已写入表格。", "", []) is None
+    message, reason = text_only_stop_decision(
+        3,
+        "当前持仓共 3 条。BTC-USDT 多仓 0.2，ETH-USDT 空仓 1.5，均价与未实现盈亏都已对齐，这份结果已经满足本次导出要求。",
+        "我再看一下。",
+        [],
+    )
+    assert reason == "complete"
+    assert "BTC-USDT" in message
+
+
+def test_text_only_stop_accepts_an_existing_spreadsheet():
+    message, reason = text_only_stop_decision(
+        3,
+        "继续",
+        "",
+        ["positions_snapshot_2026-09-28_1825.xlsx", "task/1/mcp_result_0.json"],
+    )
+    assert reason == "complete"
+    assert "positions_snapshot_2026-09-28_1825.xlsx" in message
+    assert "mcp_result_0.json" not in message
+
+
+def test_text_only_stop_accepts_the_first_report_after_tools():
+    report = (
+        "## 当前持仓快照（2026-09-29 02:16）\n\n"
+        "| 指标 | 数值 |\n|---|---:|\n| 未实现盈亏合计 (USDT) | **-37.62** |\n"
+    )
+    assert text_only_stop_decision(1, report, "", [], tools_already_ran=False) is None
+    message, reason = text_only_stop_decision(1, report, "", ["positions_snapshot.xlsx"], tools_already_ran=True)
+    assert reason == "complete"
+    assert "未实现盈亏合计" in message
+    assert "02:16" in message
+    report = (
+        "## 当前持仓快照（2026-09-29 02:00 UTC）\n\n"
+        "| 指标 | 数值 |\n|---|---:|\n| 保证金合计 (USDT) | 1,062.60 |\n"
+        "| 未实现盈亏合计 (USDT) | **-41.52** |\n"
+    )
+    message, reason = duplicate_stop_decision(report, ["positions_snapshot_2026-09-29_0200.xlsx"])
+    assert reason == "complete"
+    assert "保证金合计" in message
+    assert "positions_snapshot_2026-09-29_0200.xlsx" in message
+
+
+def test_duplicate_stop_short_stub_stays_incomplete():
+    message, reason = duplicate_stop_decision("继续", [])
+    assert message == ""
+    assert reason == "incomplete"
+
+
+def test_text_only_stop_stays_incomplete_without_delivery():
+    message, reason = text_only_stop_decision(3, "好的", "", [])
+    assert message == ""
+    assert reason == "incomplete"

@@ -175,9 +175,21 @@ def extract_named_resource_mentions(user_message: str) -> list[str]:
     """Extract explicit, tool-like resource names without a resource allowlist."""
     text = _routing_instruction_text(user_message)
     names: list[str] = []
+
+    def _looks_like_resource_name(value: str) -> bool:
+        folded = str(value or "").strip().casefold()
+        if not folded or folded in _NON_RESOURCE_MENTIONS:
+            return False
+        # Capability names in this app are usually slugs / MCP-like service
+        # names.  Do not treat ordinary function/field identifiers such as
+        # ``r_info`` as unbound MCP/Skill names.
+        if "_" in folded and "-" not in folded and "." not in folded:
+            return False
+        return "-" in folded or "." in folded or any(folded.endswith(suffix) for suffix in _RESOURCE_SUFFIXES)
+
     for match in _RESOURCE_AFTER_VERB_RE.finditer(text):
         value = match.group(1).strip("`\"'.,;:!?，。；：！？")
-        if value and value.casefold() not in _NON_RESOURCE_MENTIONS and value.lower() not in {item.lower() for item in names}:
+        if _looks_like_resource_name(value) and value.lower() not in {item.lower() for item in names}:
             names.append(value)
     for match in _RESOURCE_SUFFIX_RE.finditer(text):
         value = match.group(1)
@@ -210,7 +222,7 @@ def _matches_bound_capability(user_message: str, capability_hints: list[dict[str
         if name and name.lower() in str(user_message or "").lower():
             return True
         capability_tokens = _capability_tokens(
-            " ".join(str(hint.get(key) or "") for key in ("name", "tags", "description"))
+            " ".join(str(hint.get(key) or "") for key in ("id", "name", "aliases", "keywords", "tags", "description", "type"))
         )
         overlaps = {
             (request_token, capability_token)

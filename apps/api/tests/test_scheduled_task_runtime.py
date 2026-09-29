@@ -194,10 +194,119 @@ def test_forced_stop_reply_is_bound_but_not_marked_successful_or_notified(monkey
         assert stored.state == "failed"
         assert stored.error_summary == "scheduled_task_no_progress"
         assert stored.chat_message_id is not None
-        assert db.get(ChatMessage, stored.chat_message_id).content == SCHEDULED_NO_PROGRESS_REPLY
+        stored_message = db.get(ChatMessage, stored.chat_message_id)
+        assert stored_message.content == SCHEDULED_NO_PROGRESS_REPLY
+        envelope = json.loads(stored_message.meta)["output"]
+        assert envelope["message"] == stored_message.content
+        assert envelope["status"] == "error"
         assert "任务未完成，已自动结束" not in db.get(ChatMessage, stored.chat_message_id).content
         assert stored.attempt == 1
         assert db.query(ScheduledTaskNotificationDelivery).count() == 0
+    finally:
+        db.close()
+
+
+def test_forced_stop_with_deliverable_file_completes_the_scheduled_run(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        now = datetime.now(timezone.utc)
+        agent = Agent(id="agent", name="Agent")
+        task = ScheduledTask(
+            id="task",
+            agent_id="agent",
+            session_id="session",
+            owner_username="owner",
+            message="导出当前持仓",
+        )
+        run = ScheduledTaskRun(id="run", task_id="task", occurrence_key="one", state="running", scheduled_for=now, available_at=now)
+        db.add_all((agent, task, run))
+        db.commit()
+        forced = "任务未完成，已自动结束（达到 150 轮上限且未收到 FINAL 结束信号）。"
+
+        async def fake_run_agent(_db, _agent, session_id, _message, **kwargs):
+            meta = dict(kwargs["message_meta"])
+            meta["saved_paths"] = [
+                "positions_snapshot_2026-09-28_1825.xlsx",
+                "task/1790584533496/mcp_result_0.json",
+            ]
+            db.add(ChatMessage(
+                agent_id=_agent.id,
+                session_id=session_id,
+                role="assistant",
+                content=forced,
+                meta=json.dumps(meta, ensure_ascii=False),
+            ))
+            db.commit()
+            return forced
+
+        monkeypatch.setattr("app.services.scheduled_tasks.runtime.run_agent", fake_run_agent)
+        result = execute_and_finalize_claimed_run(db, run)
+        stored = db.get(ScheduledTaskRun, "run")
+        assert stored.state == "succeeded"
+        assert "positions_snapshot_2026-09-28_1825.xlsx" in result
+        assert "mcp_result_0.json" not in result
+        assert stored.error_summary in ("", None)
+    finally:
+        db.close()
+
+
+def test_forced_stop_keeps_the_report_already_in_the_execution_steps(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        now = datetime.now(timezone.utc)
+        agent = Agent(id="agent", name="Agent")
+        task = ScheduledTask(
+            id="task",
+            agent_id="agent",
+            session_id="session",
+            owner_username="owner",
+            message="导出当前持仓",
+        )
+        run = ScheduledTaskRun(id="run", task_id="task", occurrence_key="one", state="running", scheduled_for=now, available_at=now)
+        db.add_all((agent, task, run))
+        db.commit()
+        report = (
+            "## 当前持仓快照（2026-09-29 02:00 UTC）\n\n"
+            "| 指标 | 数值 |\n|---|---:|\n| 保证金合计 (USDT) | 1,062.60 |\n"
+            "| 未实现盈亏合计 (USDT) | **-41.52** |\n"
+        )
+        forced = "任务未完成，已自动结束（连续输出重复且没有新的工具、文件或计划进展，已停止自动推理）。"
+
+        async def fake_run_agent(_db, _agent, session_id, _message, **kwargs):
+            meta = dict(kwargs["message_meta"])
+            meta["saved_paths"] = ["positions_snapshot_2026-09-29_0200.xlsx"]
+            meta["steps"] = [{"type": "llm", "title": "LLM 推理 (第 4 轮)", "content": report}]
+            meta["output"] = {
+                "version": "1.0",
+                "status": "partial",
+                "type": "answer",
+                "message": forced,
+                "data": {},
+                "actions": [],
+            }
+            db.add(ChatMessage(
+                agent_id=_agent.id,
+                session_id=session_id,
+                role="assistant",
+                content=forced,
+                meta=json.dumps(meta, ensure_ascii=False),
+            ))
+            db.commit()
+            return forced
+
+        monkeypatch.setattr("app.services.scheduled_tasks.runtime.run_agent", fake_run_agent)
+        result = execute_and_finalize_claimed_run(db, run)
+        stored = db.get(ChatMessage, db.get(ScheduledTaskRun, "run").chat_message_id)
+        assert "保证金合计" in result
+        assert "1,062.60" in stored.content
+        assert "positions_snapshot_2026-09-29_0200.xlsx" in stored.content
+        envelope = json.loads(stored.meta)["output"]
+        assert envelope["message"] == stored.content
+        assert envelope["status"] == "ok"
     finally:
         db.close()
 

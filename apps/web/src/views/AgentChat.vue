@@ -201,10 +201,10 @@
                   <el-button v-if="scheduledProgress.state === 'running'" link type="danger" size="small" @click.stop="stopScheduledTask">停止任务</el-button>
                   <el-button v-if="scheduledProgress.chat_message_id" link type="primary" size="small" @click.stop="locateMessage(scheduledProgress.chat_message_id)">定位结果</el-button>
                 </div>
-                <div v-if="scheduledResultPreview(scheduledProgress)" class="scheduled-result-preview">
-                  {{ scheduledResultPreview(scheduledProgress) }}
-                </div>
                 <div v-if="isExecOpen('scheduled')" class="exec-steps">
+                  <div v-if="scheduledResultPreview(scheduledProgress)" class="scheduled-result-preview">
+                    {{ scheduledResultPreview(scheduledProgress) }}
+                  </div>
                   <div v-if="!scheduledSteps(scheduledProgress).length" class="exec-step">
                     <el-icon class="step-status running is-loading"><Loading /></el-icon>
                     <div class="step-body"><div class="step-title"><span>正在启动 Agent…</span></div></div>
@@ -212,19 +212,18 @@
                   <div
                     v-for="(step, index) in scheduledSteps(scheduledProgress)"
                     :key="index"
-                    :class="['exec-step', { 'is-expandable': isStepDetailExpandable(step) }]"
-                    :role="isStepDetailExpandable(step) ? 'button' : undefined"
-                    :tabindex="isStepDetailExpandable(step) ? 0 : undefined"
-                    @click="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey('scheduled', index))"
-                    @keydown.enter.prevent="isStepDetailExpandable(step) && toggleToolDetail(toolStepKey('scheduled', index))"
+                    :class="['exec-step', { 'is-expandable': !!scheduledStepDetail(step) }]"
+                    :role="scheduledStepDetail(step) ? 'button' : undefined"
+                    :tabindex="scheduledStepDetail(step) ? 0 : undefined"
+                    @click="scheduledStepDetail(step) && toggleToolDetail(toolStepKey('scheduled', index))"
+                    @keydown.enter.prevent="scheduledStepDetail(step) && toggleToolDetail(toolStepKey('scheduled', index))"
                   >
                     <span class="step-glyph" aria-hidden="true">{{ stepGlyph(step) }}</span>
                     <div class="step-body">
                       <div class="step-title"><span>{{ stepTitle(step) }}</span></div>
-                      <pre v-if="isStepDetailExpandable(step) && isToolDetailOpen(toolStepKey('scheduled', index))" class="step-snippet">{{ executionStepDetail(step) }}</pre>
-                      <div v-else-if="stepDetail(step)" class="step-content">{{ stepDetail(step) }}</div>
+                      <pre v-if="scheduledStepDetail(step) && isToolDetailOpen(toolStepKey('scheduled', index))" class="step-snippet">{{ scheduledStepDetail(step) }}</pre>
                     </div>
-                    <el-icon v-if="isStepDetailExpandable(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey('scheduled', index)) }"><ArrowRight /></el-icon>
+                    <el-icon v-if="scheduledStepDetail(step)" class="step-detail-arrow" :class="{ open: isToolDetailOpen(toolStepKey('scheduled', index)) }"><ArrowRight /></el-icon>
                     <el-icon v-if="step.status === 'done'" class="step-status done"><CircleCheck /></el-icon>
                     <el-icon v-else-if="step.status === 'error'" class="step-status error"><CircleClose /></el-icon>
                     <el-icon v-else class="step-status running is-loading"><Loading /></el-icon>
@@ -356,6 +355,7 @@ import {
   toggleCodeSnippet,
   prepareMarkdownForPreview,
 } from '../utils/markdownPreview'
+import { assistantVisibleText, messagesAfterPoll } from '../utils/assistantDisplay'
 import WorkplacePanel from '../components/WorkplacePanel.vue'
 import CodeWorkspacePanel from '../components/CodeWorkspacePanel.vue'
 import SessionNoteDialog from '../components/SessionNoteDialog.vue'
@@ -389,7 +389,7 @@ async function pollScheduledProgress() {
     if (!pageAlive || sid !== sessionId.value) return
     const previous = scheduledProgress.value
     scheduledProgress.value = res.data || null
-    if (res.data && isScheduledProgressVisible(res.data)) {
+    if (shouldAutoOpenScheduledProgress(previous, res.data)) {
       execOpen.value = { ...execOpen.value, scheduled: true }
     }
     if (res.data && (previous?.id !== res.data.id || previous?.state !== res.data.state)) {
@@ -404,6 +404,23 @@ async function pollScheduledProgress() {
 
 function isScheduledProgressVisible(progress) {
   return progress?.state === 'running'
+}
+
+function scheduledRunKey(progress) {
+  return String(progress?.id || progress?.run_id || progress?.task_id || '')
+}
+
+function shouldAutoOpenScheduledProgress(previous, next) {
+  if (!next || !isScheduledProgressVisible(next)) return false
+  if (!previous || !isScheduledProgressVisible(previous)) return true
+  return scheduledRunKey(next) !== scheduledRunKey(previous)
+}
+
+function scheduledStepDetail(step) {
+  const detail = String(executionStepDetail(step) || stepDetail(step) || '').trim()
+  const snippet = String(step?.snippet || '').trim()
+  if (detail && snippet && snippet !== detail) return `${detail}\n\n${snippet}`
+  return detail || snippet
 }
 
 function scheduledProgressTitle(progress) {
@@ -712,7 +729,7 @@ function messageProgress(message) {
 const EMPTY_ASSISTANT_FALLBACK = '（本轮未产生文字回复；详见执行过程）'
 
 function assistantDisplayContent(m) {
-  const text = extractFinalDisplayContent(m?.content || '').trim()
+  const text = extractFinalDisplayContent(assistantVisibleText(m)).trim()
   return text || EMPTY_ASSISTANT_FALLBACK
 }
 
@@ -824,6 +841,7 @@ function collapseLlmSteps(steps) {
 function stepLabel(step) {
   if (step.type === 'llm') return `LLM 推理 (第 ${step.iteration || '?'} 轮)`
   if (step.type === 'model_route') return step.title || '模型路由'
+  if (step.type === 'capability_route') return step.title || '能力路由'
   if (step.action === 'skill_loaded') return step.title || '已加载 Skills'
   if (step.type === 'info' || step.action === 'mcp_loaded') return step.title || '已加载 MCPs'
   if (step.type === 'tool') return step.title || `工具 · ${step.action || ''}`
@@ -855,6 +873,7 @@ function stepInlineDetail(step) {
 function stepGlyph(step) {
   if (step.type === 'llm') return '🤖'
   if (step.type === 'model_route') return '🧭'
+  if (step.type === 'capability_route') return '🎯'
   if (step.type === 'quality_check' || step.action === 'quality_check' || step.action === 'quality_final') return '✅'
   if (step.action === 'skill_loaded' || step.action === 'skill_read_md') return '📘'
   if ((step.action || '').startsWith('code_')) return '🧰'
@@ -955,8 +974,53 @@ function modelRouteStepDetail(step) {
   return JSON.stringify(safe, null, 2)
 }
 
+function capabilityRouteStepDetail(step) {
+  const detail = step?.detail
+  if (!detail || typeof detail !== 'object') {
+    return '此历史能力路由步骤未保存审计详情。'
+  }
+  // API side already allowlists this object; keep render-side fields bounded
+  // to avoid exposing prompts, credentials, tool directories, or hidden names.
+  const safe = {
+    route_mode: String(detail.route_mode || ''),
+    candidate_count: Number(detail.candidate_count || 0),
+    candidate_ids: Array.isArray(detail.candidate_ids)
+      ? detail.candidate_ids.map((item) => ({
+        type: String(item?.type || ''),
+        id: String(item?.id || ''),
+        score: Number(item?.score || 0),
+      }))
+      : [],
+    matched_terms: Array.isArray(detail.matched_terms) ? detail.matched_terms.map((term) => String(term)) : [],
+    blocked: Array.isArray(detail.blocked)
+      ? detail.blocked.map((item) => ({
+        type: String(item?.type || ''),
+        id: String(item?.id || ''),
+        reason: String(item?.reason || ''),
+      }))
+      : [],
+    missing: Array.isArray(detail.missing) ? detail.missing.map((item) => String(item)) : [],
+    error: String(detail.error || ''),
+    mcp_route: detail.mcp_route && typeof detail.mcp_route === 'object'
+      ? {
+        candidate_mcp_ids: Array.isArray(detail.mcp_route.candidate_mcp_ids)
+          ? detail.mcp_route.candidate_mcp_ids.map((id) => String(id))
+          : [],
+        selected_mcp_ids: Array.isArray(detail.mcp_route.selected_mcp_ids)
+          ? detail.mcp_route.selected_mcp_ids.map((id) => String(id))
+          : [],
+        needs_more_capability: Boolean(detail.mcp_route.needs_more_capability),
+        failure: String(detail.mcp_route.failure || ''),
+      }
+      : {},
+  }
+  return JSON.stringify(safe, null, 2)
+}
+
 function executionStepDetail(step) {
-  return step?.type === 'model_route' ? modelRouteStepDetail(step) : toolStepDetail(step)
+  if (step?.type === 'model_route') return modelRouteStepDetail(step)
+  if (step?.type === 'capability_route') return capabilityRouteStepDetail(step)
+  return toolStepDetail(step)
 }
 
 function sanitizeStepDetail(text) {
@@ -1164,7 +1228,7 @@ function isExecOpen(key) {
 }
 
 function isStepDetailExpandable(step) {
-  if (step?.type === 'tool' || step?.type === 'model_route') return true
+  if (step?.type === 'tool' || step?.type === 'model_route' || step?.type === 'capability_route') return true
   // LLM rounds: expand when we have stored body (content or preview).
   if (step?.type === 'llm') return Boolean(stepDetail(step))
   return false
@@ -1313,7 +1377,9 @@ async function loadHistory({ preserveHydrationFrom = null } = {}) {
     agent_id: agentId,
     session_id: sessionId.value,
   })
-  messages.value = res.data || []
+  const incoming = res.data || []
+  const lockBubble = running.value || streaming.value
+  messages.value = messagesAfterPoll(lockBubble, messages.value, incoming)
   const next = {}
   if (preserved && (preserved.steps?.length || preserved.step_count > 0)) {
     const list = messages.value
