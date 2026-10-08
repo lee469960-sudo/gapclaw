@@ -26,6 +26,12 @@ def _iso(value: datetime | None) -> str:
     return value.isoformat() if value else ""
 
 
+def _seconds_between(start: datetime | None, end: datetime | None) -> int | None:
+    if not start or not end:
+        return None
+    return max(0, int((end - start).total_seconds()))
+
+
 def _safe_text(value: str | None, limit: int) -> str:
     text = redact_code_output(value or "").text.strip()
     return text[:limit]
@@ -214,9 +220,13 @@ def serialize_scheduled_run_result(db: Session, run: ScheduledTaskRun) -> dict[s
         "source": run.source,
         "attempt": run.attempt,
         "scheduled_for": _iso(run.scheduled_for),
+        "available_at": _iso(run.available_at),
         "queued_at": _iso(run.queued_at),
         "started_at": _iso(run.started_at),
         "finished_at": _iso(run.finished_at),
+        "scheduling_delay_seconds": _seconds_between(run.scheduled_for, run.available_at),
+        "executor_delay_seconds": _seconds_between(run.available_at, run.started_at),
+        "runtime_duration_seconds": _seconds_between(run.started_at, run.finished_at),
         "cancel_requested": run.cancel_requested_at is not None,
         "chat_message_id": run.chat_message_id,
         "agent_run_id": run.agent_run_id,
@@ -237,4 +247,34 @@ def serialize_scheduled_run_result(db: Session, run: ScheduledTaskRun) -> dict[s
             if notification_state == "failed"
             else ""
         ),
+    }
+
+
+def run_diagnostics(run: ScheduledTaskRun | None) -> dict[str, Any]:
+    if run is None:
+        return {
+            "last_scheduled": "",
+            "last_started": "",
+            "last_finished": "",
+            "last_status": "",
+            "scheduling_delay_seconds": None,
+            "executor_delay_seconds": None,
+            "runtime_duration_seconds": None,
+        }
+    return {
+        "last_scheduled": _iso(run.scheduled_for),
+        "last_started": _iso(run.started_at),
+        "last_finished": _iso(run.finished_at),
+        "last_status": run.state,
+        "scheduling_delay_seconds": _seconds_between(run.scheduled_for, run.available_at),
+        "executor_delay_seconds": _seconds_between(run.available_at, run.started_at),
+        "runtime_duration_seconds": _seconds_between(run.started_at, run.finished_at),
+    }
+
+
+def skipped_missed_summary(rows: list[ScheduledTaskRun]) -> dict[str, int]:
+    return {
+        "skipped": sum(1 for row in rows if row.state == "skipped"),
+        "missed": sum(1 for row in rows if row.state == "skipped" and row.source == "missed"),
+        "coalesced": sum(1 for row in rows if row.state == "skipped" and row.source == "coalesced"),
     }

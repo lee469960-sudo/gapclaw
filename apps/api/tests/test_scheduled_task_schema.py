@@ -20,6 +20,7 @@ from app.models import (
     ScheduledTaskNotificationDelivery,
     ScheduledTaskRun,
     ScheduledTaskProgress,
+    ScheduledTaskWorkerHeartbeat,
 )
 from app.startup import migrate_legacy_agent_ticks, normalize_scheduled_task_next_runs
 
@@ -29,6 +30,7 @@ SCHEDULED_TABLES = {
     "scheduled_task_runs",
     "scheduled_task_notification_deliveries",
     "scheduled_task_progress",
+    "scheduled_task_worker_heartbeats",
 }
 
 
@@ -193,7 +195,7 @@ def test_startup_normalizes_existing_timezone_local_next_runs():
 
 def test_scheduled_task_tables_compile_for_postgresql():
     dialect = postgresql.dialect()
-    for model in (ScheduledTask, ScheduledTaskRun, ScheduledTaskNotificationDelivery, ScheduledTaskProgress):
+    for model in (ScheduledTask, ScheduledTaskRun, ScheduledTaskNotificationDelivery, ScheduledTaskProgress, ScheduledTaskWorkerHeartbeat):
         statement = str(CreateTable(model.__table__).compile(dialect=dialect))
         assert "CREATE TABLE" in statement
         assert model.__tablename__ in statement
@@ -207,7 +209,7 @@ def test_scheduled_task_tables_create_on_postgresql_when_configured():
     engine = create_engine(database_url)
     tables = tuple(
         model.__table__
-        for model in (ScheduledTask, ScheduledTaskRun, ScheduledTaskNotificationDelivery, ScheduledTaskProgress)
+        for model in (ScheduledTask, ScheduledTaskRun, ScheduledTaskNotificationDelivery, ScheduledTaskProgress, ScheduledTaskWorkerHeartbeat)
     )
     try:
         for table in tables:

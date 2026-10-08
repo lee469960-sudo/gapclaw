@@ -205,6 +205,12 @@
                   <div v-if="scheduledResultPreview(scheduledProgress)" class="scheduled-result-preview">
                     {{ scheduledResultPreview(scheduledProgress) }}
                   </div>
+                  <div v-if="scheduledDiagnosticsLine(scheduledProgress)" class="scheduled-diagnostics">
+                    {{ scheduledDiagnosticsLine(scheduledProgress) }}
+                  </div>
+                  <div v-if="scheduledWorkerWarning(scheduledProgress)" class="scheduled-diagnostics scheduled-warning-text">
+                    {{ scheduledWorkerWarning(scheduledProgress) }}
+                  </div>
                   <div v-if="!scheduledSteps(scheduledProgress).length" class="exec-step">
                     <el-icon class="step-status running is-loading"><Loading /></el-icon>
                     <div class="step-body"><div class="step-title"><span>正在启动 Agent…</span></div></div>
@@ -450,6 +456,36 @@ function scheduledNotificationLabel(progress) {
   if (state === 'pending') return '通知待发送'
   if (state === 'delivered') return '通知已送达'
   return ''
+}
+
+function formatScheduledSeconds(value) {
+  if (value === null || value === undefined || value === '') return ''
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds)) return ''
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))} 秒`
+  return `${Math.round(seconds / 60)} 分钟`
+}
+
+function scheduledDiagnosticsLine(progress) {
+  const parts = []
+  const scheduling = formatScheduledSeconds(progress?.scheduling_delay_seconds || progress?.terminal_result?.scheduling_delay_seconds)
+  const executor = formatScheduledSeconds(progress?.executor_delay_seconds || progress?.terminal_result?.executor_delay_seconds)
+  const runtime = formatScheduledSeconds(progress?.runtime_duration_seconds || progress?.terminal_result?.runtime_duration_seconds)
+  if (scheduling) parts.push(`调度延迟 ${scheduling}`)
+  if (executor) parts.push(`执行等待 ${executor}`)
+  if (runtime) parts.push(`运行 ${runtime}`)
+  const reason = String(progress?.error_summary || progress?.terminal_result?.error_summary || '').trim()
+  if (reason.includes('scheduled_task_execution_timeout')) parts.push('执行超时')
+  if (reason.includes('scheduled_task_stale_worker')) parts.push('Worker stale')
+  if (reason.includes('scheduled_task_overlap_coalesced')) parts.push('重叠已跳过')
+  return parts.join(' · ')
+}
+
+function scheduledWorkerWarning(progress) {
+  const health = progress?.worker_health || {}
+  const bad = Object.values(health).filter(item => item && item.status && item.status !== 'healthy')
+  if (!bad.length) return ''
+  return `Worker 告警：${bad.map(item => `${item.role || 'worker'} ${item.status}`).join('，')}`
 }
 
 function scheduledResultPreview(progress) {
@@ -2338,6 +2374,15 @@ onUnmounted(() => {
   border-top: 1px solid var(--gap-card-border);
   white-space: pre-wrap;
   word-break: break-word;
+}
+.scheduled-diagnostics {
+  padding: 0 14px 10px;
+  color: var(--gap-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.scheduled-warning-text {
+  color: #b88230;
 }
 .message-locate-flash {
   animation: messageLocateFlash 1.6s ease;

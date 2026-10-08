@@ -12,7 +12,9 @@ import threading
 from app.config import get_settings
 from app.startup import init_db
 from app.database import SessionLocal
+from app.services.scheduled_tasks.health import heartbeat_worker
 from app.services.scheduled_tasks.notifications import deliver_pending
+import socket
 
 logger = logging.getLogger("app.workers.scheduled_task_notifications")
 _SHUTDOWN = threading.Event()
@@ -34,6 +36,7 @@ def run_once() -> int:
         return 0
     db = SessionLocal()
     try:
+        heartbeat_worker(db, role="notification", worker_id=socket.gethostname(), enabled=True)
         return deliver_pending(db)
     finally:
         db.close()

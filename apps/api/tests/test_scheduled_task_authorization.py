@@ -94,6 +94,8 @@ def test_run_history_requires_in_scope_task_manager():
         assert allowed["data"][0]["notifications"][0]["state"] == "failed"
         assert allowed["data"][0]["content_preview"] == "当前持仓 BTC 1"
         assert allowed["data"][0]["notification_state"] == "failed"
+        assert allowed["data"][0]["worker_health"]["scheduler"]["status"] in {"disabled", "missing", "healthy", "unhealthy"}
+        assert "scheduling_delay_seconds" in allowed["data"][0]
         assert allowed["data"][0]["terminal_result"]["message"]["meta"]["scheduled_task_run_id"] == "run1"
         assert allowed["data"][0]["terminal_result"]["steps"][0]["title"] == "Get positions"
         assert denied["msg"] == "scheduled_task_unauthorized"
@@ -137,6 +139,8 @@ def test_progress_endpoint_returns_terminal_result_only_to_session_manager():
         assert allowed["data"]["state"] == "succeeded"
         assert allowed["data"]["content_preview"] == "最终会话结果"
         assert allowed["data"]["notification_state"] == "failed"
+        assert allowed["data"]["worker_health"]["scheduler"]["status"] in {"disabled", "missing", "healthy", "unhealthy"}
+        assert "executor_delay_seconds" in allowed["data"]
         assert allowed["data"]["terminal_result"]["message"]["content"] == "最终会话结果"
         assert allowed["data"]["terminal_result"]["notifications"][0]["error_summary"] == "push failed"
         assert denied["msg"] == "scheduled_task_unauthorized"
@@ -159,6 +163,11 @@ def test_task_list_returns_execution_count_not_retry_attempt_count():
         body = ChatBody(action="list_scheduled_tasks", agent_id="agent1", session_id="session1")
         result = asyncio.run(chat_post(body, BackgroundTasks(), action=None, user=_user("owner"), db=db))
         assert result["data"][0]["execution_count"] == 2
+        assert result["data"][0]["worker_health"]["scheduler"]["status"] in {"disabled", "missing", "healthy", "unhealthy"}
+        assert result["data"][0]["last_status"] in {"pending", "running", "succeeded", "failed", "skipped", "cancelled"}
+        assert "scheduling_delay_seconds" in result["data"][0]
+        denied = asyncio.run(chat_post(body, BackgroundTasks(), action=None, user=_user("intruder"), db=db))
+        assert denied["msg"] == "scheduled_task_unauthorized"
     finally:
         db.close()
 

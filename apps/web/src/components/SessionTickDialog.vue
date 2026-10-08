@@ -26,7 +26,12 @@
           </div>
           <div class="tick-msg">{{ t.message || '(无消息)' }}</div>
           <div v-if="t.next_run_time" class="tick-next">下次触发：{{ t.next_run_time }}</div>
+          <div v-if="workerHealthWarning(t)" class="tick-health-warning">{{ workerHealthWarning(t) }}</div>
+          <div v-if="taskDiagnosticsLine(t)" class="tick-next">{{ taskDiagnosticsLine(t) }}</div>
+          <div v-if="skippedMissedLine(t)" class="tick-next">{{ skippedMissedLine(t) }}</div>
           <div v-if="t.latestRun" class="tick-next">已执行 {{ t.execution_count || 0 }} 次 · 最近执行：{{ runStateLabel(t.latestRun.state) }}<template v-if="t.latestRun.attempt > 0">（重试 {{ t.latestRun.attempt }}/3）</template>{{ t.latestRun.error_summary || '' }}</div>
+          <div v-if="terminalReason(t.latestRun)" class="tick-health-warning">{{ terminalReason(t.latestRun) }}</div>
+          <div v-if="runDiagnosticsLine(t.latestRun)" class="tick-next">{{ runDiagnosticsLine(t.latestRun) }}</div>
           <div v-if="runPreview(t.latestRun)" class="tick-result-preview">结果预览：{{ runPreview(t.latestRun) }}</div>
           <div v-if="runNotificationLabel(t.latestRun)" class="tick-next">通知状态：{{ runNotificationLabel(t.latestRun) }}</div>
           <div v-if="t.latestRun?.chat_message_id" class="tick-next">
@@ -247,6 +252,63 @@ function runNotificationLabel(run) {
   return ({ none: '', pending: '待发送', delivered: '已送达', failed: '发送失败', mixed: '部分异常' })[state] || state
 }
 
+function formatSeconds(value) {
+  if (value === null || value === undefined || value === '') return ''
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds)) return ''
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))} 秒`
+  return `${Math.round(seconds / 60)} 分钟`
+}
+
+function workerHealthWarning(row) {
+  const health = row?.worker_health || row?.latestRun?.worker_health || {}
+  const bad = Object.values(health).filter(item => item && item.status && item.status !== 'healthy')
+  if (!bad.length) return ''
+  return `Worker 告警：${bad.map(item => `${item.role || 'worker'} ${item.status}`).join('，')}`
+}
+
+function taskDiagnosticsLine(row) {
+  const parts = []
+  if (row?.last_status) parts.push(`最近状态：${runStateLabel(row.last_status)}`)
+  const scheduling = formatSeconds(row?.scheduling_delay_seconds)
+  const executor = formatSeconds(row?.executor_delay_seconds)
+  const runtime = formatSeconds(row?.runtime_duration_seconds)
+  if (scheduling) parts.push(`调度延迟 ${scheduling}`)
+  if (executor) parts.push(`执行等待 ${executor}`)
+  if (runtime) parts.push(`运行 ${runtime}`)
+  return parts.join(' · ')
+}
+
+function runDiagnosticsLine(run) {
+  if (!run) return ''
+  const parts = []
+  const scheduling = formatSeconds(run.scheduling_delay_seconds || run.terminal_result?.scheduling_delay_seconds)
+  const executor = formatSeconds(run.executor_delay_seconds || run.terminal_result?.executor_delay_seconds)
+  const runtime = formatSeconds(run.runtime_duration_seconds || run.terminal_result?.runtime_duration_seconds)
+  if (scheduling) parts.push(`调度延迟 ${scheduling}`)
+  if (executor) parts.push(`执行等待 ${executor}`)
+  if (runtime) parts.push(`运行 ${runtime}`)
+  return parts.join(' · ')
+}
+
+function skippedMissedLine(row) {
+  const summary = row?.skipped_missed_summary || {}
+  const parts = []
+  if (summary.missed) parts.push(`错过 ${summary.missed}`)
+  if (summary.coalesced) parts.push(`合并/跳过 ${summary.coalesced}`)
+  if (!parts.length && summary.skipped) parts.push(`跳过 ${summary.skipped}`)
+  return parts.length ? `调度记录：${parts.join('，')}` : ''
+}
+
+function terminalReason(run) {
+  const reason = String(run?.error_summary || run?.terminal_result?.error_summary || '').trim()
+  if (!reason) return ''
+  if (reason.includes('scheduled_task_execution_timeout')) return '本次执行超时，已失败并释放会话执行槽。'
+  if (reason.includes('scheduled_task_stale_worker')) return '上次执行 Worker 失联，已按 stale 失败处理。'
+  if (reason.includes('scheduled_task_overlap_coalesced')) return '本次触发与已有执行重叠，已跳过/合并。'
+  return ''
+}
+
 function locateRun(run) {
   if (run?.chat_message_id) emit('locate-message', run.chat_message_id)
 }
@@ -293,6 +355,12 @@ async function removeTick(t) {
   text-overflow: ellipsis;
 }
 .tick-next { font-size: 12px; color: #909399; margin-top: 4px; word-break: break-word; }
+.tick-health-warning {
+  font-size: 12px;
+  color: #b88230;
+  margin-top: 4px;
+  word-break: break-word;
+}
 .tick-result-preview {
   font-size: 12px;
   color: #606266;

@@ -26,6 +26,8 @@ stop_pid() {
 stop_pid api
 stop_pid web
 stop_pid scheduled-tasks
+stop_pid scheduled-task-scheduler
+stop_pid scheduled-task-executor
 stop_pid scheduled-task-notifications
 stop_pid cloudflared
 stop_pid cloudflared-watch
@@ -46,6 +48,20 @@ if command -v pkill >/dev/null 2>&1; then
   pkill -f "cloudflared tunnel --url http://127.0.0.1:${API_PORT}" 2>/dev/null || true
   pkill -f "cloudflared tunnel.*run" 2>/dev/null || true
   pkill -f "scripts/cloudflared-watch.sh" 2>/dev/null || true
+fi
+
+# 兜底：pid 文件之外、仍在本仓库轮询的定时任务进程（旧进程不会热加载代码）
+if command -v pgrep >/dev/null 2>&1; then
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ {print substr($0,2); exit}')"
+    if [ "$cwd" = "$ROOT/apps/api" ]; then
+      kill "$pid" 2>/dev/null || true
+      sleep 0.2
+      kill -9 "$pid" 2>/dev/null || true
+      printf '[gap] 已停止残留定时任务进程 (pid %s)\n' "$pid"
+    fi
+  done < <(pgrep -f 'app.workers.scheduled_task' || true)
 fi
 
 printf '[gap] 本地服务已停止\n'

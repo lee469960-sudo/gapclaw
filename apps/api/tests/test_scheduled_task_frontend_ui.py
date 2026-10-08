@@ -16,6 +16,8 @@ def test_agent_chat_renders_scheduled_terminal_result_cards_and_missed_poll_reco
     assert preview > steps_open
     assert "scheduledStepDetail(step) && isToolDetailOpen(toolStepKey('scheduled', index))" in source
     assert "scheduledNotificationLabel(scheduledProgress)" in source
+    assert "scheduledDiagnosticsLine(scheduledProgress)" in source
+    assert "scheduledWorkerWarning(scheduledProgress)" in source
     assert "locateMessage(scheduledProgress.chat_message_id)" in source
     assert "return progress?.state === 'running'" in source
     assert "scheduledProgress.value = null" in source
@@ -28,6 +30,10 @@ def test_session_tick_dialog_shows_result_preview_notification_state_and_locate_
 
     assert "runPreview(t.latestRun)" in source
     assert "runNotificationLabel(t.latestRun)" in source
+    assert "workerHealthWarning(t)" in source
+    assert "taskDiagnosticsLine(t)" in source
+    assert "skippedMissedLine(t)" in source
+    assert "terminalReason(t.latestRun)" in source
     assert "locateRun(t.latestRun)" in source
     assert "'locate-message'" in source
     assert "content_preview" in source and "terminal_result" in source

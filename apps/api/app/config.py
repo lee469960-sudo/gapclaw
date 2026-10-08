@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     scheduled_tasks_shadow_mode: bool = False
     scheduled_tasks_single_executor: bool = True
     scheduled_tasks_poll_seconds: int = 15
+    scheduled_tasks_worker_role: str = "combined"
+    scheduled_task_execution_timeout_seconds: float = 600.0
     scheduled_task_notifications_worker_enabled: bool = False
 
     @property

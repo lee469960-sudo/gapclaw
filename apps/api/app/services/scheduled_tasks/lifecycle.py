@@ -17,8 +17,12 @@ RETRY_BASE_DELAY = timedelta(minutes=1)
 
 def is_transient_error(error: Exception | str) -> bool:
     if isinstance(error, (ConnectionError, TimeoutError)):
+        if "scheduled_task_execution_timeout" in str(error):
+            return False
         return True
     text = str(error).lower()
+    if "scheduled_task_execution_timeout" in text:
+        return False
     return any(token in text for token in ("timeout", "temporar", "connection", "unavailable", "rate limit", "429", "503"))
 
 

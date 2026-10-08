@@ -12,9 +12,10 @@ import threading
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.services.scheduled_tasks.scheduler import claim_next_run, create_due_runs, fail_expired_pending_runs
+from app.services.scheduled_tasks.scheduler import claim_next_run, run_scheduler_pass
 from app.services.scheduled_tasks.runtime import execute_and_finalize_claimed_run
 from app.services.scheduled_tasks.lifecycle import finish_run_failure
+from app.services.scheduled_tasks.health import heartbeat_worker
 from app.startup import init_db
 
 logger = logging.getLogger("app.workers.scheduled_tasks")
@@ -31,28 +32,55 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGINT, _request_shutdown)
 
 
-def run_once() -> dict[str, int]:
+def run_scheduler_once() -> dict[str, int]:
     settings = get_settings()
     if not settings.scheduled_tasks_worker_enabled:
         logger.info("scheduled_task_worker_disabled")
         return {"created": 0, "expired": 0}
     db = SessionLocal()
     try:
+        result = run_scheduler_pass(
+            db,
+            worker_id=socket.gethostname(),
+            shadow_mode=settings.scheduled_tasks_shadow_mode,
+            poll_seconds=settings.scheduled_tasks_poll_seconds,
+        )
         if settings.scheduled_tasks_shadow_mode:
             logger.info("scheduled_task_worker_shadow_mode")
-            return {"created": 0, "expired": 0}
-        created = create_due_runs(db)
-        expired = fail_expired_pending_runs(db)
-        claimed = claim_next_run(db, socket.gethostname())
+        logger.info("scheduled_task_scheduler_scan created=%d expired=%d", result["created"], result["expired"])
+        return result
+    finally:
+        db.close()
+
+
+def run_executor_once() -> dict[str, int]:
+    settings = get_settings()
+    if not settings.scheduled_tasks_worker_enabled or settings.scheduled_tasks_shadow_mode:
+        logger.info("scheduled_task_executor_disabled")
+        return {"claimed": 0}
+    db = SessionLocal()
+    try:
+        worker_id = socket.gethostname()
+        heartbeat_worker(db, role="executor", worker_id=worker_id, enabled=True, config_summary={
+            "single_executor": settings.scheduled_tasks_single_executor,
+            "poll_seconds": settings.scheduled_tasks_poll_seconds,
+        })
+        claimed = claim_next_run(db, worker_id)
         if claimed:
             try:
                 execute_and_finalize_claimed_run(db, claimed)
             except Exception as exc:
                 finish_run_failure(db, claimed, exc)
-        logger.info("scheduled_task_worker_scan created=%d expired=%d", len(created), expired)
-        return {"created": len(created), "expired": expired}
+            return {"claimed": 1}
+        return {"claimed": 0}
     finally:
         db.close()
+
+
+def run_once() -> dict[str, int]:
+    scheduled = run_scheduler_once()
+    run_executor_once()
+    return scheduled
 
 
 def main() -> None:
@@ -65,9 +93,25 @@ def main() -> None:
         init_db(db)
     finally:
         db.close()
+    role = settings.scheduled_tasks_worker_role
+    if role == "scheduler":
+        _run_loop(run_scheduler_once, settings.scheduled_tasks_poll_seconds)
+        return
+    if role == "executor":
+        _run_loop(run_executor_once, settings.scheduled_tasks_poll_seconds)
+        return
+    if role != "combined":
+        raise RuntimeError("scheduled_task_worker_role_invalid")
+    executor = threading.Thread(target=_run_loop, args=(run_executor_once, settings.scheduled_tasks_poll_seconds), daemon=True)
+    executor.start()
+    _run_loop(run_scheduler_once, settings.scheduled_tasks_poll_seconds)
+    executor.join(timeout=5)
+
+
+def _run_loop(callback, poll_seconds: int) -> None:
     while not _SHUTDOWN.is_set():
-        run_once()
-        _SHUTDOWN.wait(max(1, settings.scheduled_tasks_poll_seconds))
+        callback()
+        _SHUTDOWN.wait(max(1, poll_seconds))
 
 
 if __name__ == "__main__":

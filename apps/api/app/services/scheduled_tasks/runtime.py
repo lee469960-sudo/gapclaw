@@ -7,6 +7,7 @@ import json
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models import Agent, ChatMessage, ScheduledTask, ScheduledTaskRun, ScheduledTaskProgress
 from app.services.agent_runtime import run_agent
 from app.services.agent_runtime.hub import hub, stop_chat
@@ -22,6 +23,10 @@ class ScheduledTaskRuntimeError(ValueError):
 
 
 class ScheduledTaskCancelled(Exception):
+    pass
+
+
+class ScheduledTaskTimeout(TimeoutError):
     pass
 
 
@@ -92,7 +97,15 @@ def execute_claimed_run(db: Session, run: ScheduledTaskRun) -> str:
 
         cancellation_watcher = asyncio.create_task(stop_when_requested())
         try:
-            result = await run_agent(db, agent, task.session_id, task.message, message_meta=meta)
+            timeout_seconds = max(1e-3, float(get_settings().scheduled_task_execution_timeout_seconds or 600.0))
+            try:
+                result = await asyncio.wait_for(
+                    run_agent(db, agent, task.session_id, task.message, message_meta=meta),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                stop_chat(task.agent_id, task.session_id, block_auto_start=False)
+                raise ScheduledTaskTimeout("scheduled_task_execution_timeout") from exc
             if _cancel_requested(db, run):
                 raise ScheduledTaskCancelled()
             return result

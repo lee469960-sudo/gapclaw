@@ -96,7 +96,7 @@ services:
     networks:
       - gap
 
-  scheduled-task-worker:
+  scheduled-task-scheduler:
     image: ${IMAGE_API}:${IMAGE_TAG}
     command: ["python", "-m", "app.workers.scheduled_tasks"]
     profiles: ["scheduled-tasks"]
@@ -105,6 +105,27 @@ services:
       SCHEDULED_TASKS_WORKER_ENABLED: ${SCHEDULED_TASKS_WORKER_ENABLED:-false}
       SCHEDULED_TASKS_SHADOW_MODE: ${SCHEDULED_TASKS_SHADOW_MODE:-false}
       SCHEDULED_TASKS_SINGLE_EXECUTOR: "true"
+      SCHEDULED_TASKS_WORKER_ROLE: scheduler
+      SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS: ${SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS:-600}
+      SCHEDULED_TASKS_POLL_SECONDS: ${SCHEDULED_TASKS_POLL_SECONDS:-15}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - gap
+
+  scheduled-task-executor:
+    image: ${IMAGE_API}:${IMAGE_TAG}
+    command: ["python", "-m", "app.workers.scheduled_tasks"]
+    profiles: ["scheduled-tasks"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gap}:${POSTGRES_PASSWORD:-gap}@db:5432/${POSTGRES_DB:-gap}
+      SCHEDULED_TASKS_WORKER_ENABLED: ${SCHEDULED_TASKS_WORKER_ENABLED:-false}
+      SCHEDULED_TASKS_SHADOW_MODE: "false"
+      SCHEDULED_TASKS_SINGLE_EXECUTOR: "true"
+      SCHEDULED_TASKS_WORKER_ROLE: executor
+      SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS: ${SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS:-600}
       SCHEDULED_TASKS_POLL_SECONDS: ${SCHEDULED_TASKS_POLL_SECONDS:-15}
     depends_on:
       db:

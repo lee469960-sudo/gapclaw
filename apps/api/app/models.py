@@ -858,6 +858,28 @@ class ScheduledTaskNotificationDelivery(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
+class ScheduledTaskWorkerHeartbeat(Base):
+    """Durable heartbeat for scheduled-task Worker roles."""
+
+    __tablename__ = "scheduled_task_worker_heartbeats"
+    __table_args__ = (
+        UniqueConstraint("role", "worker_id", name="uq_scheduled_task_worker_role_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    role: Mapped[str] = mapped_column(String(32), index=True)
+    worker_id: Mapped[str] = mapped_column(String(64), index=True)
+    hostname: Mapped[str] = mapped_column(String(128), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="healthy", index=True)
+    config_summary: Mapped[str] = mapped_column(Text, default="{}")
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow,
+    )
+
+
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
 

@@ -5,7 +5,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Agent, ChatMessage, ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun
+from app.config import Settings
+from app.models import Agent, ChatMessage, ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun, ScheduledTaskSessionSlot
 from app.services.scheduled_tasks.runtime import (
     SCHEDULED_NO_PROGRESS_REPLY,
     ScheduledTaskRuntimeError,
@@ -14,6 +15,7 @@ from app.services.scheduled_tasks.runtime import (
     execute_claimed_run,
 )
 from app.services.scheduled_tasks.lifecycle import finish_run_success
+from app.workers import scheduled_tasks
 
 
 def test_claimed_run_uses_formal_session_runtime_with_source_metadata(monkeypatch):
@@ -151,6 +153,55 @@ def test_success_transition_checks_a_late_persisted_cancel_request():
         assert db.query(ScheduledTaskNotificationDelivery).count() == 0
     finally:
         db.close()
+
+
+def test_worker_timeout_finalizes_failed_and_releases_session_slot(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    db = factory()
+    try:
+        now = datetime.now(timezone.utc)
+        db.add_all((
+            Agent(id="agent", name="Agent"),
+            ScheduledTask(id="task", agent_id="agent", session_id="session", owner_username="owner", message="slow task"),
+            ScheduledTaskRun(id="run", task_id="task", occurrence_key="one", scheduled_for=now, available_at=now),
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    settings = Settings(
+        scheduled_tasks_worker_enabled=True,
+        scheduled_tasks_shadow_mode=False,
+        scheduled_task_execution_timeout_seconds=0.01,
+    )
+    stopped = []
+
+    async def slow_run_agent(*_args, **_kwargs):
+        await __import__("asyncio").sleep(0.1)
+        return "late result"
+
+    monkeypatch.setattr(scheduled_tasks, "get_settings", lambda: settings)
+    monkeypatch.setattr(scheduled_tasks, "SessionLocal", factory)
+    monkeypatch.setattr("app.services.scheduled_tasks.runtime.get_settings", lambda: settings)
+    monkeypatch.setattr("app.services.scheduled_tasks.runtime.run_agent", slow_run_agent)
+    monkeypatch.setattr("app.services.scheduled_tasks.runtime.stop_chat", lambda agent_id, session_id, **_kwargs: stopped.append((agent_id, session_id)))
+
+    assert scheduled_tasks.run_executor_once() == {"claimed": 1}
+
+    verify = factory()
+    try:
+        run = verify.get(ScheduledTaskRun, "run")
+        slot = verify.get(ScheduledTaskSessionSlot, "session")
+        assert run.state == "failed"
+        assert run.error_summary == "scheduled_task_execution_timeout"
+        assert run.attempt == 1
+        assert slot.active_run_id == ""
+        assert verify.query(ScheduledTaskNotificationDelivery).count() == 0
+        assert stopped == [("agent", "session")]
+    finally:
+        verify.close()
 
 
 def test_forced_stop_reply_is_bound_but_not_marked_successful_or_notified(monkeypatch):

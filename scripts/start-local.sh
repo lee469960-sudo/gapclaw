@@ -57,15 +57,27 @@ start_scheduled_task_workers() {
     return
   fi
   cd "$ROOT/apps/api"
-  log "启动定时任务执行与通知 Workers ..."
+  log "启动定时任务调度、执行与通知 Workers ..."
   nohup env \
     SCHEDULED_TASKS_WORKER_ENABLED=true \
     SCHEDULED_TASKS_SHADOW_MODE=false \
     SCHEDULED_TASKS_SINGLE_EXECUTOR=true \
+    SCHEDULED_TASKS_WORKER_ROLE=scheduler \
+    SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS="${SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS:-600}" \
     SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED=true \
     "$ROOT/apps/api/.venv/bin/python" -m app.workers.scheduled_tasks \
-    >"$LOG_DIR/scheduled-tasks.log" 2>&1 &
-  echo $! >"$PID_DIR/scheduled-tasks.pid"
+    >"$LOG_DIR/scheduled-task-scheduler.log" 2>&1 &
+  echo $! >"$PID_DIR/scheduled-task-scheduler.pid"
+  nohup env \
+    SCHEDULED_TASKS_WORKER_ENABLED=true \
+    SCHEDULED_TASKS_SHADOW_MODE=false \
+    SCHEDULED_TASKS_SINGLE_EXECUTOR=true \
+    SCHEDULED_TASKS_WORKER_ROLE=executor \
+    SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS="${SCHEDULED_TASK_EXECUTION_TIMEOUT_SECONDS:-600}" \
+    SCHEDULED_TASK_NOTIFICATIONS_WORKER_ENABLED=true \
+    "$ROOT/apps/api/.venv/bin/python" -m app.workers.scheduled_tasks \
+    >"$LOG_DIR/scheduled-task-executor.log" 2>&1 &
+  echo $! >"$PID_DIR/scheduled-task-executor.pid"
   nohup env \
     SCHEDULED_TASKS_WORKER_ENABLED=true \
     SCHEDULED_TASKS_SHADOW_MODE=false \
@@ -97,7 +109,7 @@ need_cmd npm
 need_cmd curl
 
 # 若已在运行，先停止（含 cloudflared）
-if [ -f "$PID_DIR/api.pid" ] || [ -f "$PID_DIR/web.pid" ] || [ -f "$PID_DIR/cloudflared.pid" ] || [ -f "$PID_DIR/scheduled-tasks.pid" ] || [ -f "$PID_DIR/scheduled-task-notifications.pid" ]; then
+if [ -f "$PID_DIR/api.pid" ] || [ -f "$PID_DIR/web.pid" ] || [ -f "$PID_DIR/cloudflared.pid" ] || [ -f "$PID_DIR/scheduled-tasks.pid" ] || [ -f "$PID_DIR/scheduled-task-scheduler.pid" ] || [ -f "$PID_DIR/scheduled-task-executor.pid" ] || [ -f "$PID_DIR/scheduled-task-notifications.pid" ]; then
   log "检测到旧进程，正在停止..."
   "$ROOT/scripts/stop-local.sh" || true
 fi

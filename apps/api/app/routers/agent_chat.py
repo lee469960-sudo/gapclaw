@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
+from app.config import get_settings
 from app.deps import get_session_user
 from app.models import (
     User, Agent, CodeProject, CodeProjectManifest, CodeAgentRun, CodeArtifact,
@@ -854,6 +855,8 @@ async def chat_post(
                 rows = db.query(ScheduledTask).filter_by(agent_id=body.agent_id, session_id=body.session_id).filter(ScheduledTask.deleted_at == None).all()
                 task_ids = [row.id for row in rows]
                 counts = {}
+                latest_runs = {}
+                run_groups = {}
                 if task_ids:
                     counts = dict(db.query(
                         ScheduledTaskRun.task_id, func.count(ScheduledTaskRun.id),
@@ -861,8 +864,24 @@ async def chat_post(
                         ScheduledTaskRun.task_id.in_(task_ids),
                         ScheduledTaskRun.state.in_(("running", "succeeded", "failed")),
                     ).group_by(ScheduledTaskRun.task_id).all())
+                    all_runs = db.query(ScheduledTaskRun).filter(ScheduledTaskRun.task_id.in_(task_ids)).order_by(ScheduledTaskRun.queued_at.desc()).all()
+                    for item in all_runs:
+                        run_groups.setdefault(item.task_id, []).append(item)
+                        latest_runs.setdefault(item.task_id, item)
+                from app.services.scheduled_tasks.health import worker_health
+                from app.services.scheduled_tasks.results import run_diagnostics, skipped_missed_summary
+                settings = get_settings()
+                health = worker_health(db, enabled_roles={
+                    "scheduler": settings.scheduled_tasks_worker_enabled,
+                    "executor": settings.scheduled_tasks_worker_enabled and not settings.scheduled_tasks_shadow_mode,
+                    "notification": settings.scheduled_task_notifications_worker_enabled,
+                })
                 return ok([{
                     **payload(row),
+                    "next_run": row.next_run_at.isoformat() if row.next_run_at else "",
+                    **run_diagnostics(latest_runs.get(row.id)),
+                    "skipped_missed_summary": skipped_missed_summary(run_groups.get(row.id, [])),
+                    "worker_health": health,
                     # A run is counted once it has started; retry attempt is a
                     # separate per-run failure counter and must not drive this UI.
                     "execution_count": counts.get(row.id, 0),
@@ -920,8 +939,20 @@ async def chat_post(
             return ok(None)
         progress = db.get(ScheduledTaskProgress, run.id)
         safe = _steps_tail_for_message(json.dumps({"steps": json.loads(progress.steps or "[]") if progress else []}), limit=200)
+        from app.services.scheduled_tasks.health import worker_health
+        from app.services.scheduled_tasks.results import run_diagnostics
+        settings = get_settings()
+        health = worker_health(db, enabled_roles={
+            "scheduler": settings.scheduled_tasks_worker_enabled,
+            "executor": settings.scheduled_tasks_worker_enabled and not settings.scheduled_tasks_shadow_mode,
+            "notification": settings.scheduled_task_notifications_worker_enabled,
+        })
         terminal_result = serialize_scheduled_run_result(db, run)
         return ok({"id": run.id, "task_id": run.task_id, "state": run.state, "steps": safe["steps"],
+                   "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else "",
+                   "available_at": run.available_at.isoformat() if run.available_at else "",
+                   **run_diagnostics(run),
+                   "worker_health": health,
                    "cancel_requested": run.cancel_requested_at is not None,
                    "error_summary": (run.error_summary or "")[:500], "chat_message_id": run.chat_message_id,
                    "content_preview": terminal_result["content_preview"],
@@ -931,7 +962,8 @@ async def chat_post(
     if act == "list_scheduled_task_runs":
         from app.models import ScheduledTask, ScheduledTaskNotificationDelivery, ScheduledTaskRun
         from app.services.scheduled_tasks.authorization import ScheduledTaskAuthorizationError, require_session_task_manager
-        from app.services.scheduled_tasks.results import serialize_scheduled_run_result
+        from app.services.scheduled_tasks.health import worker_health
+        from app.services.scheduled_tasks.results import run_diagnostics, serialize_scheduled_run_result
         task = db.get(ScheduledTask, body.task_id)
         try:
             require_session_task_manager(db, user, body.agent_id or (task.agent_id if task else ""), body.session_id or (task.session_id if task else ""), task)
@@ -940,13 +972,22 @@ async def chat_post(
         if not task: return fail("scheduled_task_not_found")
         limit = min(max(int(body.limit or 20), 1), 100)
         runs = db.query(ScheduledTaskRun).filter_by(task_id=task.id).order_by(ScheduledTaskRun.queued_at.desc()).limit(limit).all()
+        settings = get_settings()
+        health = worker_health(db, enabled_roles={
+            "scheduler": settings.scheduled_tasks_worker_enabled,
+            "executor": settings.scheduled_tasks_worker_enabled and not settings.scheduled_tasks_shadow_mode,
+            "notification": settings.scheduled_task_notifications_worker_enabled,
+        })
         rows = []
         for run in runs:
             terminal_result = serialize_scheduled_run_result(db, run)
             rows.append({
                 "id": run.id, "state": run.state, "source": run.source, "attempt": run.attempt,
-                "scheduled_for": run.scheduled_for.isoformat(), "started_at": run.started_at.isoformat() if run.started_at else "",
+                "scheduled_for": run.scheduled_for.isoformat(), "available_at": run.available_at.isoformat() if run.available_at else "",
+                "started_at": run.started_at.isoformat() if run.started_at else "",
                 "finished_at": run.finished_at.isoformat() if run.finished_at else "", "error_summary": (run.error_summary or "")[:500],
+                **run_diagnostics(run),
+                "worker_health": health,
                 "cancel_requested": run.cancel_requested_at is not None,
                 "chat_message_id": run.chat_message_id,
                 "content_preview": terminal_result["content_preview"],
